@@ -38,6 +38,7 @@ const term = new Terminal({
 const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 term.open(document.getElementById('terminal-container') as HTMLElement);
+fitAddon.fit(); // size before WebSocket connects so scrollback replays at correct dimensions
 term.focus();
 
 // Resolve or create a session ID persisted in the URL hash.
