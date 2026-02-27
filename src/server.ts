@@ -1,5 +1,6 @@
 import express from 'express';
 import http from 'http';
+import { parseArgs } from 'util';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
@@ -207,27 +208,37 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   });
 });
 
-const arg = process.argv[2];
+const { values } = parseArgs({
+  options: {
+    host: { type: 'string', short: 'H', default: '127.0.0.1' },
+    port: { type: 'string', short: 'p', default: '3000' },
+    help: { type: 'boolean', short: 'h', default: false },
+  },
+});
 
-if (arg === '--help' || arg === '-h' || arg === 'help') {
-  console.log('Usage: server [port]');
-  console.log('');
-  console.log('Arguments:');
-  console.log('  port  Port to listen on (default: 3000)');
+if (values.help) {
+  console.log('Usage: server [options]');
   console.log('');
   console.log('Options:');
-  console.log('  -h, --help  Show this help message');
+  console.log('  -H, --host <host>  Host to bind to (default: 127.0.0.1)');
+  console.log('  -p, --port <port>  Port to listen on (default: 3000)');
+  console.log('  -h, --help         Show this help message');
   process.exit(0);
 }
 
-const PORT = parseInt(arg ?? '3000', 10);
+const HOST = values.host!;
+const PORT = parseInt(values.port!, 10);
 
 if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
-  console.error(`Error: invalid port "${arg}"`);
-  console.error('Usage: server [port]');
+  console.error(`Error: invalid port "${values.port}"`);
   process.exit(1);
 }
 
-server.listen(PORT, () => {
-  console.log(`Server running at http://127.0.0.1:${PORT}`);
+if (HOST !== '127.0.0.1' && HOST !== 'localhost') {
+  console.warn('\x1b[31mWARNING: Server is bound to a public interface. Anyone who can reach this host');
+  console.warn('         will have full shell access to this machine. Use with caution.\x1b[0m');
+}
+
+server.listen(PORT, HOST, () => {
+  console.log(`Server running at http://${HOST}:${PORT}`);
 });
