@@ -75,6 +75,18 @@ document.querySelector('.dot.close')!.addEventListener('click', () => {
   sendAction({ type: 'close' });
 });
 
+document.querySelector('.dot.maximize')!.addEventListener('click', () => {
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else {
+    document.documentElement.requestFullscreen();
+  }
+});
+
+document.addEventListener('fullscreenchange', () => {
+  requestAnimationFrame(() => fitAddon.fit());
+});
+
 const ws = new WebSocket(`ws://${location.host}/terminal?session=${sessionId}`);
 ws.binaryType = 'arraybuffer';
 
