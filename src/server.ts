@@ -98,7 +98,27 @@ wss.on('connection', (ws: WebSocket) => {
   });
 });
 
-const PORT = 3000;
+const arg = process.argv[2];
+
+if (arg === '--help' || arg === '-h' || arg === 'help') {
+  console.log('Usage: server [port]');
+  console.log('');
+  console.log('Arguments:');
+  console.log('  port  Port to listen on (default: 3000)');
+  console.log('');
+  console.log('Options:');
+  console.log('  -h, --help  Show this help message');
+  process.exit(0);
+}
+
+const PORT = parseInt(arg ?? '3000', 10);
+
+if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
+  console.error(`Error: invalid port "${arg}"`);
+  console.error('Usage: server [port]');
+  process.exit(1);
+}
+
 server.listen(PORT, () => {
   console.log(`Server running at http://127.0.0.1:${PORT}`);
 });
