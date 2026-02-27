@@ -50,6 +50,9 @@ function getSessionId() {
     return id;
 }
 const sessionId = getSessionId();
+document.getElementById('new-session').addEventListener('click', () => {
+    window.open(location.origin, '_blank');
+});
 const ws = new WebSocket(`ws://${location.host}/terminal?session=${sessionId}`);
 ws.binaryType = 'arraybuffer';
 function sendResize(cols, rows) {

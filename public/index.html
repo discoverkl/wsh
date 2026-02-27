@@ -85,6 +85,30 @@
       pointer-events: none;
     }
 
+    #new-session {
+      margin-left: auto;
+      background: none;
+      border: none;
+      padding: 0;
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      color: #45475a;
+      font-size: 18px;
+      font-weight: 300;
+      line-height: 1;
+      cursor: pointer;
+      transition: color 0.15s, background 0.15s;
+      -webkit-app-region: no-drag;
+    }
+    #new-session:hover {
+      color: #cdd6f4;
+      background: rgba(205, 214, 244, 0.07);
+    }
+
     #terminal-container {
       flex: 1;
       overflow: hidden;
@@ -106,6 +130,7 @@
           <span class="dot maximize"></span>
         </div>
         <span id="window-title">bash</span>
+        <button id="new-session" title="New session">+</button>
       </div>
       <div id="terminal-container"></div>
     </div>
