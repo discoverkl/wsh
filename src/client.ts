@@ -39,7 +39,20 @@ term.loadAddon(fitAddon);
 term.open(document.getElementById('terminal-container') as HTMLElement);
 term.focus();
 
-const ws = new WebSocket(`ws://${location.host}/terminal`);
+// Resolve or create a session ID persisted in the URL hash.
+function getSessionId(): string {
+  const params = new URLSearchParams(location.hash.slice(1));
+  let id = params.get('session');
+  if (!id) {
+    id = crypto.randomUUID();
+    location.hash = `session=${id}`;
+  }
+  return id;
+}
+
+const sessionId = getSessionId();
+
+const ws = new WebSocket(`ws://${location.host}/terminal?session=${sessionId}`);
 ws.binaryType = 'arraybuffer';
 
 function sendResize(cols: number, rows: number): void {
@@ -61,8 +74,14 @@ ws.addEventListener('message', (event: MessageEvent) => {
   }
 });
 
-ws.addEventListener('close', () => {
-  term.write('\r\n[Session ended. Refresh to reconnect.]\r\n');
+ws.addEventListener('close', (event: CloseEvent) => {
+  if (event.code === 1000 && event.reason === 'PTY process exited') {
+    // PTY exited cleanly — clear session so next reload starts fresh.
+    location.hash = '';
+    term.write('\r\n[Process exited. Refresh to start a new session.]\r\n');
+  } else {
+    term.write('\r\n[Disconnected. Refresh to reconnect.]\r\n');
+  }
 });
 
 term.onData((data: string) => {
