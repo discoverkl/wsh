@@ -29,6 +29,7 @@ const term = new Terminal({
 const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 term.open(document.getElementById('terminal-container'));
+term.focus();
 const ws = new WebSocket(`ws://${location.host}/terminal`);
 ws.binaryType = 'arraybuffer';
 function sendResize(cols, rows) {
