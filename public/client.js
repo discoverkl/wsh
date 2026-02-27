@@ -34,11 +34,11 @@ fitAddon.fit(); // size before WebSocket connects so scrollback replays at corre
 term.focus();
 // Resolve or create a session ID persisted in the URL hash.
 function getSessionId() {
-    const params = new URLSearchParams(location.hash.slice(1));
-    let id = params.get('session');
+    let id = location.hash.slice(1);
     if (!id) {
-        id = crypto.randomUUID();
-        location.hash = `session=${id}`;
+        // 6 base36 chars = 36^6 ≈ 2.2B combinations, plenty for a single user.
+        id = (crypto.getRandomValues(new Uint32Array(1))[0] % 2176782336).toString(36).padStart(6, '0');
+        location.hash = id;
     }
     return id;
 }
