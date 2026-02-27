@@ -8,30 +8,37 @@ declare const FitAddon: { FitAddon: new () => FitAddonType };
 const term = new Terminal({
   cursorBlink: true,
   cursorStyle: 'block',
-  fontFamily: '"Monaco", "Cascadia Code", "Fira Code", monospace',
+  fontFamily: '"JetBrains Mono", "Fira Code", monospace',
   fontSize: 14,
   lineHeight: 1.2,
+  fontWeightBold: '700',
   scrollback: 10000,
   convertEol: false,
+  macOptionIsMeta: true,
+  rightClickSelectsWord: true,
+  smoothScrollDuration: 100,
   theme: {
-    background: '#000000',
-    foreground: '#d4d4d4',
-    black: '#1e1e1e',
-    red: '#f44747',
-    green: '#6a9955',
-    yellow: '#d7ba7d',
-    blue: '#569cd6',
-    magenta: '#c678dd',
-    cyan: '#4ec9b0',
-    white: '#d4d4d4',
-    brightBlack: '#808080',
-    brightRed: '#f44747',
-    brightGreen: '#b5cea8',
-    brightYellow: '#dcdcaa',
-    brightBlue: '#9cdcfe',
-    brightMagenta: '#c678dd',
-    brightCyan: '#4ec9b0',
-    brightWhite: '#ffffff',
+    // Catppuccin Mocha
+    background: '#1e1e2e',
+    foreground: '#cdd6f4',
+    cursor: '#f5e0dc',
+    selectionBackground: 'rgba(205,214,244,0.15)',
+    black: '#45475a',
+    red: '#f38ba8',
+    green: '#a6e3a1',
+    yellow: '#f9e2af',
+    blue: '#89b4fa',
+    magenta: '#f5c2e7',
+    cyan: '#89dceb',
+    white: '#bac2de',
+    brightBlack: '#585b70',
+    brightRed: '#f38ba8',
+    brightGreen: '#a6e3a1',
+    brightYellow: '#f9e2af',
+    brightBlue: '#89b4fa',
+    brightMagenta: '#cba6f7',
+    brightCyan: '#94e2d5',
+    brightWhite: '#cdd6f4',
   },
 });
 
@@ -72,7 +79,8 @@ ws.addEventListener('open', () => {
 
 ws.addEventListener('message', (event: MessageEvent) => {
   if (event.data instanceof ArrayBuffer) {
-    term.write(new Uint8Array(event.data));
+    const bytes = new Uint8Array(event.data);
+    term.write(bytes);
   }
 });
 
