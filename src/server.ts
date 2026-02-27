@@ -16,21 +16,48 @@ interface Session {
 
 const sessions = new Map<string, Session>();
 
+// --- Client → server action messages ---
+
 interface ResizeMessage {
   type: 'resize';
   cols: number;
   rows: number;
 }
 
-function isResizeMessage(obj: unknown): obj is ResizeMessage {
-  return (
-    typeof obj === 'object' &&
-    obj !== null &&
-    (obj as ResizeMessage).type === 'resize' &&
-    typeof (obj as ResizeMessage).cols === 'number' &&
-    typeof (obj as ResizeMessage).rows === 'number'
-  );
+interface CloseMessage {
+  type: 'close';
 }
+
+type ClientMessage = ResizeMessage | CloseMessage;
+
+function parseClientMessage(text: string): ClientMessage | null {
+  let obj: unknown;
+  try { obj = JSON.parse(text); } catch { return null; }
+  if (typeof obj !== 'object' || obj === null) return null;
+  const { type } = obj as Record<string, unknown>;
+  if (type === 'resize') {
+    const { cols, rows } = obj as Record<string, unknown>;
+    if (typeof cols === 'number' && typeof rows === 'number') {
+      return { type: 'resize', cols, rows };
+    }
+    return null;
+  }
+  if (type === 'close') return { type: 'close' };
+  return null;
+}
+
+type Handlers = { [K in ClientMessage['type']]: (session: Session, msg: Extract<ClientMessage, { type: K }>) => void };
+
+const handlers: Handlers = {
+  resize(session, msg) {
+    const cols = Math.max(1, Math.min(msg.cols, 65535));
+    const rows = Math.max(1, Math.min(msg.rows, 65535));
+    session.pty.resize(cols, rows);
+  },
+  close(session) {
+    session.pty.kill('SIGHUP');
+  },
+};
 
 function appendScrollback(session: Session, data: Buffer): void {
   session.scrollback = Buffer.concat([session.scrollback, data]);
@@ -163,18 +190,9 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     }
 
     const text = (data as Buffer).toString();
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      currentSession.pty.write(text);
-      return;
-    }
-
-    if (isResizeMessage(parsed)) {
-      const cols = Math.max(1, Math.min(parsed.cols, 65535));
-      const rows = Math.max(1, Math.min(parsed.rows, 65535));
-      currentSession.pty.resize(cols, rows);
+    const msg = parseClientMessage(text);
+    if (msg) {
+      (handlers[msg.type] as (session: Session, msg: ClientMessage) => void)(currentSession, msg);
     } else {
       currentSession.pty.write(text);
     }

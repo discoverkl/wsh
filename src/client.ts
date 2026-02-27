@@ -65,13 +65,21 @@ document.getElementById('new-session')!.addEventListener('click', () => {
   window.open(location.origin, '_blank');
 });
 
+document.querySelector('.dot.close')!.addEventListener('click', () => {
+  sendAction({ type: 'close' });
+});
+
 const ws = new WebSocket(`ws://${location.host}/terminal?session=${sessionId}`);
 ws.binaryType = 'arraybuffer';
 
-function sendResize(cols: number, rows: number): void {
+function sendAction(msg: Record<string, unknown>): void {
   if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+    ws.send(JSON.stringify(msg));
   }
+}
+
+function sendResize(cols: number, rows: number): void {
+  sendAction({ type: 'resize', cols, rows });
 }
 
 ws.addEventListener('open', () => {
