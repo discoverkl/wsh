@@ -39,6 +39,11 @@ term.loadAddon(fitAddon);
 term.open(document.getElementById('terminal-container'));
 fitAddon.fit(); // size before WebSocket connects so scrollback replays at correct dimensions
 term.focus();
+term.onTitleChange((title) => {
+    const t = title || 'bash';
+    document.getElementById('window-title').textContent = t;
+    document.title = t;
+});
 // Resolve or create a session ID persisted in the URL hash.
 function getSessionId() {
     let id = location.hash.slice(1);

@@ -48,6 +48,12 @@ term.open(document.getElementById('terminal-container') as HTMLElement);
 fitAddon.fit(); // size before WebSocket connects so scrollback replays at correct dimensions
 term.focus();
 
+term.onTitleChange((title: string) => {
+  const t = title || 'bash';
+  document.getElementById('window-title')!.textContent = t;
+  document.title = t;
+});
+
 // Resolve or create a session ID persisted in the URL hash.
 function getSessionId(): string {
   let id = location.hash.slice(1);
