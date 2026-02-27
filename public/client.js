@@ -1,12 +1,13 @@
 const term = new Terminal({
     cursorBlink: true,
     cursorStyle: 'block',
-    fontFamily: '"Cascadia Code", "Fira Code", monospace',
+    fontFamily: '"Monaco", "Cascadia Code", "Fira Code", monospace',
     fontSize: 14,
+    lineHeight: 1.2,
     scrollback: 10000,
     convertEol: false,
     theme: {
-        background: '#1e1e1e',
+        background: '#000000',
         foreground: '#d4d4d4',
         black: '#1e1e1e',
         red: '#f44747',
