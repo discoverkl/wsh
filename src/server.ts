@@ -1,5 +1,6 @@
 import express from 'express';
 import http from 'http';
+import path from 'path';
 import { parseArgs } from 'util';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as pty from 'node-pty';
@@ -127,7 +128,7 @@ function scheduleCleanup(id: string, session: Session): void {
 }
 
 const app = express();
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
