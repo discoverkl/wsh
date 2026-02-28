@@ -48,6 +48,8 @@ jobs:
 
       - name: Build Go binary
         run: go build -ldflags "-X main.appVer=${{ github.ref_name }}" -o ${{ matrix.output }} .
+        env:
+          CGO_ENABLED: "0"
 
       - uses: actions/upload-artifact@v4
         with:
