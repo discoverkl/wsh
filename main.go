@@ -202,11 +202,11 @@ func ensureNode(cache string) (string, error) {
 		return "", err
 	}
 	if runtime.GOOS == "windows" {
-		if err := extractZip(tmp.Name(), filepath.Dir(nodeDir)); err != nil {
+		if err := extractZip(tmp.Name(), nodeDir); err != nil {
 			return "", fmt.Errorf("extract: %w", err)
 		}
 	} else {
-		if err := extractTarGz(tmp.Name(), filepath.Dir(nodeDir)); err != nil {
+		if err := extractTarGz(tmp.Name(), nodeDir); err != nil {
 			return "", fmt.Errorf("extract: %w", err)
 		}
 	}
