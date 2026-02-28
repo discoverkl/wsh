@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.output }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest    # arm64 (Apple Silicon)
+            output: wsh-darwin-arm64
+          - os: macos-13        # x64 (Intel)
+            output: wsh-darwin-x64
+          - os: ubuntu-latest   # x64
+            output: wsh-linux-x64
+          - os: ubuntu-24.04-arm  # arm64
+            output: wsh-linux-arm64
+          - os: windows-latest  # x64
+            output: wsh-windows-x64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Prune dev dependencies
+        run: npm prune --omit=dev
+
+      - name: Build Go binary
+        run: go build -ldflags "-X main.appVer=${{ github.ref_name }}" -o ${{ matrix.output }} .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: ${{ matrix.output }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*

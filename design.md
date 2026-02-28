@@ -243,3 +243,128 @@ npm run dev
 ## Known Risk: node-pty Native Build
 
 `node-pty` requires `node-gyp` and Xcode CLI tools on macOS. If `npm install` fails with gyp errors, run `xcode-select --install` first. This is the most likely setup hurdle.
+
+---
+
+## Distribution: Go Wrapper Binary
+
+### Goal
+
+Ship a single executable for macOS/Linux/Windows that non-developer users can download and run with no prerequisites — no Node.js, no npm, no build tools.
+
+### Approach
+
+A Go binary that:
+1. Downloads and caches the correct Node.js version on first run
+2. Extracts the embedded app files on first run (or when the app version changes)
+3. Execs the Node.js server
+
+Go is chosen because it compiles to a self-contained native binary with no runtime dependency, has excellent cross-compilation support, and `//go:embed` makes bundling static assets trivial.
+
+### Repository Layout
+
+The Go module lives at the repo root so `//go:embed` can reference `dist/`, `public/`, and `node_modules/` directly (embed paths cannot traverse `../`):
+
+```
+/
+├── main.go                  ← Go entrypoint
+├── go.mod
+├── go.sum
+├── package.json             ← Node.js project (unchanged)
+├── src/                     ← TypeScript source (unchanged)
+├── dist/                    ← embedded: compiled server JS
+├── public/                  ← embedded: frontend assets
+└── node_modules/            ← embedded: runtime deps including pty.node
+```
+
+### Embedded Files
+
+```go
+//go:embed dist public node_modules
+var appFiles embed.FS
+```
+
+Only the files needed at runtime are embedded. `node_modules/` includes `node-pty`'s prebuilt `.node` native addon, which is platform-specific — the Go binary built on macOS arm64 embeds the arm64 `pty.node`, the Linux x64 build embeds the x64 one, etc.
+
+### First-Run Sequence
+
+```
+1. Resolve cache dir: ~/.wsh/
+2. Check ~/.wsh/node/v{NODE_VERSION}/bin/node
+     → exists: skip to step 4
+     → missing: download Node.js tarball for current OS/arch from nodejs.org
+                verify SHA256 against nodejs.org/dist/vX/SHASUMS256.txt
+                extract to ~/.wsh/node/v{NODE_VERSION}/
+3. Check ~/.wsh/app/v{APP_VERSION}/.version matches APP_VERSION
+     → matches: skip to step 4
+     → mismatch/missing: extract embedded dist/, public/, node_modules/
+                         to ~/.wsh/app/v{APP_VERSION}/
+                         write .version file
+4. Exec: {node_bin} ~/.wsh/app/v{APP_VERSION}/dist/server.js [args...]
+```
+
+Subsequent runs skip steps 2 and 3 entirely — startup is near-instant.
+
+### Node.js Version
+
+Pin to a specific Node.js LTS patch version (e.g. `v20.19.0`) hardcoded in `main.go`. Download URL pattern:
+
+```
+https://nodejs.org/dist/v{VERSION}/node-v{VERSION}-{os}-{arch}.tar.gz   # macOS, Linux
+https://nodejs.org/dist/v{VERSION}/node-v{VERSION}-win-{arch}.zip        # Windows
+```
+
+OS/arch strings match Node.js conventions (`darwin`, `linux`, `win`; `x64`, `arm64`).
+
+### CLI Pass-through
+
+All flags are forwarded to the Node.js server unchanged:
+
+```
+xterm [--host <host>] [--port <port>] [--help]
+```
+
+### Build Process
+
+```bash
+# 1. Install Node deps (populates node_modules/ with platform-native pty.node)
+npm ci
+
+# 2. Compile TypeScript
+npm run build
+
+# 3. Build Go binary (embeds dist/, public/, node_modules/)
+go build -o wsh .
+```
+
+The Go build must run on the target platform so `node_modules/` contains the correct native binaries. Cross-compilation of the Go code is possible but `node_modules/` still needs to be populated natively.
+
+### CI Matrix (GitHub Actions)
+
+| Runner | GOARCH | Output |
+|---|---|---|
+| `macos-latest` (arm64) | `arm64` | `wsh-darwin-arm64` |
+| `macos-13` (x64) | `amd64` | `wsh-darwin-x64` |
+| `ubuntu-latest` | `amd64` | `wsh-linux-x64` |
+| `ubuntu-24.04-arm` | `arm64` | `wsh-linux-arm64` |
+| `windows-latest` | `amd64` | `wsh-windows-x64.exe` |
+
+Binaries are uploaded to GitHub Releases. Each release tag triggers the matrix build.
+
+### macOS / Windows Signing
+
+Unsigned binaries are blocked by macOS Gatekeeper and may be flagged by Windows Defender. Options:
+- **macOS**: Apple Developer account ($99/yr) + `codesign` + `notarytool` in CI
+- **Windows**: EV code signing certificate (~$300/yr) + `signtool` in CI
+- **Workaround (no signing)**: document `xattr -cr xterm` for macOS; users right-click → Open
+
+### Binary Size Estimate
+
+| Component | Size |
+|---|---|
+| Go runtime + wrapper code | ~5 MB |
+| `dist/` + `public/` | ~0.5 MB |
+| `node_modules/` (prod deps only) | ~8–12 MB |
+| **Total** | **~15–18 MB** |
+
+Node.js itself (~30 MB) is downloaded once and cached, not embedded.
