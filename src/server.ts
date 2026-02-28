@@ -1,3 +1,4 @@
+import { exec } from 'child_process';
 import express from 'express';
 import http from 'http';
 import path from 'path';
@@ -240,6 +241,22 @@ if (HOST !== '127.0.0.1' && HOST !== 'localhost') {
   console.warn('         will have full shell access to this machine. Use with caution.\x1b[0m');
 }
 
+function openBrowser(url: string): void {
+  let cmd: string;
+  switch (process.platform) {
+    case 'darwin': cmd = `open "${url}"`; break;
+    case 'win32':  cmd = `start "" "${url}"`; break;
+    default:       cmd = `xdg-open "${url}"`; break;
+  }
+  exec(cmd, (err) => {
+    if (err) console.error('Failed to open browser:', err.message);
+  });
+}
+
 server.listen(PORT, HOST, () => {
-  console.log(`Server running at http://${HOST}:${PORT}`);
+  const url = `http://${HOST}:${PORT}`;
+  console.log(`Server running at ${url}`);
+  if (HOST === '127.0.0.1' || HOST === 'localhost') {
+    openBrowser(url);
+  }
 });
