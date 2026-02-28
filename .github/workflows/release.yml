@@ -60,10 +60,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Patch install.sh with repo name
+        run: sed "s|__REPO__|${GITHUB_REPOSITORY}|g" install.sh > artifacts/install.sh
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
