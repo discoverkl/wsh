@@ -15,10 +15,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest    # arm64 (Apple Silicon)
+          - os: macos-latest    # arm64 (Apple Silicon); Intel users run via Rosetta 2
             output: wsh-darwin-arm64
-          - os: macos-13        # x64 (Intel)
-            output: wsh-darwin-x64
           - os: ubuntu-latest   # x64
             output: wsh-linux-x64
           - os: ubuntu-24.04-arm  # arm64
