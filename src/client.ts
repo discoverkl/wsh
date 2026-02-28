@@ -124,6 +124,16 @@ ws.addEventListener('close', (event: CloseEvent) => {
   }
 });
 
+term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+  if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    if (e.type === 'keydown' && ws.readyState === WebSocket.OPEN) {
+      ws.send('\x1b[13;2u');
+    }
+    return false;
+  }
+  return true;
+});
+
 term.onData((data: string) => {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(data);

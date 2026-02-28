@@ -104,6 +104,15 @@ ws.addEventListener('close', (event) => {
         term.write('\r\n[Disconnected. Refresh to reconnect.]\r\n');
     }
 });
+term.attachCustomKeyEventHandler((e) => {
+    if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.type === 'keydown' && ws.readyState === WebSocket.OPEN) {
+            ws.send('\x1b[13;2u');
+        }
+        return false;
+    }
+    return true;
+});
 term.onData((data) => {
     if (ws.readyState === WebSocket.OPEN) {
         ws.send(data);
