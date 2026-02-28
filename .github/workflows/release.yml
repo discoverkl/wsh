@@ -17,9 +17,9 @@ jobs:
         include:
           - os: macos-latest    # arm64 (Apple Silicon); Intel users run via Rosetta 2
             output: wsh-darwin-arm64
-          - os: ubuntu-latest   # x64
+          - os: ubuntu-latest   # x64 — built in Docker for glibc compatibility
             output: wsh-linux-x64
-          - os: ubuntu-24.04-arm  # arm64
+          - os: ubuntu-24.04-arm  # arm64 — built in Docker for glibc compatibility
             output: wsh-linux-arm64
           - os: windows-latest  # x64
             output: wsh-windows-x64.exe
@@ -29,27 +29,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # macOS / Windows: use host toolchain
       - uses: actions/setup-go@v5
+        if: runner.os != 'Linux'
         with:
           go-version: '1.22'
 
       - uses: actions/setup-node@v4
+        if: runner.os != 'Linux'
         with:
           node-version: '20'
 
-      - name: Install Node.js dependencies
-        run: npm ci
-
-      - name: Build TypeScript
-        run: npm run build
-
-      - name: Prune dev dependencies
-        run: npm prune --omit=dev
+      - name: Install dependencies and build TypeScript
+        if: runner.os != 'Linux'
+        run: npm ci && npm run build && npm prune --omit=dev
 
       - name: Build Go binary
+        if: runner.os != 'Linux'
         run: go build -ldflags "-X main.appVer=${{ github.ref_name }}" -o ${{ matrix.output }} .
         env:
           CGO_ENABLED: "0"
+
+      # Linux: build inside Debian Bullseye (glibc 2.31) for broad compatibility.
+      # pty.node is a native .so — compiling on an older glibc makes it run on more systems.
+      - name: Build Go binary (Linux via Docker)
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm -v "$PWD":/src -w /src \
+            -e APP_VER="${{ github.ref_name }}" \
+            golang:1.22-bullseye \
+            bash -c "
+              curl -fsSL https://deb.nodesource.com/setup_20.x | bash - &&
+              apt-get install -y --no-install-recommends nodejs python3 make g++ &&
+              npm ci && npm run build && npm prune --omit=dev &&
+              CGO_ENABLED=0 go build -ldflags \"-X main.appVer=\$APP_VER\" -o ${{ matrix.output }} .
+            "
 
       - uses: actions/upload-artifact@v4
         with:
