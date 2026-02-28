@@ -1,4 +1,5 @@
 import { exec } from 'child_process';
+import fs from 'fs';
 import express from 'express';
 import http from 'http';
 import path from 'path';
@@ -212,9 +213,10 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
 
 const { values } = parseArgs({
   options: {
-    host: { type: 'string', short: 'H', default: '127.0.0.1' },
-    port: { type: 'string', short: 'p', default: '3000' },
-    help: { type: 'boolean', short: 'h', default: false },
+    host:    { type: 'string',  short: 'H', default: '127.0.0.1' },
+    port:    { type: 'string',  short: 'p', default: '3000' },
+    open:    { type: 'boolean',             default: true },
+    help:    { type: 'boolean', short: 'h', default: false },
   },
 });
 
@@ -224,6 +226,7 @@ if (values.help) {
   console.log('Options:');
   console.log('  -H, --host <host>  Host to bind to (default: 127.0.0.1)');
   console.log('  -p, --port <port>  Port to listen on (default: 3000)');
+  console.log('      --no-open      Do not open browser on start');
   console.log('  -h, --help         Show this help message');
   process.exit(0);
 }
@@ -241,12 +244,25 @@ if (HOST !== '127.0.0.1' && HOST !== 'localhost') {
   console.warn('         will have full shell access to this machine. Use with caution.\x1b[0m');
 }
 
+function isWSL(): boolean {
+  try {
+    const version = fs.readFileSync('/proc/version', 'utf8');
+    return /microsoft|wsl/i.test(version);
+  } catch {
+    return false;
+  }
+}
+
 function openBrowser(url: string): void {
   let cmd: string;
-  switch (process.platform) {
-    case 'darwin': cmd = `open "${url}"`; break;
-    case 'win32':  cmd = `start "" "${url}"`; break;
-    default:       cmd = `xdg-open "${url}"`; break;
+  if (process.platform === 'darwin') {
+    cmd = `open "${url}"`;
+  } else if (process.platform === 'win32') {
+    cmd = `start "" "${url}"`;
+  } else if (isWSL()) {
+    cmd = `cmd.exe /c start "" "${url}"`;
+  } else {
+    cmd = `xdg-open "${url}"`;
   }
   exec(cmd, (err) => {
     if (err) console.error('Failed to open browser:', err.message);
@@ -256,7 +272,7 @@ function openBrowser(url: string): void {
 server.listen(PORT, HOST, () => {
   const url = `http://${HOST}:${PORT}`;
   console.log(`Server running at ${url}`);
-  if (HOST === '127.0.0.1' || HOST === 'localhost') {
+  if (values.open && (HOST === '127.0.0.1' || HOST === 'localhost')) {
     openBrowser(url);
   }
 });
