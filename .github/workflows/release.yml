@@ -62,7 +62,7 @@ jobs:
               curl -fsSL https://deb.nodesource.com/setup_20.x | bash - &&
               apt-get install -y --no-install-recommends nodejs python3 make g++ &&
               npm ci && npm run build && npm prune --omit=dev &&
-              CGO_ENABLED=0 go build -ldflags \"-X main.appVer=\$APP_VER\" -o ${{ matrix.output }} .
+              CGO_ENABLED=0 go build -buildvcs=false -ldflags \"-X main.appVer=\$APP_VER\" -o ${{ matrix.output }} .
             "
 
       - uses: actions/upload-artifact@v4
