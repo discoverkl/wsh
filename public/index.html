@@ -130,27 +130,117 @@
       box-shadow: 0 0 4px rgba(243,139,168,0.6);
     }
 
-    #new-session {
+    #actions {
       margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    #role-badge {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 3px;
+      margin-right: 2px;
+      pointer-events: none;
+      user-select: none;
+      transition: filter 0.15s;
+    }
+    #role-badge.writer {
+      color: #a6e3a1;
+      background: rgba(166, 227, 161, 0.12);
+    }
+    #role-badge.viewer {
+      color: #f9e2af;
+      background: rgba(249, 226, 175, 0.12);
+    }
+    #role-badge.switchable {
+      pointer-events: auto;
+      cursor: pointer;
+    }
+    #role-badge.switchable:hover {
+      filter: brightness(1.4);
+    }
+
+    #share-btn, #new-session {
       background: none;
       border: none;
       padding: 0;
-      width: 20px;
-      height: 20px;
+      width: 24px;
+      height: 24px;
       display: flex;
       align-items: center;
       justify-content: center;
       border-radius: 4px;
       color: #45475a;
-      font-size: 18px;
-      font-weight: 300;
-      line-height: 1;
       cursor: pointer;
       transition: color 0.15s, background 0.15s;
     }
-    #new-session:hover {
+    #share-btn:hover, #new-session:hover {
       color: #cdd6f4;
       background: rgba(205, 214, 244, 0.07);
+    }
+
+    #share-popover {
+      display: none;
+      position: fixed;
+      top: 46px;
+      right: 14px;
+      width: 400px;
+      background: #11111b;
+      border: 1px solid rgba(205, 214, 244, 0.1);
+      border-radius: 8px;
+      padding: 16px;
+      z-index: 100;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    #share-popover.visible { display: block; }
+    .share-title {
+      color: #cdd6f4;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 14px;
+    }
+    .share-row { margin-bottom: 10px; }
+    .share-row:last-of-type { margin-bottom: 0; }
+    .share-label { color: #a6adc8; font-size: 11px; margin-bottom: 5px; }
+    .share-label span { color: #6c7086; margin-left: 4px; }
+    .share-url-wrap { display: flex; gap: 6px; }
+    .share-url {
+      flex: 1;
+      min-width: 0;
+      background: #1e1e2e;
+      border: 1px solid rgba(205, 214, 244, 0.08);
+      border-radius: 4px;
+      color: #89b4fa;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      padding: 5px 8px;
+      outline: none;
+    }
+    .copy-btn {
+      flex-shrink: 0;
+      background: rgba(205, 214, 244, 0.07);
+      border: 1px solid rgba(205, 214, 244, 0.1);
+      border-radius: 4px;
+      color: #cdd6f4;
+      font-size: 11px;
+      padding: 4px 12px;
+      cursor: pointer;
+      transition: background 0.15s;
+      white-space: nowrap;
+    }
+    .copy-btn:hover { background: rgba(205, 214, 244, 0.13); }
+    #share-error {
+      color: #f38ba8;
+      font-size: 11px;
+      margin-top: 10px;
     }
 
     #terminal-container {
@@ -196,14 +286,42 @@
           <div id="conn-status" title="Connecting…"></div>
           <span id="window-title">bash</span>
         </div>
-        <button id="new-session" title="New Session">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <line x1="7" y1="2" x2="7" y2="12"/><line x1="2" y1="7" x2="12" y2="7"/>
-          </svg>
-        </button>
+        <div id="actions">
+          <span id="role-badge" hidden></span>
+          <button id="share-btn" title="Share Session">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="2.5" r="1.5"/><circle cx="11" cy="11.5" r="1.5"/><circle cx="3" cy="7" r="1.5"/>
+              <line x1="4.4" y1="6.3" x2="9.6" y2="3.2"/><line x1="4.4" y1="7.7" x2="9.6" y2="10.8"/>
+            </svg>
+          </button>
+          <button id="new-session" title="New Session">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <line x1="7" y1="2" x2="7" y2="12"/><line x1="2" y1="7" x2="12" y2="7"/>
+            </svg>
+          </button>
+        </div>
       </div>
       <div id="terminal-container"></div>
     </div>
+  </div>
+
+  <div id="share-popover">
+    <div class="share-title">Share Session</div>
+    <div class="share-row">
+      <div class="share-label">Viewer <span>(read-only)</span></div>
+      <div class="share-url-wrap">
+        <input class="share-url" id="viewer-url" readonly />
+        <button class="copy-btn" data-for="viewer-url">Copy</button>
+      </div>
+    </div>
+    <div class="share-row">
+      <div class="share-label">Writer <span>(can type)</span></div>
+      <div class="share-url-wrap">
+        <input class="share-url" id="writer-url" readonly />
+        <button class="copy-btn" data-for="writer-url">Copy</button>
+      </div>
+    </div>
+    <div id="share-error" hidden></div>
   </div>
 
   <script>

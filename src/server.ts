@@ -16,10 +16,13 @@ import type { IPty } from 'node-pty';
 const MAX_SCROLLBACK = 5 * 1024 * 1024; // 5 MB
 const SESSION_TTL = 10 * 60 * 1000;     // 10 minutes
 
+type Role = 'owner' | 'writer' | 'viewer';
+
 interface Session {
   pty: IPty;
   scrollback: Buffer;
-  ws: WebSocket | null;
+  writer: WebSocket | null;
+  peers: Map<WebSocket, Role>; // every connected WS → its original role
   cleanupTimer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -94,7 +97,8 @@ function spawnSession(id: string): Session {
   const session: Session = {
     pty: ptyProcess,
     scrollback: Buffer.alloc(0),
-    ws: null,
+    writer: null,
+    peers: new Map(),
     cleanupTimer: null,
   };
 
@@ -103,19 +107,15 @@ function spawnSession(id: string): Session {
   ptyProcess.onData((data: string) => {
     const buf = Buffer.from(data, 'utf8');
     appendScrollback(session, buf);
-    if (session.ws && session.ws.readyState === WebSocket.OPEN) {
-      session.ws.send(buf, { binary: true });
-    }
+    const send = (ws: WebSocket) => { if (ws.readyState === WebSocket.OPEN) ws.send(buf, { binary: true }); };
+    for (const ws of session.peers.keys()) send(ws);
   });
 
   ptyProcess.onExit(() => {
     console.log(`[session ${id}] PTY exited`);
-    if (session.ws && session.ws.readyState === WebSocket.OPEN) {
-      session.ws.close(1000, 'PTY process exited');
-    }
-    if (session.cleanupTimer !== null) {
-      clearTimeout(session.cleanupTimer);
-    }
+    const closeWs = (ws: WebSocket) => { if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'PTY process exited'); };
+    for (const ws of session.peers.keys()) closeWs(ws);
+    if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
     sessions.delete(id);
   });
 
@@ -186,30 +186,51 @@ const primaryLanIP = CUSTOM_URL ? (getLanIPs()[0] ?? null) : (getLanIPs()[0] ?? 
 
 // --- TLS (only when a network interface is available) ---
 
-function loadOrGenerateCert(): { key: string; cert: string } {
+function loadOrGenerateCert(): { key: string; cert: string; writerSalt: Buffer } {
   const dir = path.join(os.homedir(), '.wsh', 'tls');
-  const keyFile = path.join(dir, 'key.pem');
+  fs.mkdirSync(dir, { recursive: true });
+
+  const keyFile  = path.join(dir, 'key.pem');
   const certFile = path.join(dir, 'cert.pem');
+  let key: string, cert: string;
   try {
-    return { key: fs.readFileSync(keyFile, 'utf8'), cert: fs.readFileSync(certFile, 'utf8') };
+    key  = fs.readFileSync(keyFile,  'utf8');
+    cert = fs.readFileSync(certFile, 'utf8');
   } catch {
     const pems = selfsigned.generate([{ name: 'commonName', value: 'wsh' }], {
       days: 3650,
       keySize: 2048,
       algorithm: 'sha256',
     });
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(keyFile, pems.private, { mode: 0o600 });
-    fs.writeFileSync(certFile, pems.cert, { mode: 0o644 });
-    return { key: pems.private, cert: pems.cert };
+    fs.writeFileSync(keyFile,  pems.private, { mode: 0o600 });
+    fs.writeFileSync(certFile, pems.cert,    { mode: 0o644 });
+    key  = pems.private;
+    cert = pems.cert;
   }
+
+  const saltFile = path.join(dir, 'writer-salt.txt');
+  let writerSalt: Buffer;
+  try {
+    writerSalt = Buffer.from(fs.readFileSync(saltFile, 'utf8').trim(), 'hex');
+  } catch {
+    writerSalt = crypto.randomBytes(32);
+    fs.writeFileSync(saltFile, writerSalt.toString('hex'), { mode: 0o600 });
+  }
+
+  return { key, cert, writerSalt };
 }
 
 const tls = primaryLanIP ? loadOrGenerateCert() : null;
 
 // --- Token auth ---
 
-const token = tls ? crypto.createHash('sha256').update(tls.key).digest('hex').slice(0, 32) : null;
+const token = tls ? crypto.createHash('sha256').update(tls.key).digest('hex').slice(0, 16) : null;
+
+function writerToken(sessionId: string): string {
+  return crypto.createHash('sha256')
+    .update(tls!.key).update(tls!.writerSalt).update(sessionId)
+    .digest('hex').slice(0, 16);
+}
 
 function parseCookies(header: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -223,27 +244,58 @@ function parseCookies(header: string): Record<string, string> {
 
 function makeTokenMiddleware(tok: string): express.RequestHandler {
   return (req, res, next) => {
-    if (isLoopback(req.socket.remoteAddress)) return next();
+    const url = new URL(req.url ?? '/', `https://${req.headers.host}`);
+    // If a ?session= param is on the root page, redirect to the hash form so
+    // getSessionId() on the client picks up the correct ID.  This must happen
+    // for every authenticated request, not only the first-time token exchange.
+    const sessionParam = url.pathname === '/' ? (url.searchParams.get('session') ?? '') : '';
+    const proceed = (): void => {
+      if (sessionParam) { res.redirect(302, `/#${sessionParam}`); return; }
+      next();
+    };
+
+    if (isLoopback(req.socket.remoteAddress)) return proceed();
 
     const cookies = parseCookies(req.headers.cookie ?? '');
-    if (cookies['wsh_token'] === tok) return next();
 
-    const urlToken = new URL(req.url ?? '/', `https://${req.headers.host}`).searchParams.get('token');
-    if (urlToken === tok) {
+    // Owner cookie
+    if (cookies['wsh_token'] === tok) return proceed();
+
+    // Owner token in URL
+    if (url.searchParams.get('token') === tok) {
       res.setHeader('Set-Cookie', `wsh_token=${tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=315360000`);
-      const clean = new URL(req.url ?? '/', `https://${req.headers.host}`);
-      clean.searchParams.delete('token');
-      return res.redirect(302, clean.pathname + clean.search);
+      url.searchParams.delete('token');
+      if (sessionParam) { res.redirect(302, `/#${sessionParam}`); return; }
+      return res.redirect(302, url.pathname + url.search);
     }
 
-    res.status(401).send('Unauthorized');
+    if (url.pathname.startsWith('/api/')) {
+      res.status(401).send('Unauthorized');
+    } else {
+      next(); // static pages load without auth; WebSocket handles its own auth
+    }
   };
 }
+
+// --- Share URL base (used by API and startup output) ---
+
+const networkBase = CUSTOM_URL ?? (primaryLanIP ? `https://${primaryLanIP}:${PORT}` : null);
 
 // --- Express app + server ---
 
 const app = express();
 if (token) app.use(makeTokenMiddleware(token));
+
+app.get('/api/share', (req: express.Request, res: express.Response) => {
+  const sessionId = new URL(req.url, `http://${req.headers.host}`).searchParams.get('session');
+  if (!sessionId) { res.status(400).json({ error: 'session ID required' }); return; }
+  if (!tls || !networkBase) { res.status(503).json({ error: 'Network sharing not available (no LAN interface)' }); return; }
+  res.json({
+    writer: `${networkBase}/#${sessionId}?wt=${writerToken(sessionId)}`,
+    viewer: `${networkBase}/#${sessionId}`,
+  });
+});
+
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const localServer   = http.createServer(app);
@@ -251,56 +303,72 @@ const networkServer = tls ? https.createServer({ key: tls.key, cert: tls.cert },
 
 const wss = new WebSocketServer({ noServer: true });
 
+function getRoleForSession(req: http.IncomingMessage, sessionId: string): Role | null {
+  if (isLoopback(req.socket.remoteAddress) || !token) return 'owner';
+  const cookies = parseCookies(req.headers.cookie ?? '');
+  if (cookies['wsh_token'] === token) return 'owner';
+  if (tls) {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const wt = url.searchParams.get('wtoken');
+    if (wt !== null) return wt === writerToken(sessionId) ? 'writer' : null; // reject bad token
+  }
+  return 'viewer'; // no writer token → viewer (session ID alone is the viewer secret)
+}
+
 function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
-  if (token && !isLoopback(req.socket.remoteAddress)) {
-    const cookies = parseCookies(req.headers.cookie ?? '');
-    if (cookies['wsh_token'] !== token) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+  const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+  if (url.pathname !== '/terminal') { socket.destroy(); return; }
+
+  const sessionId = url.searchParams.get('session') ?? '';
+  if (token && !isLoopback(req.socket.remoteAddress) && getRoleForSession(req, sessionId) === null) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
   }
 
-  const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-  if (url.pathname === '/terminal') {
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit('connection', ws, req);
-    });
-  } else {
-    socket.destroy();
-  }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit('connection', ws, req);
+  });
 }
 
 localServer.on('upgrade', handleUpgrade);
 if (networkServer) networkServer.on('upgrade', handleUpgrade);
 
 wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
-  const url = new URL(req.url ?? '/', `https://${req.headers.host}`);
-  const id = url.searchParams.get('session');
+  const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+  const id  = url.searchParams.get('session');
 
-  if (!id) {
-    ws.close(4000, 'session ID required');
-    return;
-  }
+  if (!id) { ws.close(4000, 'session ID required'); return; }
+
+  const credential = getRoleForSession(req, id) ?? 'viewer';
+  // ?yield=1 lets a writer/owner rejoin as viewer without displacing the current writer.
+  const yields = (credential === 'owner' || credential === 'writer') && url.searchParams.get('yield') === '1';
+  const isWriter = !yields && (credential === 'owner' || credential === 'writer');
 
   let session = sessions.get(id);
 
   if (session) {
-    // Existing session — cancel cleanup, replay scrollback, attach.
+    // Cancel cleanup timer when anyone reconnects.
     if (session.cleanupTimer !== null) {
       clearTimeout(session.cleanupTimer);
       session.cleanupTimer = null;
     }
-    if (session.ws && session.ws.readyState === WebSocket.OPEN) {
-      session.ws.close(4001, 'replaced by new connection');
+    if (isWriter) {
+      if (session.writer && session.writer.readyState === WebSocket.OPEN) {
+        session.writer.send(JSON.stringify({ type: 'role', role: 'viewer' }));
+      }
+      session.writer = ws;
+      console.log(`[session ${id}] writer attached (credential: ${credential})`);
+    } else {
+      console.log(`[session ${id}] ${yields ? 'yielding owner' : 'viewer'} attached`);
     }
-    session.ws = ws;
-    console.log(`[session ${id}] reattached`);
-    if (session.scrollback.length > 0) {
-      ws.send(session.scrollback, { binary: true });
-    }
+    // Store 'viewer' for yielding connections so auto-promotion on writer-disconnect skips them.
+    session.peers.set(ws, yields ? 'viewer' : credential);
+    ws.send(JSON.stringify({ type: 'role', role: yields ? 'viewer' : credential }));
+    if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
   } else {
-    // New session — spawn PTY.
+    // New session — only writers/owners may create one.
+    if (!isWriter) { ws.close(4003, 'viewers cannot create sessions'); return; }
     try {
       session = spawnSession(id);
     } catch (err) {
@@ -308,22 +376,25 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       ws.close(1011, 'Failed to spawn PTY');
       return;
     }
-    session.ws = ws;
+    session.writer = ws;
+    session.peers.set(ws, credential);
+    ws.send(JSON.stringify({ type: 'role', role: credential }));
   }
 
-  // Capture session reference for closure.
   const currentSession = session;
 
   ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+    if (currentSession.writer !== ws) return; // only the active writer may send input
     if (isBinary) {
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
       currentSession.pty.write(buf.toString('binary'));
       return;
     }
-
     const text = (data as Buffer).toString();
-    const msg = parseClientMessage(text);
+    const msg  = parseClientMessage(text);
     if (msg) {
+      // Only owner can close; writers can resize.
+      if (msg.type === 'close' && credential !== 'owner') return;
       (handlers[msg.type] as (session: Session, msg: ClientMessage) => void)(currentSession, msg);
     } else {
       currentSession.pty.write(text);
@@ -331,10 +402,18 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   });
 
   ws.on('close', () => {
-    if (currentSession.ws === ws) {
-      currentSession.ws = null;
-      scheduleCleanup(id, currentSession);
-      console.log(`[session ${id}] detached, cleanup in ${SESSION_TTL / 1000}s`);
+    currentSession.peers.delete(ws);
+    if (currentSession.writer === ws) {
+      currentSession.writer = null;
+      const next = [...currentSession.peers].find(([, r]) => r !== 'viewer')?.[0];
+      if (next) {
+        currentSession.writer = next;
+        next.send(JSON.stringify({ type: 'role', role: currentSession.peers.get(next) }));
+        console.log(`[session ${id}] idle writer promoted to active writer`);
+      } else {
+        scheduleCleanup(id, currentSession);
+        console.log(`[session ${id}] writer detached, cleanup in ${SESSION_TTL / 1000}s`);
+      }
     }
   });
 });
@@ -368,9 +447,8 @@ function openBrowser(url: string): void {
 
 // --- Listen ---
 
-const localURL    = `http://localhost:${PORT}`;
-const networkBase = CUSTOM_URL ?? (primaryLanIP ? `https://${primaryLanIP}:${PORT}` : null);
-const networkURL  = networkBase && token ? `${networkBase}/?token=${token}` : null;
+const localURL   = `http://localhost:${PORT}`;
+const networkURL = networkBase && token ? `${networkBase}/?token=${token}` : null;
 
 let serversStarted = 0;
 const totalServers = networkServer ? 2 : 1;
