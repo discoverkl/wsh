@@ -137,40 +137,49 @@ function scheduleCleanup(id: string, session: Session): void {
 
 const { values } = parseArgs({
   options: {
-    host:    { type: 'string',  short: 'H', default: '127.0.0.1' },
-    port:    { type: 'string',  short: 'p', default: '3000' },
-    'no-open': { type: 'boolean',           default: false },
-    help:    { type: 'boolean', short: 'h', default: false },
+    port:      { type: 'string',  short: 'p', default: '3000' },
+    url:       { type: 'string',              default: '' },
+    'no-open': { type: 'boolean',             default: false },
+    help:      { type: 'boolean', short: 'h', default: false },
   },
 });
 
 if (values.help) {
-  console.log('Usage: server [options]');
+  console.log('Usage: wsh [options]');
   console.log('');
   console.log('Options:');
-  console.log('  -H, --host <host>  Host to bind to (default: 127.0.0.1)');
   console.log('  -p, --port <port>  Port to listen on (default: 3000)');
+  console.log('      --url <url>    Override advertised network URL (for NAT/proxy)');
   console.log('      --no-open      Do not open browser on start');
   console.log('  -h, --help         Show this help message');
   process.exit(0);
 }
 
-const HOST = values.host!;
 const PORT = parseInt(values.port!, 10);
+const CUSTOM_URL = values.url || null;
 
 if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
   console.error(`Error: invalid port "${values.port}"`);
   process.exit(1);
 }
 
-const isPublic = HOST !== '127.0.0.1' && HOST !== 'localhost';
+// --- Network helpers ---
 
-if (isPublic) {
-  console.warn('\x1b[33mNOTE: Binding to a public interface — HTTPS and a secret token are enabled.');
-  console.warn('      Keep the URL private. Anyone with it has full shell access to this machine.\x1b[0m');
+function isLoopback(ip: string | undefined): boolean {
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
 
-// --- TLS (public bindings only) ---
+function getLanIPs(): string[] {
+  const ips: string[] = [];
+  for (const iface of Object.values(os.networkInterfaces())) {
+    for (const addr of iface ?? []) {
+      if (!addr.internal && addr.family === 'IPv4') ips.push(addr.address);
+    }
+  }
+  return ips;
+}
+
+// --- TLS ---
 
 function loadOrGenerateCert(): { key: string; cert: string } {
   const dir = path.join(os.homedir(), '.wsh', 'tls');
@@ -191,11 +200,11 @@ function loadOrGenerateCert(): { key: string; cert: string } {
   }
 }
 
-const tls = isPublic ? loadOrGenerateCert() : null;
+const tls = loadOrGenerateCert();
 
-// --- Token auth (public bindings only) ---
+// --- Token auth ---
 
-const token = isPublic ? crypto.createHash('sha256').update(tls!.key).digest('hex').slice(0, 32) : null;
+const token = crypto.createHash('sha256').update(tls.key).digest('hex').slice(0, 32);
 
 function parseCookies(header: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -209,13 +218,15 @@ function parseCookies(header: string): Record<string, string> {
 
 function makeTokenMiddleware(tok: string): express.RequestHandler {
   return (req, res, next) => {
+    if (isLoopback(req.socket.remoteAddress)) return next();
+
     const cookies = parseCookies(req.headers.cookie ?? '');
     if (cookies['wsh_token'] === tok) return next();
 
-    const urlToken = new URL(req.url ?? '/', `http://${req.headers.host}`).searchParams.get('token');
+    const urlToken = new URL(req.url ?? '/', `https://${req.headers.host}`).searchParams.get('token');
     if (urlToken === tok) {
       res.setHeader('Set-Cookie', `wsh_token=${tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=315360000`);
-      const clean = new URL(req.url ?? '/', `http://${req.headers.host}`);
+      const clean = new URL(req.url ?? '/', `https://${req.headers.host}`);
       clean.searchParams.delete('token');
       return res.redirect(302, clean.pathname + clean.search);
     }
@@ -227,17 +238,15 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
 // --- Express app + server ---
 
 const app = express();
-if (token) app.use(makeTokenMiddleware(token));
+app.use(makeTokenMiddleware(token));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-const server = tls
-  ? https.createServer({ key: tls.key, cert: tls.cert }, app)
-  : http.createServer(app);
+const server = https.createServer({ key: tls.key, cert: tls.cert }, app);
 
 const wss = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
-  if (token) {
+  if (!isLoopback(req.socket.remoteAddress)) {
     const cookies = parseCookies(req.headers.cookie ?? '');
     if (cookies['wsh_token'] !== token) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -246,7 +255,7 @@ server.on('upgrade', (req, socket, head) => {
     }
   }
 
-  const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+  const url = new URL(req.url ?? '/', `https://${req.headers.host}`);
   if (url.pathname === '/terminal') {
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
@@ -257,7 +266,7 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
-  const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+  const url = new URL(req.url ?? '/', `https://${req.headers.host}`);
   const id = url.searchParams.get('session');
 
   if (!id) {
@@ -350,18 +359,18 @@ function openBrowser(url: string): void {
 
 // --- Listen ---
 
-server.listen(PORT, HOST, () => {
-  const proto = tls ? 'https' : 'http';
-  const base = `${proto}://${HOST}:${PORT}`;
-  const url = token ? `${base}/?token=${token}` : base;
+server.listen(PORT, '0.0.0.0', () => {
+  const localURL = `https://localhost:${PORT}`;
+  const lanIPs = getLanIPs();
+  const networkBase = CUSTOM_URL ?? (lanIPs.length > 0 ? `https://${lanIPs[0]}:${PORT}` : null);
+  const networkURL  = networkBase ? `${networkBase}/?token=${token}` : null;
+  const fingerprint = new crypto.X509Certificate(tls.cert).fingerprint256;
 
-  console.log(`Server running at ${url}`);
-  if (tls) {
-    const cert = new crypto.X509Certificate(tls.cert);
-    console.log(`Fingerprint:       ${cert.fingerprint256}`);
-  }
+  console.log('');
+  console.log(`  Local:       ${localURL}`);
+  if (networkURL) console.log(`  Network:     ${networkURL}`);
+  console.log(`  Fingerprint: ${fingerprint}`);
+  console.log('');
 
-  if (!values['no-open'] && !isPublic) {
-    openBrowser(url);
-  }
+  if (!values['no-open']) openBrowser(localURL);
 });
