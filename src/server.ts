@@ -195,7 +195,7 @@ const tls = isPublic ? loadOrGenerateCert() : null;
 
 // --- Token auth (public bindings only) ---
 
-const token = isPublic ? crypto.randomBytes(16).toString('hex') : null;
+const token = isPublic ? crypto.createHash('sha256').update(tls!.key).digest('hex').slice(0, 32) : null;
 
 function parseCookies(header: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -214,7 +214,7 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
 
     const urlToken = new URL(req.url ?? '/', `http://${req.headers.host}`).searchParams.get('token');
     if (urlToken === tok) {
-      res.setHeader('Set-Cookie', `wsh_token=${tok}; HttpOnly; SameSite=Strict; Path=/`);
+      res.setHeader('Set-Cookie', `wsh_token=${tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=315360000`);
       const clean = new URL(req.url ?? '/', `http://${req.headers.host}`);
       clean.searchParams.delete('token');
       return res.redirect(302, clean.pathname + clean.search);

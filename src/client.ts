@@ -87,7 +87,8 @@ document.addEventListener('fullscreenchange', () => {
   requestAnimationFrame(() => fitAddon.fit());
 });
 
-const ws = new WebSocket(`ws://${location.host}/terminal?session=${sessionId}`);
+const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+const ws = new WebSocket(`${proto}://${location.host}/terminal?session=${sessionId}`);
 ws.binaryType = 'arraybuffer';
 
 function sendAction(msg: Record<string, unknown>): void {
