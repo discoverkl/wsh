@@ -5,6 +5,7 @@ import http from 'http';
 import https from 'https';
 import os from 'os';
 import path from 'path';
+import { Duplex } from 'stream';
 import { parseArgs } from 'util';
 import express from 'express';
 import selfsigned from 'selfsigned';
@@ -179,7 +180,11 @@ function getLanIPs(): string[] {
   return ips;
 }
 
-// --- TLS ---
+// --- LAN IP (needed before TLS) ---
+
+const primaryLanIP = CUSTOM_URL ? (getLanIPs()[0] ?? null) : (getLanIPs()[0] ?? null);
+
+// --- TLS (only when a network interface is available) ---
 
 function loadOrGenerateCert(): { key: string; cert: string } {
   const dir = path.join(os.homedir(), '.wsh', 'tls');
@@ -200,11 +205,11 @@ function loadOrGenerateCert(): { key: string; cert: string } {
   }
 }
 
-const tls = loadOrGenerateCert();
+const tls = primaryLanIP ? loadOrGenerateCert() : null;
 
 // --- Token auth ---
 
-const token = crypto.createHash('sha256').update(tls.key).digest('hex').slice(0, 32);
+const token = tls ? crypto.createHash('sha256').update(tls.key).digest('hex').slice(0, 32) : null;
 
 function parseCookies(header: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -238,15 +243,16 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
 // --- Express app + server ---
 
 const app = express();
-app.use(makeTokenMiddleware(token));
+if (token) app.use(makeTokenMiddleware(token));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-const server = https.createServer({ key: tls.key, cert: tls.cert }, app);
+const localServer   = http.createServer(app);
+const networkServer = tls ? https.createServer({ key: tls.key, cert: tls.cert }, app) : null;
 
 const wss = new WebSocketServer({ noServer: true });
 
-server.on('upgrade', (req, socket, head) => {
-  if (!isLoopback(req.socket.remoteAddress)) {
+function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
+  if (token && !isLoopback(req.socket.remoteAddress)) {
     const cookies = parseCookies(req.headers.cookie ?? '');
     if (cookies['wsh_token'] !== token) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -255,7 +261,7 @@ server.on('upgrade', (req, socket, head) => {
     }
   }
 
-  const url = new URL(req.url ?? '/', `https://${req.headers.host}`);
+  const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   if (url.pathname === '/terminal') {
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
@@ -263,7 +269,10 @@ server.on('upgrade', (req, socket, head) => {
   } else {
     socket.destroy();
   }
-});
+}
+
+localServer.on('upgrade', handleUpgrade);
+if (networkServer) networkServer.on('upgrade', handleUpgrade);
 
 wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   const url = new URL(req.url ?? '/', `https://${req.headers.host}`);
@@ -359,18 +368,24 @@ function openBrowser(url: string): void {
 
 // --- Listen ---
 
-server.listen(PORT, '0.0.0.0', () => {
-  const localURL = `https://localhost:${PORT}`;
-  const lanIPs = getLanIPs();
-  const networkBase = CUSTOM_URL ?? (lanIPs.length > 0 ? `https://${lanIPs[0]}:${PORT}` : null);
-  const networkURL  = networkBase ? `${networkBase}/?token=${token}` : null;
-  const fingerprint = new crypto.X509Certificate(tls.cert).fingerprint256;
+const localURL    = `http://localhost:${PORT}`;
+const networkBase = CUSTOM_URL ?? (primaryLanIP ? `https://${primaryLanIP}:${PORT}` : null);
+const networkURL  = networkBase && token ? `${networkBase}/?token=${token}` : null;
+
+let serversStarted = 0;
+const totalServers = networkServer ? 2 : 1;
+
+function onListening(): void {
+  if (++serversStarted < totalServers) return;
 
   console.log('');
   console.log(`  Local:       ${localURL}`);
   if (networkURL) console.log(`  Network:     ${networkURL}`);
-  console.log(`  Fingerprint: ${fingerprint}`);
+  if (tls) console.log(`  Fingerprint: ${new crypto.X509Certificate(tls.cert).fingerprint256}`);
   console.log('');
 
   if (!values['no-open']) openBrowser(localURL);
-});
+}
+
+localServer.listen(PORT, '127.0.0.1', onListening);
+if (networkServer && primaryLanIP) networkServer.listen(PORT, primaryLanIP, onListening);

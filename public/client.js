@@ -72,7 +72,8 @@ document.querySelector('.dot.maximize').addEventListener('click', () => {
 document.addEventListener('fullscreenchange', () => {
     requestAnimationFrame(() => fitAddon.fit());
 });
-const ws = new WebSocket(`ws://${location.host}/terminal?session=${sessionId}`);
+const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+const ws = new WebSocket(`${proto}://${location.host}/terminal?session=${sessionId}`);
 ws.binaryType = 'arraybuffer';
 function sendAction(msg) {
     if (ws.readyState === WebSocket.OPEN) {
@@ -82,7 +83,13 @@ function sendAction(msg) {
 function sendResize(cols, rows) {
     sendAction({ type: 'resize', cols, rows });
 }
+const connStatus = document.getElementById('conn-status');
+function setConnStatus(state) {
+    connStatus.className = state;
+    connStatus.title = state === 'connected' ? 'Connected' : 'Disconnected';
+}
 ws.addEventListener('open', () => {
+    setConnStatus('connected');
     requestAnimationFrame(() => {
         fitAddon.fit();
         sendResize(term.cols, term.rows);
@@ -95,6 +102,7 @@ ws.addEventListener('message', (event) => {
     }
 });
 ws.addEventListener('close', (event) => {
+    setConnStatus('disconnected');
     if (event.code === 1000 && event.reason === 'PTY process exited') {
         // PTY exited cleanly — clear session so next reload starts fresh.
         location.hash = '';
