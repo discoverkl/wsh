@@ -101,7 +101,14 @@ function sendResize(cols: number, rows: number): void {
   sendAction({ type: 'resize', cols, rows });
 }
 
+const connStatus = document.getElementById('conn-status')!;
+function setConnStatus(state: 'connected' | 'disconnected'): void {
+  connStatus.className = state;
+  connStatus.title = state === 'connected' ? 'Connected' : 'Disconnected';
+}
+
 ws.addEventListener('open', () => {
+  setConnStatus('connected');
   requestAnimationFrame(() => {
     fitAddon.fit();
     sendResize(term.cols, term.rows);
@@ -116,6 +123,7 @@ ws.addEventListener('message', (event: MessageEvent) => {
 });
 
 ws.addEventListener('close', (event: CloseEvent) => {
+  setConnStatus('disconnected');
   if (event.code === 1000 && event.reason === 'PTY process exited') {
     // PTY exited cleanly — clear session so next reload starts fresh.
     location.hash = '';
