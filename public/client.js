@@ -1,7 +1,8 @@
 const term = new Terminal({
+    disableStdin: true,
     cursorBlink: true,
     cursorStyle: 'block',
-    fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+    fontFamily: '"JetBrains Mono", monospace',
     fontSize: 14,
     lineHeight: 1.2,
     fontWeightBold: '700',
@@ -90,6 +91,7 @@ function setConnStatus(state) {
 }
 ws.addEventListener('open', () => {
     setConnStatus('connected');
+    term.options.disableStdin = false;
     requestAnimationFrame(() => {
         fitAddon.fit();
         sendResize(term.cols, term.rows);
