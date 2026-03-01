@@ -5,7 +5,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "start": "node dist/server.js",
-    "dev": "tsx watch src/server.ts -- --no-open"
+    "dev": "tsx watch src/server.ts --no-open"
   },
   "dependencies": {
     "express": "^4.18.3",
