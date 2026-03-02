@@ -187,7 +187,7 @@ let pinned = false;
 function applyPinState(state: boolean): void {
   pinned = state;
   pinBtn.classList.toggle('pinned', pinned);
-  pinBtn.title = pinned ? 'Unpin Session' : 'Pin Session';
+  pinBtn.title = pinned ? 'Unpin (allow timeout after disconnect)' : 'Pin (keep alive after disconnect)';
 }
 
 function applyRole(role: string): void {

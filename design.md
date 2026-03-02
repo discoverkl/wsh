@@ -38,6 +38,21 @@ Subsequent runs skip 1 and 2 — near-instant startup.
 
 Node.js (~30 MB) is downloaded, not embedded. The Go binary embeds `dist/`, `public/`, `node_modules/` (~15–18 MB total), including the platform-native `pty.node` addon. Build must run on the target platform for this reason.
 
+## Session Lifecycle
+
+```
+writer connects → session spawned
+writer disconnects → scheduleCleanup()
+  pinned=true  → no timer, session lives until PTY exits or manually closed
+  pinned=false → SESSION_TTL (10 min) timer; expiry kills PTY + deletes session
+PTY exits → all peers closed, session deleted immediately (bypasses TTL)
+```
+
+- Only owners can pin/unpin; pin state is broadcast to all owner peers so multiple owner tabs stay in sync
+- `scheduleCleanup` is a no-op while any writer is connected — the timer starts only after the last writer leaves
+- Pin state is in-memory only; a server restart resets it
+- Client applies pin state optimistically; the server's broadcast corrects any divergence on reconnect
+
 ## Security Model
 
 - HTTP on localhost, HTTPS (self-signed, fingerprint printed) on LAN interface

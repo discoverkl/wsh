@@ -41,6 +41,10 @@ Click the share icon in the titlebar to get per-session links:
 
 Only one writer is active at a time. A new writer displaces the current one, who is demoted to viewer. The role badge in the titlebar shows your current role and can be clicked to switch between writer and viewer without reloading the page. Demotion persists across refreshes.
 
+## Session lifetime
+
+Sessions are cleaned up 10 minutes after the last writer disconnects. Click the **pin button** (owner only) to keep a session alive indefinitely — useful for long-running processes you want to check back on. Unpinning restarts the 10-minute timer. Pinned state is in-memory only and does not survive a server restart.
+
 ## Security
 
 - HTTPS is used automatically on the LAN interface (self-signed cert, fingerprint printed on startup)
