@@ -3,7 +3,6 @@ import crypto from 'crypto';
 import fs from 'fs';
 import http from 'http';
 import https from 'https';
-import net from 'net';
 import os from 'os';
 import path from 'path';
 import { Duplex } from 'stream';
@@ -145,8 +144,14 @@ const { values } = parseArgs({
     bind:      { type: 'string',              default: '' },
     'no-open': { type: 'boolean',             default: false },
     help:      { type: 'boolean', short: 'h', default: false },
+    version:   { type: 'boolean', short: 'v', default: false },
   },
 });
+
+if (values.version) {
+  console.log(`v${version}`);
+  process.exit(0);
+}
 
 if (values.help) {
   console.log('Usage: wsh [options]');
@@ -157,6 +162,7 @@ if (values.help) {
   console.log('      --bind <addr>  Bind network server to this address (default: auto-detect LAN IP)');
   console.log('                     Use 0.0.0.0 to listen on all interfaces (e.g. inside Docker --network host)');
   console.log('      --no-open      Do not open browser on start');
+  console.log('  -v, --version      Print version and exit');
   console.log('  -h, --help         Show this help message');
   process.exit(0);
 }
@@ -285,7 +291,8 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
 
 // --- Share URL base (used by API and startup output) ---
 
-const networkBase = CUSTOM_URL ?? ((BIND_ADDR ?? primaryLanIP) ? `https://${BIND_ADDR ?? primaryLanIP}:${PORT}` : null);
+const advertiseIP  = (BIND_ADDR && BIND_ADDR !== '0.0.0.0') ? BIND_ADDR : primaryLanIP;
+const networkBase  = CUSTOM_URL ?? (advertiseIP ? `https://${advertiseIP}:${PORT}` : null);
 
 // --- Express app + server ---
 
@@ -454,14 +461,18 @@ function openBrowser(url: string): void {
 
 // --- Listen ---
 
-const localURL   = `http://localhost:${PORT}`;
+// When --bind 0.0.0.0, run HTTPS-only on all interfaces: mixing HTTP and HTTPS on one
+// port via protocol sniffing doesn't work because Node.js TLS reads from the native
+// libuv handle directly, bypassing any JS-layer unshift(). HTTPS-only is fine for the
+// Docker --network host use case where browsers access via the host's LAN IP over HTTPS.
+const httpsOnly   = BIND_ADDR === '0.0.0.0' && !!networkServer;
+const networkBind = httpsOnly ? '0.0.0.0' : (BIND_ADDR ?? primaryLanIP);
+
+const localURL   = httpsOnly ? `https://localhost:${PORT}` : `http://localhost:${PORT}`;
 const networkURL = networkBase && token ? `${networkBase}/?token=${token}` : null;
 
-const useSniffing  = BIND_ADDR === '0.0.0.0' && !!networkServer;
-const networkBind  = useSniffing ? null : (BIND_ADDR ?? primaryLanIP);
-
 let serversStarted = 0;
-const totalServers = useSniffing ? 1 : (networkServer && networkBind ? 2 : 1);
+const totalServers = httpsOnly ? 1 : (networkServer && networkBind ? 2 : 1);
 
 function onListening(): void {
   if (++serversStarted < totalServers) return;
@@ -476,17 +487,8 @@ function onListening(): void {
   if (!values['no-open']) openBrowser(localURL);
 }
 
-if (useSniffing) {
-  // Single combined TCP server on 0.0.0.0. TLS ClientHello always starts with 0x16;
-  // everything else is plain HTTP. Route accordingly so both protocols share one port.
-  const combined = net.createServer((socket) => {
-    socket.once('data', (buf) => {
-      socket.unshift(buf);
-      (buf[0] === 0x16 ? networkServer! : localServer).emit('connection', socket);
-    });
-    socket.on('error', () => socket.destroy());
-  });
-  combined.listen(PORT, '0.0.0.0', onListening);
+if (httpsOnly) {
+  networkServer!.listen(PORT, '0.0.0.0', onListening);
 } else {
   localServer.listen(PORT, '127.0.0.1', onListening);
   if (networkServer && networkBind) networkServer.listen(PORT, networkBind, onListening);
