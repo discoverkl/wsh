@@ -13,9 +13,12 @@ Installs the `wsh` binary to `~/.local/bin`. Supported platforms: macOS (Apple S
 ## Usage
 
 ```sh
-wsh              # start and open browser
-wsh -p 4000      # custom port
-wsh --no-open    # don't open browser automatically
+wsh                      # start and open browser
+wsh -p 4000              # custom port
+wsh --no-open            # don't open browser automatically
+wsh --bind 0.0.0.0       # bind to all interfaces (e.g. Docker)
+wsh --url https://...    # override advertised network URL (NAT/proxy)
+wsh --version            # print version and exit
 ```
 
 On startup, wsh prints a local URL and, when a network interface is available, a LAN URL with a one-time access token:
@@ -24,7 +27,7 @@ On startup, wsh prints a local URL and, when a network interface is available, a
   Local:       http://localhost:3000
   Network:     https://192.168.1.5:3000/?token=abc123...
   Fingerprint: AA:BB:CC:...
-  Version:     v0.2.1
+  Version:     v0.3.1
 ```
 
 Open the local URL to start your session. Share the Network URL with others on your LAN.
