@@ -26,6 +26,7 @@ interface Session {
   peers: Map<WebSocket, Role>; // every connected WS → its original role
   cleanupTimer: ReturnType<typeof setTimeout> | null;
   pinned: boolean;
+  title: string;
 }
 
 const sessions = new Map<string, Session>();
@@ -113,11 +114,15 @@ function spawnSession(id: string): Session {
     peers: new Map(),
     cleanupTimer: null,
     pinned: false,
+    title: 'bash',
   };
 
   sessions.set(id, session);
 
+  const oscTitleRe = /\x1b\](?:0|2);([^\x07]*)\x07/;
   ptyProcess.onData((data: string) => {
+    const m = data.match(oscTitleRe);
+    if (m) session.title = m[1];
     const buf = Buffer.from(data, 'utf8');
     appendScrollback(session, buf);
     const send = (ws: WebSocket) => { if (ws.readyState === WebSocket.OPEN) ws.send(buf, { binary: true }); };
@@ -393,7 +398,10 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     // Store 'viewer' for yielding connections so auto-promotion on writer-disconnect skips them.
     const sentRole = yields ? 'viewer' : credential;
     session.peers.set(ws, sentRole);
-    ws.send(JSON.stringify({ type: 'role', role: sentRole, ...(sentRole === 'owner' ? { pinned: session.pinned } : {}) }));
+    const pinnedOther = sentRole === 'owner'
+      ? [...sessions.entries()].filter(([sid, s]) => sid !== id && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title }))
+      : undefined;
+    ws.send(JSON.stringify({ type: 'role', role: sentRole, ...(sentRole === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
     if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
   } else {
     // New session — only writers/owners may create one.
@@ -407,7 +415,10 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     }
     session.writer = ws;
     session.peers.set(ws, credential);
-    ws.send(JSON.stringify({ type: 'role', role: credential, ...(credential === 'owner' ? { pinned: session.pinned } : {}) }));
+    const pinnedOther = credential === 'owner'
+      ? [...sessions.entries()].filter(([sid, s]) => sid !== id && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title }))
+      : undefined;
+    ws.send(JSON.stringify({ type: 'role', role: credential, ...(credential === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
   }
 
   const currentSession = session;

@@ -142,10 +142,11 @@ function connect(): void {
       term.write(new Uint8Array(event.data));
     } else if (typeof event.data === 'string') {
       try {
-        const msg = JSON.parse(event.data) as { type: string; role?: string; pinned?: boolean };
+        const msg = JSON.parse(event.data) as { type: string; role?: string; pinned?: boolean; pinnedOther?: { id: string; title: string }[] };
         if (msg.type === 'role' && msg.role) {
           applyRole(msg.role);
           if (typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
+          if (msg.pinnedOther && msg.pinnedOther.length > 0) showPinnedToast(msg.pinnedOther);
         }
         if (msg.type === 'pin' && typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
       } catch { /* ignore */ }
@@ -269,6 +270,69 @@ pinBtn.addEventListener('click', () => {
   applyPinState(!pinned);
   sendAction({ type: 'pin', pinned });
 });
+
+// --- Pinned sessions toast ---
+
+const pinnedToast      = document.getElementById('pinned-toast')!;
+const pinnedToastMsg   = document.getElementById('pinned-toast-msg')!;
+const pinnedToastChips = document.getElementById('pinned-toast-chips')!;
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+const PINNED_TOAST_SEEN = 'wsh_pinned_toast_seen';
+const MAX_CHIPS = 3;
+
+function dismissToast(): void {
+  pinnedToast.classList.remove('visible');
+  if (toastTimer !== null) { clearTimeout(toastTimer); toastTimer = null; }
+}
+
+function scheduleToastDismiss(): void {
+  if (toastTimer !== null) clearTimeout(toastTimer);
+  toastTimer = setTimeout(dismissToast, 8000);
+}
+
+function showPinnedToast(sessions: { id: string; title: string }[]): void {
+  // Deduplicate: skip if the same set of IDs was already shown in this tab.
+  const key = sessions.map(s => s.id).sort().join(',');
+  if (sessionStorage.getItem(PINNED_TOAST_SEEN) === key) return;
+  sessionStorage.setItem(PINNED_TOAST_SEEN, key);
+
+  pinnedToastMsg.textContent = `${sessions.length} other pinned session${sessions.length === 1 ? '' : 's'}`;
+  pinnedToastChips.innerHTML = '';
+  const visible = sessions.slice(0, MAX_CHIPS);
+  const overflow = sessions.length - visible.length;
+  for (const s of visible) {
+    const a = document.createElement('a');
+    a.className = 'toast-chip';
+    a.href = `/#${s.id}`;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    if (s.title && s.title !== 'bash') {
+      const title = document.createElement('span');
+      title.className = 'chip-title';
+      title.textContent = s.title;
+      a.appendChild(title);
+      const id = document.createElement('span');
+      id.className = 'chip-id';
+      id.textContent = s.id;
+      a.appendChild(id);
+    } else {
+      a.textContent = s.id;
+    }
+    pinnedToastChips.appendChild(a);
+  }
+  if (overflow > 0) {
+    const more = document.createElement('span');
+    more.className = 'toast-overflow';
+    more.textContent = `+${overflow} more`;
+    pinnedToastChips.appendChild(more);
+  }
+  pinnedToast.classList.add('visible');
+  scheduleToastDismiss();
+}
+
+document.getElementById('toast-dismiss')!.addEventListener('click', dismissToast);
+pinnedToast.addEventListener('mouseenter', () => { if (toastTimer !== null) { clearTimeout(toastTimer); toastTimer = null; } });
+pinnedToast.addEventListener('mouseleave', scheduleToastDismiss);
 
 // --- Share popover ---
 

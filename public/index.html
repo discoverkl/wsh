@@ -33,6 +33,7 @@
     }
 
     #window {
+      position: relative;
       width: 86vw;
       height: 84dvh;
       display: flex;
@@ -275,6 +276,77 @@
     :fullscreen #titlebar {
       display: none;
     }
+
+    #pinned-toast {
+      position: absolute;
+      top: 46px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-4px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(17, 17, 27, 0.88);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(249, 226, 175, 0.2);
+      border-radius: 8px;
+      padding: 8px 10px 8px 12px;
+      font-size: 12px;
+      color: #a6adc8;
+      white-space: nowrap;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.55), 0 0 0 0.5px rgba(249, 226, 175, 0.06);
+    }
+    #pinned-toast.visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+      pointer-events: auto;
+    }
+    #pinned-toast-icon { color: #f9e2af; display: flex; align-items: center; flex-shrink: 0; }
+    #pinned-toast-chips { display: flex; gap: 4px; }
+    .toast-chip {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: #89b4fa;
+      background: rgba(137, 180, 250, 0.1);
+      border: 1px solid rgba(137, 180, 250, 0.22);
+      border-radius: 3px;
+      padding: 2px 6px;
+      text-decoration: none;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .toast-chip:hover {
+      background: rgba(137, 180, 250, 0.2);
+      border-color: rgba(137, 180, 250, 0.4);
+    }
+    .chip-title {
+      color: #cdd6f4;
+      max-width: 120px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .chip-id { color: #585b70; margin-left: 5px; }
+    .toast-overflow { font-size: 10px; color: #585b70; padding: 2px 4px; }
+    #toast-dismiss {
+      background: none;
+      border: none;
+      padding: 0;
+      margin-left: 2px;
+      width: 18px;
+      height: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 3px;
+      color: #45475a;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: color 0.15s, background 0.15s;
+    }
+    #toast-dismiss:hover { color: #cdd6f4; background: rgba(205, 214, 244, 0.08); }
   </style>
 </head>
 <body>
@@ -309,6 +381,20 @@
             </svg>
           </button>
         </div>
+      </div>
+      <div id="pinned-toast">
+        <span id="pinned-toast-icon">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M9.828 1a.5.5 0 0 1 .354.147l4.671 4.671a.5.5 0 0 1-.069.706L11 9.243V13.5a.5.5 0 0 1-.854.354l-3-3L4.207 14.5a.5.5 0 0 1-.707-.707l3.646-3.639-3-3A.5.5 0 0 1 4.5 6h4.257l2.72-3.784A.5.5 0 0 1 9.828 1z"/>
+          </svg>
+        </span>
+        <span id="pinned-toast-msg"></span>
+        <div id="pinned-toast-chips"></div>
+        <button id="toast-dismiss" title="Dismiss">
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <line x1="1.5" y1="1.5" x2="7.5" y2="7.5"/><line x1="7.5" y1="1.5" x2="1.5" y2="7.5"/>
+          </svg>
+        </button>
       </div>
       <div id="terminal-container"></div>
     </div>
