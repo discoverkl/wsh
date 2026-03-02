@@ -142,8 +142,12 @@ function connect(): void {
       term.write(new Uint8Array(event.data));
     } else if (typeof event.data === 'string') {
       try {
-        const msg = JSON.parse(event.data) as { type: string; role?: string };
-        if (msg.type === 'role' && msg.role) applyRole(msg.role);
+        const msg = JSON.parse(event.data) as { type: string; role?: string; pinned?: boolean };
+        if (msg.type === 'role' && msg.role) {
+          applyRole(msg.role);
+          if (typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
+        }
+        if (msg.type === 'pin' && typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
       } catch { /* ignore */ }
     }
   });
@@ -177,6 +181,14 @@ function setConnStatus(state: 'connected' | 'disconnected'): void {
 }
 
 const roleBadge = document.getElementById('role-badge')!;
+const pinBtn = document.getElementById('pin-btn') as HTMLButtonElement;
+let pinned = false;
+
+function applyPinState(state: boolean): void {
+  pinned = state;
+  pinBtn.classList.toggle('pinned', pinned);
+  pinBtn.title = pinned ? 'Unpin Session' : 'Pin Session';
+}
 
 function applyRole(role: string): void {
   currentRole = role;
@@ -186,8 +198,11 @@ function applyRole(role: string): void {
     sessionStorage.setItem(IS_OWNER, 'true');
     roleBadge.setAttribute('hidden', '');
     term.options.disableStdin = false;
+    pinBtn.removeAttribute('hidden');
     return;
   }
+
+  pinBtn.setAttribute('hidden', '');
 
   if (role === 'viewer') {
     // Persist demotion so refresh reconnects as viewer rather than reclaiming writer.
@@ -249,6 +264,11 @@ window.addEventListener('resize', scheduleResize);
 
 const container = document.getElementById('terminal-container');
 if (container) new ResizeObserver(scheduleResize).observe(container);
+
+pinBtn.addEventListener('click', () => {
+  applyPinState(!pinned);
+  sendAction({ type: 'pin', pinned });
+});
 
 // --- Share popover ---
 

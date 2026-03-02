@@ -25,6 +25,7 @@ interface Session {
   writer: WebSocket | null;
   peers: Map<WebSocket, Role>; // every connected WS → its original role
   cleanupTimer: ReturnType<typeof setTimeout> | null;
+  pinned: boolean;
 }
 
 const sessions = new Map<string, Session>();
@@ -41,7 +42,12 @@ interface CloseMessage {
   type: 'close';
 }
 
-type ClientMessage = ResizeMessage | CloseMessage;
+interface PinMessage {
+  type: 'pin';
+  pinned: boolean;
+}
+
+type ClientMessage = ResizeMessage | CloseMessage | PinMessage;
 
 function parseClientMessage(text: string): ClientMessage | null {
   let obj: unknown;
@@ -56,10 +62,15 @@ function parseClientMessage(text: string): ClientMessage | null {
     return null;
   }
   if (type === 'close') return { type: 'close' };
+  if (type === 'pin') {
+    const { pinned } = obj as Record<string, unknown>;
+    if (typeof pinned === 'boolean') return { type: 'pin', pinned };
+    return null;
+  }
   return null;
 }
 
-type Handlers = { [K in ClientMessage['type']]: (session: Session, msg: Extract<ClientMessage, { type: K }>) => void };
+type Handlers = { [K in (ResizeMessage | CloseMessage)['type']]: (session: Session, msg: Extract<ClientMessage, { type: K }>) => void };
 
 const handlers: Handlers = {
   resize(session, msg) {
@@ -101,6 +112,7 @@ function spawnSession(id: string): Session {
     writer: null,
     peers: new Map(),
     cleanupTimer: null,
+    pinned: false,
   };
 
   sessions.set(id, session);
@@ -128,6 +140,8 @@ function scheduleCleanup(id: string, session: Session): void {
   if (session.cleanupTimer !== null) {
     clearTimeout(session.cleanupTimer);
   }
+  session.cleanupTimer = null;
+  if (session.pinned) return;
   session.cleanupTimer = setTimeout(() => {
     console.log(`[session ${id}] TTL expired, killing PTY`);
     session.pty.kill('SIGHUP');
@@ -377,8 +391,9 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       console.log(`[session ${id}] ${yields ? 'yielding owner' : 'viewer'} attached`);
     }
     // Store 'viewer' for yielding connections so auto-promotion on writer-disconnect skips them.
-    session.peers.set(ws, yields ? 'viewer' : credential);
-    ws.send(JSON.stringify({ type: 'role', role: yields ? 'viewer' : credential }));
+    const sentRole = yields ? 'viewer' : credential;
+    session.peers.set(ws, sentRole);
+    ws.send(JSON.stringify({ type: 'role', role: sentRole, ...(sentRole === 'owner' ? { pinned: session.pinned } : {}) }));
     if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
   } else {
     // New session — only writers/owners may create one.
@@ -392,7 +407,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     }
     session.writer = ws;
     session.peers.set(ws, credential);
-    ws.send(JSON.stringify({ type: 'role', role: credential }));
+    ws.send(JSON.stringify({ type: 'role', role: credential, ...(credential === 'owner' ? { pinned: session.pinned } : {}) }));
   }
 
   const currentSession = session;
@@ -407,8 +422,19 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     const text = (data as Buffer).toString();
     const msg  = parseClientMessage(text);
     if (msg) {
-      // Only owner can close; writers can resize.
-      if (msg.type === 'close' && credential !== 'owner') return;
+      // Only owner can close or pin; writers can resize.
+      if ((msg.type === 'close' || msg.type === 'pin') && credential !== 'owner') return;
+      if (msg.type === 'pin') {
+        currentSession.pinned = msg.pinned;
+        if (!msg.pinned && currentSession.writer === null) scheduleCleanup(id, currentSession);
+        console.log(`[session ${id}] ${msg.pinned ? 'pinned (no timeout)' : 'unpinned'}`);
+        for (const [peer, peerRole] of currentSession.peers) {
+          if (peerRole === 'owner' && peer.readyState === WebSocket.OPEN) {
+            peer.send(JSON.stringify({ type: 'pin', pinned: currentSession.pinned }));
+          }
+        }
+        return;
+      }
       (handlers[msg.type] as (session: Session, msg: ClientMessage) => void)(currentSession, msg);
     } else {
       currentSession.pty.write(text);
@@ -426,7 +452,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
         console.log(`[session ${id}] idle writer promoted to active writer`);
       } else {
         scheduleCleanup(id, currentSession);
-        console.log(`[session ${id}] writer detached, cleanup in ${SESSION_TTL / 1000}s`);
+        console.log(`[session ${id}] writer detached, ${currentSession.pinned ? 'session pinned (no timeout)' : `cleanup in ${SESSION_TTL / 1000}s`}`);
       }
     }
   });
