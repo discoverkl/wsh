@@ -12,6 +12,7 @@ import selfsigned from 'selfsigned';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
+import { version } from '../package.json';
 
 const MAX_SCROLLBACK = 5 * 1024 * 1024; // 5 MB
 const SESSION_TTL = 10 * 60 * 1000;     // 10 minutes
@@ -284,6 +285,7 @@ const networkBase = CUSTOM_URL ?? (primaryLanIP ? `https://${primaryLanIP}:${POR
 // --- Express app + server ---
 
 const app = express();
+app.use((_req, res, next) => { res.setHeader('X-App-Version', version); next(); });
 if (token) app.use(makeTokenMiddleware(token));
 
 app.get('/api/share', (req: express.Request, res: express.Response) => {
@@ -460,6 +462,7 @@ function onListening(): void {
   console.log(`  Local:       ${localURL}`);
   if (networkURL) console.log(`  Network:     ${networkURL}`);
   if (tls) console.log(`  Fingerprint: ${new crypto.X509Certificate(tls.cert).fingerprint256}`);
+  console.log(`  Version:     v${version}`);
   console.log('');
 
   if (!values['no-open']) openBrowser(localURL);

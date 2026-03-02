@@ -49,10 +49,18 @@ term.open(document.getElementById('terminal-container') as HTMLElement);
 fitAddon.fit();
 term.focus();
 
+const windowTitle = document.getElementById('window-title')!;
+
 term.onTitleChange((title: string) => {
   const t = title || 'bash';
-  document.getElementById('window-title')!.textContent = t;
+  windowTitle.textContent = t;
   document.title = t;
+});
+
+// Show app version as a tooltip on the window title.
+fetch('/').then(r => {
+  const v = r.headers.get('X-App-Version');
+  if (v) windowTitle.title = `wsh v${v}`;
 });
 
 // Writer share links embed the token in the hash: /#id?wt=...
