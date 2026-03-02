@@ -20,7 +20,7 @@ ARCH=$(uname -m)
 
 case "$OS" in
   Darwin)
-    # arm64 only; Intel Macs run via Rosetta 2 transparently
+    # Apple Silicon only; Intel Macs are not supported
     PLATFORM="darwin-arm64"
     ;;
   Linux)
@@ -38,6 +38,9 @@ esac
 # ---- install ----
 # REPO is replaced with the actual owner/repo by the release CI workflow.
 REPO="__REPO__"
+case "$REPO" in
+  *__REPO__*) fail "REPO placeholder was not replaced — this installer is broken" ;;
+esac
 URL="https://github.com/${REPO}/releases/latest/download/wsh-${PLATFORM}"
 INSTALL_DIR="$HOME/.local/bin"
 BIN="$INSTALL_DIR/wsh"
@@ -46,23 +49,39 @@ printf "\n  ${CYAN}${BOLD}◆  Installing wsh${RESET}\n"
 info "Platform: $PLATFORM"
 printf "\n"
 
+command -v curl >/dev/null 2>&1 || fail "curl is required but not found — please install curl"
+[ -f "$BIN" ] && info "Updating existing install at $BIN"
+
 step "Downloading from GitHub Releases..."
 mkdir -p "$INSTALL_DIR"
-if ! curl -fsSL "$URL" -o "$BIN"; then
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+if ! curl -fsSL "$URL" -o "$TMP"; then
   fail "Download failed — check your internet connection or visit https://github.com/$REPO/releases"
 fi
+
+mv "$TMP" "$BIN"
 chmod +x "$BIN"
 
 ok "Installed to $BIN"
+VERSION=$("$BIN" --version 2>/dev/null) && info "Version: $VERSION"
 
 # ---- PATH hint ----
 case ":${PATH}:" in
   *":${INSTALL_DIR}:"*) ;;
   *)
+    case "${SHELL:-}" in
+      */zsh)  RC="$HOME/.zshrc" ;;
+      */bash) RC="$HOME/.bashrc" ;;
+      *)      RC="$HOME/.profile" ;;
+    esac
     printf "\n"
-    printf "  ${YELLOW}${BOLD}!${RESET}  ${BOLD}$INSTALL_DIR is not in your PATH.${RESET}\n"
-    printf "     Add this to your ~/.zshrc or ~/.bashrc, then restart your shell:\n"
-    printf "     ${DIM}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}\n"
+    printf "  ${YELLOW}${BOLD}┌─ Action required ───────────────────────────────────────┐${RESET}\n"
+    printf "  ${YELLOW}${BOLD}│${RESET}  ${BOLD}wsh${RESET} is not on your PATH yet.\n"
+    printf "  ${YELLOW}${BOLD}│${RESET}  Run this to add it, then open a new terminal:\n"
+    printf "  ${YELLOW}${BOLD}│${RESET}\n"
+    printf "  ${YELLOW}${BOLD}│${RESET}  ${BOLD}echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> %s${RESET}\n" "$RC"
+    printf "  ${YELLOW}${BOLD}└─────────────────────────────────────────────────────────┘${RESET}\n"
     ;;
 esac
 
