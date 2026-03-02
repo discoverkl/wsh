@@ -19,7 +19,7 @@ import (
 	"strings"
 )
 
-//go:embed dist public node_modules
+//go:embed dist public node_modules package.json
 var appFiles embed.FS
 
 const nodeVer = "v20.19.0"
