@@ -153,7 +153,7 @@ function scheduleCleanup(id: string, session: Session): void {
 
 const { values } = parseArgs({
   options: {
-    port:      { type: 'string',  short: 'p', default: '3000' },
+    port:      { type: 'string',  short: 'p', default: '7681' },
     url:       { type: 'string',              default: '' },
     bind:      { type: 'string',              default: '' },
     'no-open': { type: 'boolean',             default: false },
@@ -171,7 +171,7 @@ if (values.help) {
   console.log('Usage: wsh [options]');
   console.log('');
   console.log('Options:');
-  console.log('  -p, --port <port>  Port to listen on (default: 3000)');
+  console.log('  -p, --port <port>  Port to listen on (default: 7681)');
   console.log('      --url <url>    Override advertised network URL (for NAT/proxy)');
   console.log('      --bind <addr>  Bind network server to this address (default: auto-detect LAN IP)');
   console.log('                     Use 0.0.0.0 to listen on all interfaces (e.g. inside Docker --network host)');
