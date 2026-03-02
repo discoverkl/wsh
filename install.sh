@@ -39,7 +39,8 @@ esac
 # REPO is replaced with the actual owner/repo by the release CI workflow.
 REPO="__REPO__"
 case "$REPO" in
-  *__REPO__*) fail "REPO placeholder was not replaced — this installer is broken" ;;
+  */*) ;; # valid owner/repo
+  *) fail "REPO placeholder was not replaced — this installer is broken" ;;
 esac
 URL="https://github.com/${REPO}/releases/latest/download/wsh-${PLATFORM}"
 INSTALL_DIR="$HOME/.local/bin"
