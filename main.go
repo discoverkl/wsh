@@ -215,6 +215,13 @@ func ensureNode(cache string) (string, error) {
 	return binPath, nil
 }
 
+// isExecutableAppFile reports whether an embedded app file needs the execute bit.
+// node-pty's spawn-helper must be executable, as must any native .node addon.
+func isExecutableAppFile(path string) bool {
+	base := filepath.Base(path)
+	return filepath.Ext(base) == ".node" || base == "spawn-helper"
+}
+
 // ---- App file extraction ----
 
 // ensureApp extracts embedded app files to the cache directory.
@@ -250,7 +257,11 @@ func ensureApp(cache string) (string, error) {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(dest, data, 0644)
+		perm := fs.FileMode(0644)
+		if isExecutableAppFile(path) {
+			perm = 0755
+		}
+		return os.WriteFile(dest, data, perm)
 	}); err != nil {
 		return "", err
 	}

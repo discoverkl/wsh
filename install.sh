@@ -66,5 +66,7 @@ case ":${PATH}:" in
     ;;
 esac
 
+ok "Done! Run it with:"
 printf "\n"
-exec "$BIN" "$@"
+printf "  ${BOLD}wsh${RESET}\n"
+printf "\n"
