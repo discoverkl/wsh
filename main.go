@@ -50,7 +50,7 @@ func main() {
 	}
 
 	serverJS := filepath.Join(appDir, "dist", "server.js")
-	os.Setenv("WSH_HOME", cache)
+	os.Setenv("WSH_RUNTIME_DIR", cache)
 	os.Exit(runServer(nodeBin, serverJS, os.Args[1:]))
 }
 
@@ -117,7 +117,7 @@ func dieWithHints(msg string, err error, hints []string) {
 // ---- Cache directory ----
 
 func cacheDir() (string, error) {
-	if env := os.Getenv("WSH_HOME"); env != "" {
+	if env := os.Getenv("WSH_RUNTIME_DIR"); env != "" {
 		return env, os.MkdirAll(env, 0755)
 	}
 	home, err := os.UserHomeDir()
