@@ -38,33 +38,34 @@ func main() {
 
 	nodeBin, err := ensureNode(cache)
 	if err != nil {
-		dieWithHints("Node.js setup failed", err, nodeHints(err))
+		dieWithHints("Node.js setup failed", err, nodeHints(err, cache))
 	}
 
 	appDir, err := ensureApp(cache)
 	if err != nil {
 		dieWithHints("App setup failed", err, []string{
 			"Check available disk space",
-			"Try: rm -rf ~/.wsh/app/ and re-run wsh",
+			fmt.Sprintf("Try: rm -rf %s/app/ and re-run wsh", cache),
 		})
 	}
 
 	serverJS := filepath.Join(appDir, "dist", "server.js")
+	os.Setenv("WSH_HOME", cache)
 	os.Exit(runServer(nodeBin, serverJS, os.Args[1:]))
 }
 
-func nodeHints(err error) []string {
+func nodeHints(err error, cache string) []string {
 	msg := err.Error()
 	if strings.Contains(msg, "checksum") {
 		return []string{
 			"The downloaded file may be corrupted — try again",
-			"Force a fresh download: rm -rf ~/.wsh/node/ and re-run wsh",
+			fmt.Sprintf("Force a fresh download: rm -rf %s/node/ and re-run wsh", cache),
 		}
 	}
 	if strings.Contains(msg, "extract") {
 		return []string{
 			"Check available disk space (Node.js requires ~150 MB)",
-			"Force a fresh download: rm -rf ~/.wsh/node/ and re-run wsh",
+			fmt.Sprintf("Force a fresh download: rm -rf %s/node/ and re-run wsh", cache),
 		}
 	}
 	return []string{
@@ -116,6 +117,9 @@ func dieWithHints(msg string, err error, hints []string) {
 // ---- Cache directory ----
 
 func cacheDir() (string, error) {
+	if env := os.Getenv("WSH_HOME"); env != "" {
+		return env, os.MkdirAll(env, 0755)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -173,7 +177,7 @@ func ensureNode(cache string) (string, error) {
 	}
 
 	fmt.Printf("\n  %s◆  First run — wsh needs to download Node.js%s\n", clCyan+clBold, clReset)
-	fmt.Printf("     %sNode.js %s (~30 MB) will be cached in ~/.wsh and reused on every future run.%s\n\n", clDim, nodeVer, clReset)
+	fmt.Printf("     %sNode.js %s (~30 MB) will be cached in %s and reused on every future run.%s\n\n", clDim, nodeVer, cache, clReset)
 
 	filename := nodeDirName() + nodeArchiveExt()
 	downloadURL := fmt.Sprintf("https://nodejs.org/dist/%s/%s", nodeVer, filename)
