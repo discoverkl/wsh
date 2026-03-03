@@ -109,7 +109,7 @@ function appendScrollback(session: Session, data: Buffer): void {
 
 function spawnSession(id: string): Session {
   let ptyProcess: IPty;
-  ptyProcess = pty.spawn('/bin/bash', [], {
+  ptyProcess = pty.spawn('/bin/bash', values['no-login'] ? [] : ['-l'], {
     name: 'xterm-256color',
     cols: 80,
     rows: 24,
@@ -175,9 +175,10 @@ const { values } = parseArgs({
     port:      { type: 'string',  short: 'p', default: '7681' },
     url:       { type: 'string',              default: '' },
     bind:      { type: 'string',              default: '' },
-    'no-open': { type: 'boolean',             default: false },
-    help:      { type: 'boolean', short: 'h', default: false },
-    version:   { type: 'boolean', short: 'v', default: false },
+    'no-open':  { type: 'boolean',             default: false },
+    'no-login': { type: 'boolean',             default: false },
+    help:       { type: 'boolean', short: 'h', default: false },
+    version:    { type: 'boolean', short: 'v', default: false },
   },
 });
 
@@ -199,6 +200,7 @@ if (values.help) {
   console.log('      --bind <addr>  Bind network server to this address (default: auto-detect LAN IP)');
   console.log('                     Use 0.0.0.0 to listen on all interfaces (e.g. inside Docker --network host)');
   console.log('      --no-open      Do not open browser on start');
+  console.log('      --no-login     Spawn non-login shells (default: login shell)');
   console.log('  -v, --version      Print version and exit');
   console.log('  -h, --help         Show this help message');
   process.exit(0);
