@@ -14,6 +14,21 @@ import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
 import { version } from '../package.json';
 
+// --- Subcommands (handled before server startup) ---
+
+if (process.argv[2] === 'token') {
+  const wshHome = process.env.WSH_HOME || path.join(os.homedir(), '.wsh');
+  const keyFile = path.join(wshHome, 'tls', 'key.pem');
+  try {
+    const key = fs.readFileSync(keyFile, 'utf8');
+    process.stdout.write(crypto.createHash('sha256').update(key).digest('hex').slice(0, 16) + '\n');
+    process.exit(0);
+  } catch {
+    console.error('No TLS key found. Run wsh once to generate it.');
+    process.exit(1);
+  }
+}
+
 const MAX_SCROLLBACK = 5 * 1024 * 1024; // 5 MB
 const SESSION_TTL = 10 * 60 * 1000;     // 10 minutes
 
@@ -174,6 +189,10 @@ if (values.version) {
 
 if (values.help) {
   console.log('Usage: wsh [options]');
+  console.log('       wsh token');
+  console.log('');
+  console.log('Commands:');
+  console.log('  token              Print the auth token and exit');
   console.log('');
   console.log('Options:');
   console.log('  -p, --port <port>  Port to listen on (default: 7681)');
