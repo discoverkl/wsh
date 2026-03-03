@@ -17,8 +17,7 @@ import { version } from '../package.json';
 // --- Subcommands (handled before server startup) ---
 
 if (process.argv[2] === 'token') {
-  const wshHome = process.env.WSH_HOME || path.join(os.homedir(), '.wsh');
-  const keyFile = path.join(wshHome, 'tls', 'key.pem');
+  const keyFile = path.join(os.homedir(), '.wsh', 'tls', 'key.pem');
   try {
     const key = fs.readFileSync(keyFile, 'utf8');
     process.stdout.write(crypto.createHash('sha256').update(key).digest('hex').slice(0, 16) + '\n');
