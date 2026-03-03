@@ -58,7 +58,7 @@ term.onTitleChange((title: string) => {
 });
 
 // Show app version as a tooltip on the window title.
-fetch('/').then(r => {
+fetch('./').then(r => {
   const v = r.headers.get('X-App-Version');
   if (v) windowTitle.title = `wsh v${v}`;
 });
@@ -88,7 +88,7 @@ const IS_OWNER      = `wsh_is_owner_${sessionId}`;
 document.getElementById('titlebar')!.addEventListener('mousedown', e => e.preventDefault());
 
 document.getElementById('new-session')!.addEventListener('click', () => {
-  window.open(location.origin, '_blank');
+  window.open('./', '_blank');
 });
 
 document.querySelector('.dot.close')!.addEventListener('click', () => {
@@ -128,7 +128,10 @@ let intentionalReconnect = false;
 let currentRole = '';
 
 function connect(): void {
-  ws = new WebSocket(`${proto}://${location.host}/terminal?${buildWsQuery()}`);
+  const wsBase = new URL('./terminal', location.href);
+  wsBase.protocol = proto + ':';
+  wsBase.search = buildWsQuery().toString();
+  ws = new WebSocket(wsBase.href);
   ws.binaryType = 'arraybuffer';
 
   ws.addEventListener('open', () => {
@@ -305,7 +308,7 @@ function showPinnedToast(sessions: { id: string; title: string }[]): void {
   for (const s of visible) {
     const a = document.createElement('a');
     a.className = 'toast-chip';
-    a.href = `/#${s.id}`;
+    a.href = `./#${s.id}`;
     a.target = '_blank';
     a.rel = 'noopener';
     if (s.title && s.title !== 'bash') {
@@ -349,7 +352,7 @@ shareBtn.addEventListener('click', async (e: MouseEvent) => {
     return;
   }
   try {
-    const res  = await fetch(`/api/share?session=${sessionId}`);
+    const res  = await fetch(`./api/share?session=${sessionId}`);
     const data = await res.json() as { writer?: string; viewer?: string; error?: string };
     if (data.error) {
       shareError.textContent = data.error;
