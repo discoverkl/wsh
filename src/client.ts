@@ -85,6 +85,8 @@ const { sessionId, wtoken } = getSessionParams();
 const PREFER_VIEWER = `wsh_prefer_viewer_${sessionId}`;
 const IS_OWNER      = `wsh_is_owner_${sessionId}`;
 
+document.getElementById('titlebar')!.addEventListener('mousedown', e => e.preventDefault());
+
 document.getElementById('new-session')!.addEventListener('click', () => {
   window.open(location.origin, '_blank');
 });
