@@ -98,8 +98,25 @@ const handlers: Handlers = {
   },
 };
 
+// Strip terminal query responses that leak into PTY output.
+// These are harmless during a live session but render as visible garbage
+// when the scrollback buffer is replayed on reconnect.
+const termResponseRe = new RegExp(
+  [
+    '\\x1b\\][0-9]+;[^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)',  // OSC responses (color queries, etc.)
+    '\\x1b\\[\\??[0-9;]*[Rc]',                             // CPR and DA responses
+  ].join('|'),
+  'g',
+);
+
+function stripTermResponses(data: string): string {
+  return data.replace(termResponseRe, '');
+}
+
 function appendScrollback(session: Session, data: Buffer): void {
-  session.scrollback = Buffer.concat([session.scrollback, data]);
+  const cleaned = Buffer.from(stripTermResponses(data.toString('utf8')), 'utf8');
+  if (cleaned.length === 0) return;
+  session.scrollback = Buffer.concat([session.scrollback, cleaned]);
   if (session.scrollback.length > MAX_SCROLLBACK) {
     session.scrollback = session.scrollback.slice(
       session.scrollback.length - MAX_SCROLLBACK
