@@ -16,7 +16,26 @@ import { version } from '../package.json';
 
 // --- Subcommands (handled before server startup) ---
 
-if (process.argv[2] === 'token') {
+if (process.argv[2] === 'version') {
+  console.log(`v${version}`);
+  process.exit(0);
+} else if (process.argv[2] === 'update') {
+  const { execSync } = require('child_process') as typeof import('child_process');
+  try {
+    const body = execSync('curl -fsSL https://api.github.com/repos/discoverkl/wsh/releases/latest', { encoding: 'utf8' });
+    const latest = (JSON.parse(body) as { tag_name: string }).tag_name.replace(/^v/, '');
+    if (latest === version) {
+      console.log(`Already up to date (v${version}).`);
+      process.exit(0);
+    }
+    console.log(`Updating v${version} → v${latest} ...`);
+    execSync('curl -fsSL https://github.com/discoverkl/wsh/releases/latest/download/install.sh | sh', { stdio: 'inherit' });
+  } catch (err: any) {
+    console.error('Update failed:', err.message);
+    process.exit(1);
+  }
+  process.exit(0);
+} else if (process.argv[2] === 'token') {
   const keyFile = path.join(os.homedir(), '.wsh', 'tls', 'key.pem');
   try {
     const key = fs.readFileSync(keyFile, 'utf8');
@@ -188,6 +207,7 @@ function scheduleCleanup(id: string, session: Session): void {
 // --- Args ---
 
 const { values } = parseArgs({
+  allowPositionals: true,
   options: {
     port:      { type: 'string',  short: 'p', default: '7681' },
     url:       { type: 'string',              default: '' },
@@ -209,6 +229,8 @@ if (values.help) {
   console.log('       wsh token');
   console.log('');
   console.log('Commands:');
+  console.log('  update             Update to the latest version');
+  console.log('  version            Print version and exit');
   console.log('  token              Print the auth token and exit');
   console.log('');
   console.log('Options:');
