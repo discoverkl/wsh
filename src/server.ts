@@ -342,11 +342,8 @@ if (token) app.use(makeTokenMiddleware(token));
 app.get('/api/share', (req: express.Request, res: express.Response) => {
   const sessionId = new URL(req.url, `http://${req.headers.host}`).searchParams.get('session');
   if (!sessionId) { res.status(400).json({ error: 'session ID required' }); return; }
-  if (!tls || !networkBase) { res.status(503).json({ error: 'Network sharing not available (no LAN interface)' }); return; }
-  res.json({
-    writer: `${networkBase}/#${sessionId}?wt=${writerToken(sessionId)}`,
-    viewer: `${networkBase}/#${sessionId}`,
-  });
+  if (!tls) { res.status(503).json({ error: 'Network sharing not available' }); return; }
+  res.json({ wtoken: writerToken(sessionId) });
 });
 
 app.use(express.static(path.join(__dirname, '..', 'public')));

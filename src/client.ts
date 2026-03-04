@@ -353,7 +353,7 @@ shareBtn.addEventListener('click', async (e: MouseEvent) => {
   }
   try {
     const res  = await fetch(`./api/share?session=${sessionId}`);
-    const data = await res.json() as { writer?: string; viewer?: string; error?: string };
+    const data = await res.json() as { wtoken?: string; error?: string };
     if (data.error) {
       shareError.textContent = data.error;
       shareError.removeAttribute('hidden');
@@ -361,8 +361,9 @@ shareBtn.addEventListener('click', async (e: MouseEvent) => {
       (document.getElementById('viewer-url') as HTMLInputElement).value = '';
     } else {
       shareError.setAttribute('hidden', '');
-      (document.getElementById('writer-url') as HTMLInputElement).value = data.writer ?? '';
-      (document.getElementById('viewer-url') as HTMLInputElement).value = data.viewer ?? '';
+      const base = `${location.origin}${location.pathname}`;
+      (document.getElementById('writer-url') as HTMLInputElement).value = `${base}#${sessionId}?wt=${data.wtoken}`;
+      (document.getElementById('viewer-url') as HTMLInputElement).value = `${base}#${sessionId}`;
     }
   } catch {
     shareError.textContent = 'Failed to fetch share URLs';
