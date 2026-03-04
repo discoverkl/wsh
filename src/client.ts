@@ -378,10 +378,18 @@ sharePopover.addEventListener('click', (e: MouseEvent) => e.stopPropagation());
 document.querySelectorAll<HTMLButtonElement>('.copy-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     const input = document.getElementById(btn.dataset.for!)! as HTMLInputElement;
-    navigator.clipboard.writeText(input.value).then(() => {
+    const text = input.value;
+    const done = () => {
       const orig = btn.textContent!;
       btn.textContent = 'Copied!';
       setTimeout(() => { btn.textContent = orig; }, 1500);
-    });
+    };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(done);
+    } else {
+      input.select();
+      document.execCommand('copy');
+      done();
+    }
   });
 });
