@@ -170,7 +170,7 @@
     #pin-btn.pinned { color: #a6e3a1; }
     #pin-btn[hidden] { display: none; }
 
-    #share-btn, #new-session, #pin-btn {
+    #clear-btn, #share-btn, #new-session, #pin-btn {
       background: none;
       border: none;
       padding: 0;
@@ -184,7 +184,7 @@
       cursor: pointer;
       transition: color 0.15s, background 0.15s;
     }
-    #share-btn:hover, #new-session:hover, #pin-btn:hover {
+    #clear-btn:hover, #share-btn:hover, #new-session:hover, #pin-btn:hover {
       color: #cdd6f4;
       background: rgba(205, 214, 244, 0.07);
     }
@@ -364,15 +364,22 @@
         </div>
         <div id="actions">
           <span id="role-badge" hidden></span>
-          <button id="pin-btn" title="Pin (keep alive after disconnect)" hidden>
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M9.828 1a.5.5 0 0 1 .354.147l4.671 4.671a.5.5 0 0 1-.069.706L11 9.243V13.5a.5.5 0 0 1-.854.354l-3-3L4.207 14.5a.5.5 0 0 1-.707-.707l3.646-3.639-3-3A.5.5 0 0 1 4.5 6h4.257l2.72-3.784A.5.5 0 0 1 9.828 1z"/>
+          <button id="clear-btn" title="Clear Scrollback">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 3h10M4.5 3V2h5v1M3.5 3v9h7V3"/>
+              <line x1="5.5" y1="5.5" x2="5.5" y2="9.5"/>
+              <line x1="8.5" y1="5.5" x2="8.5" y2="9.5"/>
             </svg>
           </button>
           <button id="share-btn" title="Share Session">
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="11" cy="2.5" r="1.5"/><circle cx="11" cy="11.5" r="1.5"/><circle cx="3" cy="7" r="1.5"/>
               <line x1="4.4" y1="6.3" x2="9.6" y2="3.2"/><line x1="4.4" y1="7.7" x2="9.6" y2="10.8"/>
+            </svg>
+          </button>
+          <button id="pin-btn" title="Pin (keep alive after disconnect)" hidden>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M9.828 1a.5.5 0 0 1 .354.147l4.671 4.671a.5.5 0 0 1-.069.706L11 9.243V13.5a.5.5 0 0 1-.854.354l-3-3L4.207 14.5a.5.5 0 0 1-.707-.707l3.646-3.639-3-3A.5.5 0 0 1 4.5 6h4.257l2.72-3.784A.5.5 0 0 1 9.828 1z"/>
             </svg>
           </button>
           <button id="new-session" title="New Session">

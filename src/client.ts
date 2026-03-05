@@ -95,6 +95,12 @@ document.querySelector('.dot.close')!.addEventListener('click', () => {
   sendAction({ type: 'close' });
 });
 
+document.getElementById('clear-btn')!.addEventListener('click', () => {
+  term.clear();
+  sendAction({ type: 'clear' });
+  term.focus();
+});
+
 document.querySelector('.dot.maximize')!.addEventListener('click', () => {
   if (document.fullscreenElement) {
     document.exitFullscreen();

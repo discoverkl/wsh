@@ -76,12 +76,16 @@ interface CloseMessage {
   type: 'close';
 }
 
+interface ClearMessage {
+  type: 'clear';
+}
+
 interface PinMessage {
   type: 'pin';
   pinned: boolean;
 }
 
-type ClientMessage = ResizeMessage | CloseMessage | PinMessage;
+type ClientMessage = ResizeMessage | CloseMessage | ClearMessage | PinMessage;
 
 function parseClientMessage(text: string): ClientMessage | null {
   let obj: unknown;
@@ -96,6 +100,7 @@ function parseClientMessage(text: string): ClientMessage | null {
     return null;
   }
   if (type === 'close') return { type: 'close' };
+  if (type === 'clear') return { type: 'clear' };
   if (type === 'pin') {
     const { pinned } = obj as Record<string, unknown>;
     if (typeof pinned === 'boolean') return { type: 'pin', pinned };
@@ -117,25 +122,8 @@ const handlers: Handlers = {
   },
 };
 
-// Strip terminal query responses that leak into PTY output.
-// These are harmless during a live session but render as visible garbage
-// when the scrollback buffer is replayed on reconnect.
-const termResponseRe = new RegExp(
-  [
-    '\\x1b\\][0-9]+;[^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)',  // OSC responses (color queries, etc.)
-    '\\x1b\\[\\??[0-9;]*[Rc]',                             // CPR and DA responses
-  ].join('|'),
-  'g',
-);
-
-function stripTermResponses(data: string): string {
-  return data.replace(termResponseRe, '');
-}
-
 function appendScrollback(session: Session, data: Buffer): void {
-  const cleaned = Buffer.from(stripTermResponses(data.toString('utf8')), 'utf8');
-  if (cleaned.length === 0) return;
-  session.scrollback = Buffer.concat([session.scrollback, cleaned]);
+  session.scrollback = Buffer.concat([session.scrollback, data]);
   if (session.scrollback.length > MAX_SCROLLBACK) {
     session.scrollback = session.scrollback.slice(
       session.scrollback.length - MAX_SCROLLBACK
@@ -489,8 +477,15 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     const text = (data as Buffer).toString();
     const msg  = parseClientMessage(text);
     if (msg) {
-      // Only owner can close or pin; writers can resize.
+      // Only owner can close or pin; writers can resize and clear.
       if ((msg.type === 'close' || msg.type === 'pin') && credential !== 'owner') return;
+      if (msg.type === 'clear') {
+        currentSession.scrollback = Buffer.alloc(0);
+        // Ask the shell to redraw its prompt so new scrollback isn't empty.
+        currentSession.pty.write('\f');
+        console.log(`[session ${id}] scrollback cleared`);
+        return;
+      }
       if (msg.type === 'pin') {
         currentSession.pinned = msg.pinned;
         if (!msg.pinned && currentSession.writer === null) scheduleCleanup(id, currentSession);
