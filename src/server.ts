@@ -21,8 +21,14 @@ if (process.argv[2] === 'version') {
   process.exit(0);
 } else if (process.argv[2] === 'update') {
   const { execSync } = require('child_process') as typeof import('child_process');
-  console.log(`Current: v${version}`);
   try {
+    const body = execSync('curl -fsSL https://api.github.com/repos/discoverkl/wsh/releases/latest', { encoding: 'utf8' });
+    const latest = (JSON.parse(body) as { tag_name: string }).tag_name.replace(/^v/, '');
+    if (latest === version) {
+      console.log(`Already up to date (v${version}).`);
+      process.exit(0);
+    }
+    console.log(`Updating v${version} → v${latest} ...`);
     execSync('curl -fsSL https://github.com/discoverkl/wsh/releases/latest/download/install.sh | sh', { stdio: 'inherit' });
   } catch (err: any) {
     console.error('Update failed:', err.message);
