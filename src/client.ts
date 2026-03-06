@@ -170,6 +170,10 @@ function connect(): void {
     if (event.code === 1000 && event.reason === 'PTY process exited') {
       location.hash = '';
       term.write('\r\n[Process exited. Refresh to start a new session.]\r\n');
+    } else if (event.code === 4003) {
+      term.write('\r\n[Session not found.]\r\n');
+    } else if (event.code === 4029) {
+      term.write('\r\n[Too many attempts. Please wait and try again.]\r\n');
     } else {
       term.write('\r\n[Disconnected. Refresh to reconnect.]\r\n');
     }

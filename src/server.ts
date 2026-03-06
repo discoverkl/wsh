@@ -49,6 +49,10 @@ if (process.argv[2] === 'version') {
 
 const MAX_SCROLLBACK = 5 * 1024 * 1024; // 5 MB
 const SESSION_TTL = 10 * 60 * 1000;     // 10 minutes
+const PING_INTERVAL = 30_000;           // 30 seconds
+const PONG_TIMEOUT  = 10_000;           // 10 seconds
+const RATE_WINDOW   = 60_000;           // 1 minute
+const RATE_MAX_MISS = 10;               // max invalid session attempts per IP per window
 
 type Role = 'owner' | 'writer' | 'viewer';
 
@@ -63,6 +67,7 @@ interface Session {
 }
 
 const sessions = new Map<string, Session>();
+const missAttempts = new Map<string, number[]>(); // IP -> timestamps of invalid session hits
 
 // --- Client → server action messages ---
 
@@ -449,7 +454,22 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
   } else {
     // New session — only owners may create one.
-    if (credential !== 'owner') { ws.close(4003, 'only owners can create sessions'); return; }
+    if (credential !== 'owner') {
+      // Rate-limit invalid session attempts per IP to prevent brute-force scanning.
+      const ip = req.socket.remoteAddress ?? '';
+      if (!isLoopback(ip)) {
+        const now = Date.now();
+        const attempts = missAttempts.get(ip)?.filter(t => t > now - RATE_WINDOW) ?? [];
+        attempts.push(now);
+        missAttempts.set(ip, attempts);
+        if (attempts.length > RATE_MAX_MISS) {
+          ws.close(4029, 'too many attempts');
+          return;
+        }
+      }
+      ws.close(4003, 'only owners can create sessions');
+      return;
+    }
     try {
       session = spawnSession(id);
     } catch (err) {
@@ -504,10 +524,12 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   });
 
   ws.on('close', () => {
+    clearInterval(pingTimer);
     currentSession.peers.delete(ws);
     if (currentSession.writer === ws) {
       currentSession.writer = null;
-      const next = [...currentSession.peers].find(([, r]) => r !== 'viewer')?.[0];
+      const next = [...currentSession.peers].find(([, r]) => r === 'owner')?.[0]
+                ?? [...currentSession.peers].find(([, r]) => r === 'writer')?.[0];
       if (next) {
         currentSession.writer = next;
         next.send(JSON.stringify({ type: 'role', role: currentSession.peers.get(next) }));
@@ -518,6 +540,15 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       }
     }
   });
+
+  // Heartbeat: detect dead connections within PING_INTERVAL + PONG_TIMEOUT.
+  let pongReceived = true;
+  ws.on('pong', () => { pongReceived = true; });
+  const pingTimer = setInterval(() => {
+    if (!pongReceived) { ws.terminate(); return; }
+    pongReceived = false;
+    ws.ping();
+  }, PING_INTERVAL);
 });
 
 // --- Browser launch ---
