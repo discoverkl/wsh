@@ -91,7 +91,8 @@ document.getElementById('new-session')!.addEventListener('click', () => {
   window.open('./', '_blank');
 });
 
-document.querySelector('.dot.close')!.addEventListener('click', () => {
+document.querySelector('.dot.close')!.addEventListener('click', (e) => {
+  if ((e.currentTarget as HTMLElement).classList.contains('disabled')) return;
   sendAction({ type: 'close' });
 });
 
@@ -167,6 +168,18 @@ function connect(): void {
   ws.addEventListener('close', (event: CloseEvent) => {
     if (intentionalReconnect) { intentionalReconnect = false; return; }
     setConnStatus('disconnected');
+    term.options.disableStdin = true;
+
+    const sessionGone = event.code === 1000 || event.code === 4003 || event.code === 4029;
+    if (sessionGone) {
+      // Session is permanently gone — hide all session controls.
+      pinBtn.setAttribute('hidden', '');
+      roleBadge.setAttribute('hidden', '');
+      shareBtn.setAttribute('hidden', '');
+      document.getElementById('clear-btn')!.setAttribute('hidden', '');
+      document.querySelector('.dot.close')!.classList.add('disabled');
+    }
+
     if (event.code === 1000 && event.reason === 'PTY process exited') {
       location.hash = '';
       term.write('\r\n[Process exited. Refresh to start a new session.]\r\n');
