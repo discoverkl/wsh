@@ -3,15 +3,16 @@
 ## Architecture
 
 ```
-Browser (xterm.js)  ←──WS──→  server.ts  ←──bytes──→  node-pty (bash/claude)
+Browser (xterm.js)  <--WS-->  server.ts  <--bytes-->  node-pty (bash/claude)
 ```
 
-**Per-connection model**: one PTY spawned per WebSocket connection. Two tabs = two independent sessions.
+**Shared-session model**: Sessions are identified by a 6-char base-36 ID in the URL hash. Multiple browser tabs can connect to the same session. Each session has exactly one PTY, one active writer, and any number of viewers.
 
 **Message framing**:
-- Binary frame → raw bytes to PTY (keyboard input, legacy X10 mouse)
-- Text frame, JSON `{type:"resize", cols, rows}` → `ptyProcess.resize()`
-- PTY output → binary frame to client
+- **Client -> Server (binary)**: Raw bytes forwarded to PTY (keyboard input, legacy X10 mouse)
+- **Client -> Server (text/JSON)**: Control messages — `resize`, `close`, `clear`, `pin`
+- **Server -> Client (binary)**: Raw PTY output
+- **Server -> Client (text/JSON)**: Role assignments (`role`), pin state updates (`pin`)
 
 ## Critical Claude Code Requirements
 
@@ -21,11 +22,75 @@ Browser (xterm.js)  ←──WS──→  server.ts  ←──bytes──→  no
 | `COLORTERM=truecolor` | explicit `env` override |
 | Correct initial size | `fitAddon.fit()` + `sendResize` in `requestAnimationFrame` on WS open |
 | Mouse support | Automatic via xterm.js SGR mode; `onBinary` handles legacy X10 (bytes >127) |
-| No PTY orphans | `ptyProcess.kill('SIGHUP')` on WS close |
 | Resize stability | 150ms debounce; use `term.onResize` (not window event) as send trigger |
 
 **`convertEol: false`** — PTY already emits `\r\n`; double-converting causes artifacts.
 **`overflow: hidden` on body** — prevents scrollbars that shrink viewport and trigger FitAddon resize loops.
+
+## Session Lifecycle
+
+```
+writer connects  --> session spawned (PTY created, added to sessions map)
+writer disconnects --> promote next non-viewer peer to writer
+                      if no promotable peer: scheduleCleanup()
+  pinned=true   --> no timer, session lives until PTY exits or manual close
+  pinned=false  --> SESSION_TTL (10 min) timer; expiry kills PTY + deletes session
+any peer reconnects --> cancel cleanup timer
+PTY exits       --> all peers closed, session deleted immediately (bypasses TTL)
+```
+
+- Only owners can create new sessions; non-owners get rejected with code 4003
+- On reconnect, the full scrollback buffer (up to 5 MB) is replayed to the new client
+- Only one active writer at a time; a new writer demotes the current writer to viewer
+- Only owners can close sessions or toggle pin state
+- Writers can resize the PTY and clear scrollback
+- `clear` resets the scrollback buffer and sends `\f` (form feed) to redraw the prompt
+- Pin state is in-memory only; a server restart resets it
+- OSC title sequences are parsed from PTY output and stored on the session for display
+
+## Roles and Access Control
+
+Three roles: **owner**, **writer**, **viewer**.
+
+| Role | Create session | Input to PTY | Resize | Clear | Close | Pin |
+|---|---|---|---|---|---|---|
+| Owner | yes | yes | yes | yes | yes | yes |
+| Writer | no | yes | yes | yes | no | no |
+| Viewer | no | no | no | no | no | no |
+
+**Role assignment** (server-side):
+- Loopback connections or valid owner cookie -> `owner`
+- Valid writer token (`?wtoken=`) -> `writer`
+- No credentials -> `viewer` (session ID alone is the viewer secret)
+
+**Yielding**: An owner/writer can voluntarily reconnect as viewer by setting `?yield=1`. The client tracks this in `sessionStorage` (`PREFER_VIEWER`) so refreshes maintain the choice.
+
+**Writer promotion**: When the active writer disconnects, the server promotes the first non-viewer peer. If none exist, the cleanup timer starts.
+
+**Role switching (client-side)**:
+- Viewers with credentials (writer token or owner status) see a clickable "View Only" badge to upgrade
+- Writers see a clickable "Writer" badge to voluntarily demote to viewer
+- Both trigger a WebSocket reconnect with updated query parameters
+
+## Security Model
+
+- **Localhost**: Plain HTTP, no authentication required (loopback = owner)
+- **LAN**: HTTPS with self-signed TLS cert (generated on first run, stored in `~/.wsh/tls/`)
+  - Certificate fingerprint printed at startup for manual verification
+- **Owner token**: 16-char hex, derived from `SHA256(TLS private key)`, stored as `HttpOnly` cookie after first URL-based auth
+- **Writer token**: 16-char hex per-session, derived from `SHA256(TLS key + salt + session ID)`
+  - Salt is a random 32-byte value persisted in `~/.wsh/tls/writer-salt.txt`
+- **Viewer access**: Session ID only (6-char base-36); treat as semi-private
+- API endpoints (`/api/*`) require owner auth from non-loopback clients; static pages load without auth
+
+**Share URLs**:
+- Writer link: `<base>#<sessionId>?wt=<writerToken>` — grants write access
+- Viewer link: `<base>#<sessionId>` — read-only access
+- Generated via `GET /api/share?session=<id>` (owner-only)
+
+## Pinned Sessions Toast
+
+When an owner connects, the server reports any other pinned sessions. The client shows a dismissable toast with clickable chips linking to those sessions (max 3 shown, overflow indicated). The toast auto-dismisses after 8 seconds and is deduplicated per tab via `sessionStorage`.
 
 ## Distribution: Go Wrapper Binary
 
@@ -36,27 +101,4 @@ Single executable, no prerequisites. On first run:
 
 Subsequent runs skip 1 and 2 — near-instant startup.
 
-Node.js (~30 MB) is downloaded, not embedded. The Go binary embeds `dist/`, `public/`, `node_modules/` (~15–18 MB total), including the platform-native `pty.node` addon. Build must run on the target platform for this reason.
-
-## Session Lifecycle
-
-```
-writer connects → session spawned
-writer disconnects → scheduleCleanup()
-  pinned=true  → no timer, session lives until PTY exits or manually closed
-  pinned=false → SESSION_TTL (10 min) timer; expiry kills PTY + deletes session
-PTY exits → all peers closed, session deleted immediately (bypasses TTL)
-```
-
-- Only owners can pin/unpin; pin state is broadcast to all owner peers so multiple owner tabs stay in sync
-- `scheduleCleanup` is a no-op while any writer is connected — the timer starts only after the last writer leaves
-- Pin state is in-memory only; a server restart resets it
-- Client applies pin state optimistically; the server's broadcast corrects any divergence on reconnect
-
-## Security Model
-
-- HTTP on localhost, HTTPS (self-signed, fingerprint printed) on LAN interface
-- Owner token: stable, derived from TLS key; stored as `HttpOnly` cookie after first use
-- Writer token: per-session, 16-char hex, derived from TLS key + salt + session ID
-- Viewer access: session ID only (6-char base-36, treat as semi-private)
-- Only one writer active at a time; new writer demotes previous writer to viewer
+Node.js (~30 MB) is downloaded, not embedded. The Go binary embeds `dist/`, `public/`, `node_modules/` (~15-18 MB total), including the platform-native `pty.node` addon. Build must run on the target platform for this reason.

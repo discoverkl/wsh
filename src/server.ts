@@ -448,8 +448,8 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     ws.send(JSON.stringify({ type: 'role', role: sentRole, ...(sentRole === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
     if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
   } else {
-    // New session — only writers/owners may create one.
-    if (!isWriter) { ws.close(4003, 'viewers cannot create sessions'); return; }
+    // New session — only owners may create one.
+    if (credential !== 'owner') { ws.close(4003, 'only owners can create sessions'); return; }
     try {
       session = spawnSession(id);
     } catch (err) {
