@@ -171,17 +171,17 @@ function connect(): void {
     if (intentionalReconnect) { intentionalReconnect = false; return; }
     setConnStatus('disconnected');
     term.options.disableStdin = true;
+    sessionDead = true;
+    sharePopover.classList.remove('visible');
 
     const sessionGone = event.code === 1000 || event.code === 4003 || event.code === 4029;
     if (sessionGone) {
-      sessionDead = true;
       // Session is permanently gone — hide all session controls.
       pinBtn.setAttribute('hidden', '');
       roleBadge.setAttribute('hidden', '');
       shareBtn.setAttribute('hidden', '');
       document.getElementById('clear-btn')!.setAttribute('hidden', '');
       document.querySelector('.dot.close')!.classList.add('disabled');
-      sharePopover.classList.remove('visible');
     }
 
     if (event.code === 1000 && event.reason === 'PTY process exited') {
