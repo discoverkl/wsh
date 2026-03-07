@@ -57,42 +57,40 @@ fetch('./').then(r => {
   if (v) windowTitle.title = `wsh v${v}`;
 });
 
+// Check if a session ID is already in the URL before parsing (used below).
+const hadSession = location.hash.length > 1;
+
 // Writer share links embed the token in the hash: /#id?wt=...
 // Viewer share links are just /#id — the session ID alone is the viewer secret.
-function getSessionParams(): { sessionId: string; wtoken: string | null; isNew: boolean } {
+function getSessionParams(): { sessionId: string; wtoken: string | null } {
   const hash = location.hash.slice(1);
   const q = hash.indexOf('?');
   let id = q >= 0 ? hash.slice(0, q) : hash;
   const params = q >= 0 ? new URLSearchParams(hash.slice(q + 1)) : null;
-  const isNew = !id;
-  if (isNew) {
+  if (!id) {
     id = (crypto.getRandomValues(new Uint32Array(1))[0] % 2176782336).toString(36).padStart(6, '0');
     location.hash = id;
   }
-  return { sessionId: id, wtoken: params?.get('wt') ?? null, isNew };
+  return { sessionId: id, wtoken: params?.get('wt') ?? null };
 }
 
-const { sessionId, wtoken, isNew } = getSessionParams();
-
-// When opening an existing session in a NEW tab, default to viewer mode.
-// sessionStorage persists across refresh but not across tabs, so we use a
-// visited marker to distinguish "new tab" from "refresh".
-const SESSION_VISITED = `wsh_visited_${sessionId}`;
-if (!isNew && !sessionStorage.getItem(SESSION_VISITED)) {
-  sessionStorage.setItem(`wsh_prefer_viewer_${sessionId}`, 'true');
-}
-sessionStorage.setItem(SESSION_VISITED, 'true');
+const { sessionId, wtoken } = getSessionParams();
 
 // Extract app name from pathname (e.g., /python3 → "python3").
 let appName = location.pathname.replace(/^\/+|\/+$/g, '') || 'bash';
 windowTitle.textContent = appName;
 document.title = appName;
 
-// sessionStorage keys (tab-specific, survive refresh):
-// PREFER_VIEWER: this tab was demoted or self-switched to viewer — don't claim writer on reconnect.
-// IS_OWNER:      this tab is the owner — can always reclaim writer by clearing PREFER_VIEWER.
-const PREFER_VIEWER = `wsh_prefer_viewer_${sessionId}`;
-const IS_OWNER      = `wsh_is_owner_${sessionId}`;
+// --- Role state (per-tab via sessionStorage) ---
+// Single key: 'active' = connect as owner/writer, 'viewer' = connect with yield.
+// First load without hash → creating session → 'active'.
+// First load with hash    → joining existing → 'viewer'.
+// Refresh                 → key persists, preserving the user's choice.
+const ROLE_KEY = `wsh_role_${sessionId}`;
+if (!sessionStorage.getItem(ROLE_KEY)) {
+  sessionStorage.setItem(ROLE_KEY, hadSession ? 'viewer' : 'active');
+}
+let isOwner = false;
 
 document.getElementById('titlebar')!.addEventListener('mousedown', e => e.preventDefault());
 
@@ -127,17 +125,11 @@ document.addEventListener('fullscreenchange', () => {
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 
 function buildWsQuery(): URLSearchParams {
-  const preferViewer = sessionStorage.getItem(PREFER_VIEWER) === 'true';
+  const isViewer = sessionStorage.getItem(ROLE_KEY) === 'viewer';
   const query = new URLSearchParams({ session: sessionId });
   if (appName) query.set('app', appName);
-  if (wtoken && !preferViewer) {
-    query.set('wtoken', wtoken);
-  }
-  // yield=1 tells the server not to claim the writer seat even if credentials allow it.
-  // Needed for owners (whose credential comes from IP, not a token that can simply be omitted).
-  if (preferViewer) {
-    query.set('yield', '1');
-  }
+  if (wtoken && !isViewer) query.set('wtoken', wtoken);
+  if (isViewer) query.set('yield', '1');
   return query;
 }
 
@@ -241,9 +233,7 @@ function applyPinState(state: boolean): void {
 
 function applyRole(role: string, credential?: string): void {
   currentRole = role;
-
-  // Track actual credential so we know upgrade is possible even when yielding.
-  if (credential === 'owner') sessionStorage.setItem(IS_OWNER, 'true');
+  if (credential === 'owner') isOwner = true;
 
   if (role === 'owner') {
     roleBadge.setAttribute('hidden', '');
@@ -254,12 +244,8 @@ function applyRole(role: string, credential?: string): void {
 
   pinBtn.setAttribute('hidden', '');
 
-  if (role === 'viewer') {
-    sessionStorage.setItem(PREFER_VIEWER, 'true');
-  }
-
-  const canUpgrade = role === 'viewer' && (!!wtoken || sessionStorage.getItem(IS_OWNER) === 'true');
-  const switchable  = role === 'writer' || canUpgrade;
+  const canUpgrade = role === 'viewer' && (isOwner || !!wtoken);
+  const switchable = role === 'writer' || canUpgrade;
 
   roleBadge.textContent = role === 'writer' ? 'Writer' : 'View Only';
   roleBadge.className = role + (switchable ? ' switchable' : '');
@@ -269,14 +255,14 @@ function applyRole(role: string, credential?: string): void {
 
 roleBadge.addEventListener('click', () => {
   if (sessionDead) return;
-  if (currentRole === 'viewer' && (wtoken || sessionStorage.getItem(IS_OWNER) === 'true')) {
-    sessionStorage.removeItem(PREFER_VIEWER);
+  if (currentRole === 'viewer' && (isOwner || wtoken)) {
+    sessionStorage.setItem(ROLE_KEY, 'active');
     term.reset();
     intentionalReconnect = true;
     ws.close();
     connect();
   } else if (currentRole === 'writer') {
-    sessionStorage.setItem(PREFER_VIEWER, 'true');
+    sessionStorage.setItem(ROLE_KEY, 'viewer');
     term.reset();
     intentionalReconnect = true;
     ws.close();
