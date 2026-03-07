@@ -6,7 +6,7 @@
 Browser (xterm.js)  <--WS-->  server.ts  <--bytes-->  node-pty (bash/claude)
 ```
 
-**Shared-session model**: Sessions are identified by a 6-char base-36 ID in the URL hash. Multiple browser tabs can connect to the same session. Each session has exactly one PTY, one active writer, and any number of viewers.
+**Shared-session model**: URLs have the form `/:appName#sessionId`. The app name selects which program to run; the session ID (6-char base-36) identifies the PTY. Multiple browser tabs can connect to the same session. Each session has exactly one PTY, one active writer, and any number of viewers.
 
 **Message framing**:
 - **Client -> Server (binary)**: Raw bytes forwarded to PTY (keyboard input, legacy X10 mouse)
@@ -84,13 +84,41 @@ Three roles: **owner**, **writer**, **viewer**.
 - API endpoints (`/api/*`) require owner auth from non-loopback clients; static pages load without auth
 
 **Share URLs**:
-- Writer link: `<base>#<sessionId>?wt=<writerToken>` — grants write access
-- Viewer link: `<base>#<sessionId>` — read-only access
+- Writer link: `<base>/<appName>#<sessionId>?wt=<writerToken>` — grants write access
+- Viewer link: `<base>/<appName>#<sessionId>` — read-only access
 - Generated via `GET /api/share?session=<id>` (owner-only)
 
 ## Pinned Sessions Toast
 
 When an owner connects, the server reports any other pinned sessions. The client shows a dismissable toast with clickable chips linking to those sessions (max 3 shown, overflow indicated). The toast auto-dismisses after 8 seconds and is deduplicated per tab via `sessionStorage`.
+
+## App Catalog
+
+Sessions can run different programs, not just `bash`. The app name is always in the URL: `/:app#:session`.
+
+**URL scheme**: `GET /` redirects to `/bash`. Every session URL has the form `/:appName#sessionId`. Refreshing or opening a new tab preserves the app — the client reads the app name from the pathname and passes it in the WebSocket `app` query parameter.
+
+**Config**: Built-in app `bash` is always present. Additional apps are defined in `~/.wsh/apps.json`:
+
+```json
+{
+  "apps": {
+    "python3": { "title": "Python REPL", "command": "python3" },
+    "traecli": { "title": "Trae CLI", "command": "traecli" }
+  }
+}
+```
+
+Each entry: `command` (required), `args` (optional string array), `title` (optional display name). Built-in keys cannot be overridden.
+
+**Session creation**:
+
+| Method | Description |
+|---|---|
+| `GET /:appName` | Serves `index.html`. Client generates a session ID and connects via WebSocket with `?app=appName`. |
+| `POST /api/sessions` | JSON body `{ "app": "appName" }` — spawns a pinned session, returns `{ id, url }`. Defaults to `bash`. |
+
+**CLI**: `wsh apps` lists available apps. `wsh new [appName]` creates a session via the API.
 
 ## Distribution: Go Wrapper Binary
 

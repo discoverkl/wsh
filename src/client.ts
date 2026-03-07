@@ -79,6 +79,9 @@ function getSessionParams(): { sessionId: string; wtoken: string | null } {
 
 const { sessionId, wtoken } = getSessionParams();
 
+// Extract app name from pathname (e.g., /python3 → "python3").
+const appName = location.pathname.replace(/^\/+|\/+$/g, '') || 'bash';
+
 // sessionStorage keys (tab-specific, survive refresh):
 // PREFER_VIEWER: this tab was demoted or self-switched to viewer — don't claim writer on reconnect.
 // IS_OWNER:      this tab is the owner — can always reclaim writer by clearing PREFER_VIEWER.
@@ -88,7 +91,7 @@ const IS_OWNER      = `wsh_is_owner_${sessionId}`;
 document.getElementById('titlebar')!.addEventListener('mousedown', e => e.preventDefault());
 
 document.getElementById('new-session')!.addEventListener('click', () => {
-  window.open('./', '_blank');
+  window.open(`/${appName}`, '_blank');
 });
 
 document.querySelector('.dot.close')!.addEventListener('click', () => {
@@ -120,6 +123,7 @@ const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 function buildWsQuery(): URLSearchParams {
   const preferViewer = sessionStorage.getItem(PREFER_VIEWER) === 'true';
   const query = new URLSearchParams({ session: sessionId });
+  if (appName) query.set('app', appName);
   if (wtoken && !preferViewer) {
     query.set('wtoken', wtoken);
   }
@@ -156,7 +160,7 @@ function connect(): void {
       term.write(new Uint8Array(event.data));
     } else if (typeof event.data === 'string') {
       try {
-        const msg = JSON.parse(event.data) as { type: string; role?: string; pinned?: boolean; pinnedOther?: { id: string; title: string }[] };
+        const msg = JSON.parse(event.data) as { type: string; role?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[] };
         if (msg.type === 'role' && msg.role) {
           applyRole(msg.role);
           if (typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
@@ -324,7 +328,7 @@ function scheduleToastDismiss(): void {
   toastTimer = setTimeout(dismissToast, 8000);
 }
 
-function showPinnedToast(sessions: { id: string; title: string }[]): void {
+function showPinnedToast(sessions: { id: string; title: string; app?: string }[]): void {
   // Deduplicate: skip if the same set of IDs was already shown in this tab.
   const key = sessions.map(s => s.id).sort().join(',');
   if (sessionStorage.getItem(PINNED_TOAST_SEEN) === key) return;
@@ -337,7 +341,7 @@ function showPinnedToast(sessions: { id: string; title: string }[]): void {
   for (const s of visible) {
     const a = document.createElement('a');
     a.className = 'toast-chip';
-    a.href = `./#${s.id}`;
+    a.href = `/${s.app ?? 'bash'}#${s.id}`;
     a.target = '_blank';
     a.rel = 'noopener';
     if (s.title && s.title !== 'bash') {

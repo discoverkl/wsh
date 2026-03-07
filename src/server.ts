@@ -45,6 +45,64 @@ if (process.argv[2] === 'version') {
     console.error('No TLS key found. Run wsh once to generate it.');
     process.exit(1);
   }
+} else if (process.argv[2] === 'apps') {
+  const appsPath = path.join(os.homedir(), '.wsh', 'apps.json');
+  const apps: Record<string, { command: string; args?: string[]; title?: string }> = {
+    bash: { command: '/bin/bash', title: 'bash' },
+  };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(appsPath, 'utf8'));
+    if (parsed.apps && typeof parsed.apps === 'object') {
+      for (const [key, app] of Object.entries(parsed.apps)) {
+        if (key in apps) continue;
+        if (typeof (app as any).command === 'string') apps[key] = app as any;
+      }
+    }
+  } catch {}
+  console.log('Available apps:');
+  for (const [key, app] of Object.entries(apps)) {
+    const title = app.title ?? path.basename(app.command);
+    const args = app.args?.length ? ' ' + app.args.join(' ') : '';
+    console.log(`  ${key}  ${title}  (${app.command}${args})`);
+  }
+  process.exit(0);
+} else if (process.argv[2] === 'new') {
+  const { execSync } = require('child_process') as typeof import('child_process');
+  const subArgs = process.argv.slice(3);
+
+  let port = parseInt(process.env.WSH_PORT || '', 10) || 7681;
+  const portIdx = subArgs.findIndex(a => a === '--port' || a === '-p');
+  if (portIdx !== -1 && subArgs[portIdx + 1]) {
+    port = parseInt(subArgs[portIdx + 1], 10);
+    subArgs.splice(portIdx, 2);
+  }
+
+  const appKey = subArgs.find(a => !a.startsWith('-')) || 'bash';
+  const url = `http://127.0.0.1:${port}/api/sessions`;
+  try {
+    const body = execSync(
+      `curl -sS -X POST -H 'Content-Type: application/json' -d '${JSON.stringify({ app: appKey })}' -w '\\n%{http_code}' '${url}'`,
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    const lines = body.trimEnd().split('\n');
+    const httpCode = parseInt(lines.pop()!, 10);
+    const responseBody = lines.join('\n');
+    if (httpCode >= 400) {
+      const parsed = JSON.parse(responseBody);
+      console.error(`Error: ${parsed.error}`);
+      process.exit(1);
+    }
+    const parsed = JSON.parse(responseBody);
+    console.log(parsed.url);
+  } catch (err: any) {
+    if (err.stderr?.includes('onnect') || err.stderr?.includes('refused')) {
+      console.error(`No wsh server running on localhost:${port}`);
+    } else {
+      console.error('Error:', err.stderr?.trim() || err.message);
+    }
+    process.exit(1);
+  }
+  process.exit(0);
 } else if (process.argv[2] === 'ls' || process.argv[2] === 'kill') {
   const { execSync } = require('child_process') as typeof import('child_process');
   const subcommand = process.argv[2];
@@ -104,9 +162,9 @@ if (process.argv[2] === 'version') {
 
     const now = Date.now();
     if (extended) {
-      const headers = ['ID', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IN', 'OUT', 'PID', 'SIZE', 'PROCESS'];
+      const headers = ['ID', 'APP', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IN', 'OUT', 'PID', 'SIZE', 'PROCESS'];
       const rows = data.sessions.map((s: any) => [
-        s.id, s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
+        s.id, s.app ?? '', s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
         formatDuration(now - s.createdAt), formatDuration(now - s.lastInput), formatDuration(now - s.lastOutput),
         String(s.pid), formatSize(s.scrollbackSize), s.process ?? '',
       ]);
@@ -114,9 +172,9 @@ if (process.argv[2] === 'version') {
       console.log(headers.map((h, i) => padRight(h, widths[i])).join('  '));
       for (const row of rows) console.log(row.map((c, i) => padRight(c, widths[i])).join('  '));
     } else {
-      const headers = ['ID', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IDLE'];
+      const headers = ['ID', 'APP', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IDLE'];
       const rows = data.sessions.map((s: any) => [
-        s.id, s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
+        s.id, s.app ?? '', s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
         formatDuration(now - s.createdAt), formatDuration(now - Math.max(s.lastInput, s.lastOutput)),
       ]);
       const widths = headers.map((h, i) => Math.max(h.length, ...rows.map(r => r[i].length)));
@@ -152,6 +210,7 @@ interface Session {
   cleanupTimer: ReturnType<typeof setTimeout> | null;
   pinned: boolean;
   title: string;
+  app: string;
   createdAt: number;
   lastInput: number;
   lastOutput: number;
@@ -227,17 +286,17 @@ function appendScrollback(session: Session, data: Buffer): void {
   }
 }
 
-function spawnSession(id: string): Session {
-  let ptyProcess: IPty;
-  ptyProcess = pty.spawn('/bin/bash', values['no-login'] ? [] : ['-l'], {
+function spawnSession(id: string, appConfig: AppConfig): Session {
+  const ptyProcess = pty.spawn(appConfig.command, appConfig.args ?? [], {
     name: 'xterm-256color',
     cols: 80,
     rows: 24,
-    cwd: process.env.HOME ?? process.cwd(),
+    cwd: appConfig.cwd ?? process.env.HOME ?? process.cwd(),
     env: {
       ...process.env,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
+      ...(appConfig.env ?? {}),
     } as Record<string, string>,
   });
 
@@ -249,7 +308,8 @@ function spawnSession(id: string): Session {
     peers: new Map(),
     cleanupTimer: null,
     pinned: false,
-    title: 'bash',
+    title: appConfig.title ?? path.basename(appConfig.command),
+    app: 'bash',
     createdAt: now,
     lastInput: now,
     lastOutput: now,
@@ -320,6 +380,8 @@ if (values.help) {
   console.log('Commands:');
   console.log('  ls                 List active sessions');
   console.log('  kill <session-id>  Close a session');
+  console.log('  new [app-key]      Create a new session (default: bash)');
+  console.log('  apps               List available apps');
   console.log('  update             Update to the latest version');
   console.log('  version            Print version and exit');
   console.log('  token              Print the auth token and exit');
@@ -346,6 +408,39 @@ const BIND_ADDR  = values.bind || null;
 if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
   console.error(`Error: invalid port "${values.port}"`);
   process.exit(1);
+}
+
+// --- App config ---
+
+interface AppConfig {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  title?: string;
+}
+
+const BUILTIN_APPS: Record<string, AppConfig> = {
+  bash: {
+    command: '/bin/bash',
+    args: values['no-login'] ? [] : ['-l'],
+    title: 'bash',
+  },
+};
+
+function loadApps(): Record<string, AppConfig> {
+  const apps = { ...BUILTIN_APPS };
+  const appsPath = path.join(os.homedir(), '.wsh', 'apps.json');
+  try {
+    const parsed = JSON.parse(fs.readFileSync(appsPath, 'utf8'));
+    if (parsed.apps && typeof parsed.apps === 'object') {
+      for (const [key, app] of Object.entries(parsed.apps)) {
+        if (key in BUILTIN_APPS) continue;
+        if (typeof (app as any).command === 'string') apps[key] = app as AppConfig;
+      }
+    }
+  } catch {}
+  return apps;
 }
 
 // --- Network helpers ---
@@ -434,7 +529,7 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
     // for every authenticated request, not only the first-time token exchange.
     const sessionParam = url.pathname === '/' ? (url.searchParams.get('session') ?? '') : '';
     const proceed = (): void => {
-      if (sessionParam) { res.redirect(302, `/#${sessionParam}`); return; }
+      if (sessionParam) { res.redirect(302, `/bash#${sessionParam}`); return; }
       next();
     };
 
@@ -449,7 +544,7 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
     if (url.searchParams.get('token') === tok) {
       res.setHeader('Set-Cookie', `wsh_token=${tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=315360000`);
       url.searchParams.delete('token');
-      if (sessionParam) { res.redirect(302, `/#${sessionParam}`); return; }
+      if (sessionParam) { res.redirect(302, `/bash#${sessionParam}`); return; }
       return res.redirect(302, url.pathname + url.search);
     }
 
@@ -472,6 +567,11 @@ const app = express();
 app.use((_req, res, next) => { res.setHeader('X-App-Version', version); next(); });
 if (token) app.use(makeTokenMiddleware(token));
 
+// Redirect bare / to /bash so the app name is always in the URL.
+app.get('/', (_req: express.Request, res: express.Response) => {
+  res.redirect(302, '/bash');
+});
+
 app.get('/api/share', (req: express.Request, res: express.Response) => {
   const sessionId = new URL(req.url, `http://${req.headers.host}`).searchParams.get('session');
   if (!sessionId) { res.status(400).json({ error: 'session ID required' }); return; }
@@ -483,6 +583,7 @@ app.get('/api/sessions', (_req: express.Request, res: express.Response) => {
   const list = [...sessions.entries()].map(([id, s]) => ({
     id,
     title: s.title,
+    app: s.app,
     pinned: s.pinned,
     peers: s.peers.size,
     hasWriter: s.writer !== null,
@@ -501,6 +602,37 @@ app.delete('/api/sessions/:id', (req: express.Request, res: express.Response) =>
   if (!session) { res.status(404).json({ error: 'session not found' }); return; }
   session.pty.kill('SIGHUP');
   res.json({ ok: true });
+});
+
+app.use(express.json());
+
+app.post('/api/sessions', (req: express.Request, res: express.Response) => {
+  const appKey = (req.body?.app as string) || 'bash';
+  const apps = loadApps();
+  const appConfig = apps[appKey];
+  if (!appConfig) { res.status(400).json({ error: `Unknown app: "${appKey}"` }); return; }
+
+  const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
+
+  try {
+    const session = spawnSession(id, appConfig);
+    session.app = appKey;
+    session.pinned = true;
+  } catch (err) {
+    console.error('Failed to spawn PTY:', err);
+    res.status(500).json({ error: 'Failed to spawn session' }); return;
+  }
+
+  const base = networkBase ?? `http://localhost:${PORT}`;
+  res.json({ id, url: `${base}/${appKey}#${id}` });
+});
+
+app.get('/:appName', (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const apps = loadApps();
+  if (!apps[req.params.appName]) { next(); return; }
+  // Serve index.html — the client reads the app name from the pathname
+  // and passes it in the WebSocket query so the correct app is spawned.
+  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -573,7 +705,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     const sentRole = yields ? 'viewer' : credential;
     session.peers.set(ws, sentRole);
     const pinnedOther = sentRole === 'owner'
-      ? [...sessions.entries()].filter(([sid, s]) => sid !== id && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title }))
+      ? [...sessions.entries()].filter(([sid, s]) => sid !== id && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
       : undefined;
     ws.send(JSON.stringify({ type: 'role', role: sentRole, ...(sentRole === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
     if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
@@ -595,8 +727,13 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       ws.close(4003, 'only owners can create sessions');
       return;
     }
+    const apps = loadApps();
+    const requestedApp = url.searchParams.get('app') || 'bash';
+    const appKey = apps[requestedApp] ? requestedApp : 'bash';
+    const appConfig = apps[appKey];
     try {
-      session = spawnSession(id);
+      session = spawnSession(id, appConfig);
+      session.app = appKey;
     } catch (err) {
       console.error('Failed to spawn PTY:', err);
       ws.close(1011, 'Failed to spawn PTY');
@@ -605,7 +742,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     session.writer = ws;
     session.peers.set(ws, credential);
     const pinnedOther = credential === 'owner'
-      ? [...sessions.entries()].filter(([sid, s]) => sid !== id && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title }))
+      ? [...sessions.entries()].filter(([sid, s]) => sid !== id && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
       : undefined;
     ws.send(JSON.stringify({ type: 'role', role: credential, ...(credential === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
   }
