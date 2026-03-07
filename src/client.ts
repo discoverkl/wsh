@@ -255,19 +255,13 @@ function applyRole(role: string, credential?: string): void {
 
 roleBadge.addEventListener('click', () => {
   if (sessionDead) return;
-  if (currentRole === 'viewer' && (isOwner || wtoken)) {
-    sessionStorage.setItem(ROLE_KEY, 'active');
-    term.reset();
-    intentionalReconnect = true;
-    ws.close();
-    connect();
-  } else if (currentRole === 'writer') {
-    sessionStorage.setItem(ROLE_KEY, 'viewer');
-    term.reset();
-    intentionalReconnect = true;
-    ws.close();
-    connect();
-  }
+  const canSwitch = (currentRole === 'viewer' && (isOwner || wtoken)) || currentRole === 'writer';
+  if (!canSwitch) return;
+  sessionStorage.setItem(ROLE_KEY, currentRole === 'viewer' ? 'active' : 'viewer');
+  term.reset();
+  intentionalReconnect = true;
+  ws.close();
+  connect();
 });
 
 term.attachCustomKeyEventHandler((e: KeyboardEvent) => {

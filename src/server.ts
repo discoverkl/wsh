@@ -286,7 +286,7 @@ function appendScrollback(session: Session, data: Buffer): void {
   }
 }
 
-function spawnSession(id: string, appConfig: AppConfig): Session {
+function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session {
   const ptyProcess = pty.spawn(appConfig.command, appConfig.args ?? [], {
     name: 'xterm-256color',
     cols: 80,
@@ -309,7 +309,7 @@ function spawnSession(id: string, appConfig: AppConfig): Session {
     cleanupTimer: null,
     pinned: false,
     title: appConfig.title ?? path.basename(appConfig.command),
-    app: 'bash',
+    app: appKey,
     createdAt: now,
     lastInput: now,
     lastOutput: now,
@@ -461,7 +461,7 @@ function getLanIPs(): string[] {
 
 // --- LAN IP (needed before TLS) ---
 
-const primaryLanIP = CUSTOM_URL ? (getLanIPs()[0] ?? null) : (getLanIPs()[0] ?? null);
+const primaryLanIP = getLanIPs()[0] ?? null;
 
 // --- TLS (only when a network interface is available) ---
 
@@ -615,8 +615,7 @@ app.post('/api/sessions', (req: express.Request, res: express.Response) => {
   const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
 
   try {
-    const session = spawnSession(id, appConfig);
-    session.app = appKey;
+    const session = spawnSession(id, appKey, appConfig);
     session.pinned = true;
   } catch (err) {
     console.error('Failed to spawn PTY:', err);
@@ -652,6 +651,13 @@ function getRoleForSession(req: http.IncomingMessage, sessionId: string): Role |
     if (wt !== null) return wt === writerToken(sessionId) ? 'writer' : null; // reject bad token
   }
   return 'viewer'; // no writer token → viewer (session ID alone is the viewer secret)
+}
+
+function sendRoleMessage(ws: WebSocket, sessionId: string, session: Session, role: Role, credential: Role): void {
+  const pinnedOther = role === 'owner'
+    ? [...sessions.entries()].filter(([sid, s]) => sid !== sessionId && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
+    : undefined;
+  ws.send(JSON.stringify({ type: 'role', role, credential, app: session.app, ...(role === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
 }
 
 function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -704,10 +710,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     // Store 'viewer' for yielding connections so auto-promotion on writer-disconnect skips them.
     const sentRole = yields ? 'viewer' : credential;
     session.peers.set(ws, sentRole);
-    const pinnedOther = sentRole === 'owner'
-      ? [...sessions.entries()].filter(([sid, s]) => sid !== id && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
-      : undefined;
-    ws.send(JSON.stringify({ type: 'role', role: sentRole, credential, app: session.app, ...(sentRole === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
+    sendRoleMessage(ws, id, session, sentRole, credential);
     if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
   } else {
     // New session — only owners may create one.
@@ -732,8 +735,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     const appKey = apps[requestedApp] ? requestedApp : 'bash';
     const appConfig = apps[appKey];
     try {
-      session = spawnSession(id, appConfig);
-      session.app = appKey;
+      session = spawnSession(id, appKey, appConfig);
     } catch (err) {
       console.error('Failed to spawn PTY:', err);
       ws.close(1011, 'Failed to spawn PTY');
@@ -741,10 +743,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     }
     session.writer = ws;
     session.peers.set(ws, credential);
-    const pinnedOther = credential === 'owner'
-      ? [...sessions.entries()].filter(([sid, s]) => sid !== id && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
-      : undefined;
-    ws.send(JSON.stringify({ type: 'role', role: credential, credential, app: session.app, ...(credential === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
+    sendRoleMessage(ws, id, session, credential, credential);
   }
 
   const currentSession = session;
