@@ -74,11 +74,14 @@ function getSessionParams(): { sessionId: string; wtoken: string | null; isNew: 
 
 const { sessionId, wtoken, isNew } = getSessionParams();
 
-// When joining an existing session, default to viewer mode.
-// The user can click the role badge to upgrade to writer.
-if (!isNew && sessionStorage.getItem(`wsh_prefer_viewer_${sessionId}`) === null) {
+// When opening an existing session in a NEW tab, default to viewer mode.
+// sessionStorage persists across refresh but not across tabs, so we use a
+// visited marker to distinguish "new tab" from "refresh".
+const SESSION_VISITED = `wsh_visited_${sessionId}`;
+if (!isNew && !sessionStorage.getItem(SESSION_VISITED)) {
   sessionStorage.setItem(`wsh_prefer_viewer_${sessionId}`, 'true');
 }
+sessionStorage.setItem(SESSION_VISITED, 'true');
 
 // Extract app name from pathname (e.g., /python3 → "python3").
 let appName = location.pathname.replace(/^\/+|\/+$/g, '') || 'bash';
