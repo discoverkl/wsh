@@ -6,7 +6,7 @@
 Browser (xterm.js)  <--WS-->  server.ts  <--bytes-->  node-pty (bash/claude)
 ```
 
-**Shared-session model**: URLs have the form `/:appName#sessionId`. The app name selects which program to run; the session ID (6-char base-36) identifies the PTY. Multiple browser tabs can connect to the same session. Each session has exactly one PTY, one active writer, and any number of viewers.
+**Shared-session model**: URLs have the form `{BASE}:appName#sessionId`. The app name selects which program to run; the session ID (6-char base-36) identifies the PTY. Multiple browser tabs can connect to the same session. Each session has exactly one PTY, one active writer, and any number of viewers.
 
 **Message framing**:
 - **Client -> Server (binary)**: Raw bytes forwarded to PTY (keyboard input, legacy X10 mouse)
@@ -86,7 +86,7 @@ Three roles: **owner**, **writer**, **viewer**.
 - **Writer token**: 16-char hex per-session, derived from `SHA256(TLS key + salt + session ID)`
   - Salt is a random 32-byte value persisted in `~/.wsh/tls/writer-salt.txt`
 - **Viewer access**: Session ID only (6-char base-36); treat as semi-private
-- API endpoints (`/api/*`) require owner auth from non-loopback clients; static pages load without auth
+- API endpoints (`{BASE}api/*`) require owner auth from non-loopback clients; static pages load without auth
 
 **Share URLs**:
 - Writer link: `<base>/<appName>#<sessionId>?wt=<writerToken>` — grants write access
@@ -99,9 +99,9 @@ When an owner connects, the server reports any other pinned sessions. The client
 
 ## App Catalog
 
-Sessions can run different programs, not just `bash`. The app name is always in the URL: `/:app#:session`.
+Sessions can run different programs, not just `bash`. The app name is always in the URL: `{BASE}:app#:session`.
 
-**URL scheme**: `GET /` redirects to `/bash`. Every session URL has the form `/:appName#sessionId`. Refreshing or opening a new tab preserves the app — the client reads the app name from the pathname and passes it in the WebSocket `app` query parameter. On connect, the server sends the session's actual `app` in the `role` message; if it differs from the URL, the client corrects the pathname via `history.replaceState`.
+**URL scheme**: `GET {BASE}` redirects to `{BASE}bash`. Every session URL has the form `{BASE}:appName#sessionId`. Refreshing or opening a new tab preserves the app — the client extracts the app name from the last segment of the pathname and passes it in the WebSocket `app` query parameter. On connect, the server sends the session's actual `app` in the `role` message; if it differs from the URL, the client corrects the pathname via `history.replaceState`.
 
 **Config**: Built-in app `bash` is always present. Additional apps are defined in `~/.wsh/apps.json`:
 
@@ -120,10 +120,26 @@ Each entry: `command` (required), `args` (optional string array), `title` (optio
 
 | Method | Description |
 |---|---|
-| `GET /:appName` | Serves `index.html`. Client generates a session ID and connects via WebSocket with `?app=appName`. |
-| `POST /api/sessions` | JSON body `{ "app": "appName" }` — spawns a pinned session, returns `{ id, url }`. Defaults to `bash`. |
+| `GET {BASE}:appName` | Serves `index.html`. Client generates a session ID and connects via WebSocket with `?app=appName`. |
+| `POST {BASE}api/sessions` | JSON body `{ "app": "appName" }` — spawns a pinned session, returns `{ id, url }`. Defaults to `bash`. |
 
 **CLI**: `wsh apps` lists available apps. `wsh new [appName]` creates a session via the API.
+
+## Base Path Routing
+
+wsh supports running under a URL prefix via `--base <path>` (default: `/`). All routes, static files, WebSocket endpoints, and API paths are mounted under this base path. The base is normalized to always start and end with `/`.
+
+**Use case**: A reverse proxy (e.g., the abox gateway) routes `/{user}/...` to each user's wsh instance. Instead of the proxy rewriting paths and injecting `<base>` tags, wsh natively serves under `/{user}/` via `--base /{user}/`. The proxy passes the full URL unchanged.
+
+**How it works**:
+- All Express routes are registered on an `express.Router()` mounted at `BASE` via `app.use(BASE, router)`
+- WebSocket upgrade checks `BASE + 'terminal'` instead of `/terminal`
+- Token middleware checks `BASE + 'api/'` for auth-required paths
+- Cookie `Path` is set to `BASE` so cookies scope correctly under the prefix
+- The client extracts the app name from the last path segment (works under any prefix)
+- CLI subcommands (`ls`, `kill`, `new`) read `WSH_BASE_PATH` env var to construct API URLs
+
+**Example**: `wsh --base /alice/` serves at `/alice/bash#session`, WebSocket at `/alice/terminal`, API at `/alice/api/sessions`.
 
 ## Distribution: Go Wrapper Binary
 
@@ -140,7 +156,7 @@ Node.js (~30 MB) is downloaded, not embedded. The Go binary embeds `dist/`, `pub
 
 ### API Endpoints
 
-**`GET /api/sessions`** — Returns all active sessions (owner auth required from non-loopback):
+**`GET {BASE}api/sessions`** — Returns all active sessions (owner auth required from non-loopback):
 ```json
 {
   "sessions": [
@@ -154,7 +170,7 @@ Node.js (~30 MB) is downloaded, not embedded. The Go binary embeds `dist/`, `pub
 }
 ```
 
-**`DELETE /api/sessions/:id`** — Kills a session via `SIGHUP`. Returns `{ ok: true }` or 404.
+**`DELETE {BASE}api/sessions/:id`** — Kills a session via `SIGHUP`. Returns `{ ok: true }` or 404.
 
 ### CLI Commands
 

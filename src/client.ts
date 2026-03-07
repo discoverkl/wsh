@@ -77,7 +77,8 @@ function getSessionParams(): { sessionId: string; wtoken: string | null } {
 const { sessionId, wtoken } = getSessionParams();
 
 // Extract app name from pathname (e.g., /python3 → "python3").
-let appName = location.pathname.replace(/^\/+|\/+$/g, '') || 'bash';
+const pathParts = location.pathname.replace(/\/+$/g, '').split('/');
+let appName = pathParts[pathParts.length - 1] || 'bash';
 windowTitle.textContent = appName;
 document.title = appName;
 
@@ -95,7 +96,7 @@ let isOwner = false;
 document.getElementById('titlebar')!.addEventListener('mousedown', e => e.preventDefault());
 
 document.getElementById('new-session')!.addEventListener('click', () => {
-  window.open(`/${appName}`, '_blank');
+  window.open(appName, '_blank');
 });
 
 document.querySelector('.dot.close')!.addEventListener('click', () => {
@@ -164,7 +165,7 @@ function connect(): void {
             appName = msg.app;
             windowTitle.textContent = appName;
             document.title = appName;
-            history.replaceState(null, '', `/${appName}#${sessionId}`);
+            history.replaceState(null, '', `${appName}#${sessionId}`);
           }
           applyRole(msg.role, msg.credential);
           if (typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
@@ -332,7 +333,7 @@ function showPinnedToast(sessions: { id: string; title: string; app?: string }[]
   for (const s of visible) {
     const a = document.createElement('a');
     a.className = 'toast-chip';
-    a.href = `/${s.app ?? 'bash'}#${s.id}`;
+    a.href = `${s.app ?? 'bash'}#${s.id}`;
     a.target = '_blank';
     a.rel = 'noopener';
     if (s.title && s.title !== 'bash') {

@@ -78,7 +78,10 @@ if (process.argv[2] === 'version') {
   }
 
   const appKey = subArgs.find(a => !a.startsWith('-')) || 'bash';
-  const url = `http://127.0.0.1:${port}/api/sessions`;
+  let basePath = process.env.WSH_BASE_PATH || '/';
+  if (!basePath.startsWith('/')) basePath = '/' + basePath;
+  if (!basePath.endsWith('/')) basePath += '/';
+  const url = `http://127.0.0.1:${port}${basePath}api/sessions`;
   try {
     const body = execSync(
       `curl -sS -X POST -H 'Content-Type: application/json' -d '${JSON.stringify({ app: appKey })}' -w '\\n%{http_code}' '${url}'`,
@@ -115,6 +118,10 @@ if (process.argv[2] === 'version') {
     port = parseInt(subArgs[portIdx + 1], 10);
     subArgs.splice(portIdx, 2);
   }
+
+  let basePath = process.env.WSH_BASE_PATH || '/';
+  if (!basePath.startsWith('/')) basePath = '/' + basePath;
+  if (!basePath.endsWith('/')) basePath += '/';
 
   function curlRequest(method: string, urlPath: string): { status: number; body: string } {
     const url = `http://127.0.0.1:${port}${urlPath}`;
@@ -155,7 +162,7 @@ if (process.argv[2] === 'version') {
   if (subcommand === 'ls') {
     const extended = subArgs.includes('-l');
     const json = subArgs.includes('--json');
-    const { body } = curlRequest('GET', '/api/sessions');
+    const { body } = curlRequest('GET', basePath + 'api/sessions');
     const data = JSON.parse(body) as { sessions: any[] };
     if (json) { console.log(JSON.stringify(data, null, 2)); process.exit(0); }
     if (data.sessions.length === 0) { console.log('No active sessions.'); process.exit(0); }
@@ -185,7 +192,7 @@ if (process.argv[2] === 'version') {
     // kill
     const sessionId = subArgs.find(a => !a.startsWith('-'));
     if (!sessionId) { console.error('Usage: wsh kill <session-id>'); process.exit(1); }
-    const { status } = curlRequest('DELETE', `/api/sessions/${sessionId}`);
+    const { status } = curlRequest('DELETE', basePath + `api/sessions/${sessionId}`);
     if (status === 404) { console.error(`Session "${sessionId}" not found.`); process.exit(1); }
     if (status !== 200) { console.error(`Error: server returned ${status}`); process.exit(1); }
     console.log(`Session "${sessionId}" killed.`);
@@ -365,6 +372,7 @@ const { values } = parseArgs({
     'no-login': { type: 'boolean',             default: false },
     help:       { type: 'boolean', short: 'h', default: false },
     version:    { type: 'boolean', short: 'v', default: false },
+    base:       { type: 'string', default: '/' },
   },
 });
 
@@ -391,6 +399,7 @@ if (values.help) {
   console.log('      --url <url>    Override advertised network URL (for NAT/proxy)');
   console.log('      --bind <addr>  Bind network server to this address (default: auto-detect LAN IP)');
   console.log('                     Use 0.0.0.0 to listen on all interfaces (e.g. inside Docker --network host)');
+  console.log('      --base <path>  Base path prefix (default: /)');
   console.log('      --no-open      Do not open browser on start');
   console.log('      --no-login     Spawn non-login shells (default: login shell)');
   console.log('  -v, --version      Print version and exit');
@@ -398,8 +407,18 @@ if (values.help) {
   console.log('');
   console.log('Environment:');
   console.log('  WSH_PORT           Default port for ls/kill commands (default: 7681)');
+  console.log('  WSH_BASE_PATH    Base path for ls/kill/new commands (default: /)');
   process.exit(0);
 }
+
+function normalizeBase(raw: string): string {
+  let b = raw;
+  if (!b.startsWith('/')) b = '/' + b;
+  if (!b.endsWith('/')) b += '/';
+  return b;
+}
+
+const BASE = normalizeBase(values.base!);
 
 const PORT = parseInt(values.port!, 10);
 const CUSTOM_URL = values.url || null;
@@ -527,9 +546,9 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
     // If a ?session= param is on the root page, redirect to the hash form so
     // getSessionId() on the client picks up the correct ID.  This must happen
     // for every authenticated request, not only the first-time token exchange.
-    const sessionParam = url.pathname === '/' ? (url.searchParams.get('session') ?? '') : '';
+    const sessionParam = url.pathname === BASE ? (url.searchParams.get('session') ?? '') : '';
     const proceed = (): void => {
-      if (sessionParam) { res.redirect(302, `/bash#${sessionParam}`); return; }
+      if (sessionParam) { res.redirect(302, `bash#${sessionParam}`); return; }
       next();
     };
 
@@ -542,13 +561,13 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
 
     // Owner token in URL
     if (url.searchParams.get('token') === tok) {
-      res.setHeader('Set-Cookie', `wsh_token=${tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=315360000`);
+      res.setHeader('Set-Cookie', `wsh_token=${tok}; HttpOnly; SameSite=Strict; Path=${BASE}; Max-Age=315360000`);
       url.searchParams.delete('token');
-      if (sessionParam) { res.redirect(302, `/bash#${sessionParam}`); return; }
+      if (sessionParam) { res.redirect(302, `bash#${sessionParam}`); return; }
       return res.redirect(302, url.pathname + url.search);
     }
 
-    if (url.pathname.startsWith('/api/')) {
+    if (url.pathname.startsWith(BASE + 'api/')) {
       res.status(401).send('Unauthorized');
     } else {
       next(); // static pages load without auth; WebSocket handles its own auth
@@ -567,19 +586,21 @@ const app = express();
 app.use((_req, res, next) => { res.setHeader('X-App-Version', version); next(); });
 if (token) app.use(makeTokenMiddleware(token));
 
+const router = express.Router();
+
 // Redirect bare / to /bash so the app name is always in the URL.
-app.get('/', (_req: express.Request, res: express.Response) => {
-  res.redirect(302, '/bash');
+router.get('/', (_req: express.Request, res: express.Response) => {
+  res.redirect(302, 'bash');
 });
 
-app.get('/api/share', (req: express.Request, res: express.Response) => {
+router.get('/api/share', (req: express.Request, res: express.Response) => {
   const sessionId = new URL(req.url, `http://${req.headers.host}`).searchParams.get('session');
   if (!sessionId) { res.status(400).json({ error: 'session ID required' }); return; }
   if (!tls) { res.status(503).json({ error: 'Network sharing not available' }); return; }
   res.json({ wtoken: writerToken(sessionId) });
 });
 
-app.get('/api/sessions', (_req: express.Request, res: express.Response) => {
+router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
   const list = [...sessions.entries()].map(([id, s]) => ({
     id,
     title: s.title,
@@ -597,16 +618,16 @@ app.get('/api/sessions', (_req: express.Request, res: express.Response) => {
   res.json({ sessions: list });
 });
 
-app.delete('/api/sessions/:id', (req: express.Request, res: express.Response) => {
+router.delete('/api/sessions/:id', (req: express.Request, res: express.Response) => {
   const session = sessions.get(req.params.id);
   if (!session) { res.status(404).json({ error: 'session not found' }); return; }
   session.pty.kill('SIGHUP');
   res.json({ ok: true });
 });
 
-app.use(express.json());
+router.use(express.json());
 
-app.post('/api/sessions', (req: express.Request, res: express.Response) => {
+router.post('/api/sessions', (req: express.Request, res: express.Response) => {
   const appKey = (req.body?.app as string) || 'bash';
   const apps = loadApps();
   const appConfig = apps[appKey];
@@ -623,10 +644,10 @@ app.post('/api/sessions', (req: express.Request, res: express.Response) => {
   }
 
   const base = networkBase ?? `http://localhost:${PORT}`;
-  res.json({ id, url: `${base}/${appKey}#${id}` });
+  res.json({ id, url: `${base}${BASE}${appKey}#${id}` });
 });
 
-app.get('/:appName', (req: express.Request, res: express.Response, next: express.NextFunction) => {
+router.get('/:appName', (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const apps = loadApps();
   if (!apps[req.params.appName]) { next(); return; }
   // Serve index.html — the client reads the app name from the pathname
@@ -634,7 +655,9 @@ app.get('/:appName', (req: express.Request, res: express.Response, next: express
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
-app.use(express.static(path.join(__dirname, '..', 'public')));
+router.use(express.static(path.join(__dirname, '..', 'public')));
+
+app.use(BASE, router);
 
 const localServer   = http.createServer(app);
 const networkServer = tls ? https.createServer({ key: tls.key, cert: tls.cert }, app) : null;
@@ -662,7 +685,7 @@ function sendRoleMessage(ws: WebSocket, sessionId: string, session: Session, rol
 
 function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-  if (url.pathname !== '/terminal') { socket.destroy(); return; }
+  if (url.pathname !== BASE + 'terminal') { socket.destroy(); return; }
 
   const sessionId = url.searchParams.get('session') ?? '';
   if (token && !isLoopback(req.socket.remoteAddress) && getRoleForSession(req, sessionId) === null) {
@@ -849,8 +872,8 @@ function openBrowser(url: string): void {
 const httpsOnly   = BIND_ADDR === '0.0.0.0' && !!networkServer;
 const networkBind = httpsOnly ? '0.0.0.0' : (BIND_ADDR ?? primaryLanIP);
 
-const localURL   = httpsOnly ? `https://localhost:${PORT}` : `http://localhost:${PORT}`;
-const networkURL = networkBase && token ? `${networkBase}/?token=${token}` : null;
+const localURL   = httpsOnly ? `https://localhost:${PORT}${BASE}bash` : `http://localhost:${PORT}${BASE}bash`;
+const networkURL = networkBase && token ? `${networkBase}${BASE}?token=${token}` : null;
 
 let serversStarted = 0;
 const totalServers = httpsOnly ? 1 : (networkServer && networkBind ? 2 : 1);
