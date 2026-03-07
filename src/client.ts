@@ -91,12 +91,13 @@ document.getElementById('new-session')!.addEventListener('click', () => {
   window.open('./', '_blank');
 });
 
-document.querySelector('.dot.close')!.addEventListener('click', (e) => {
-  if ((e.currentTarget as HTMLElement).classList.contains('disabled')) return;
+document.querySelector('.dot.close')!.addEventListener('click', () => {
+  if (sessionDead) return;
   sendAction({ type: 'close' });
 });
 
 document.getElementById('clear-btn')!.addEventListener('click', () => {
+  if (sessionDead) return;
   term.clear();
   sendAction({ type: 'clear' });
   term.focus();
@@ -133,6 +134,7 @@ function buildWsQuery(): URLSearchParams {
 let ws: WebSocket;
 let intentionalReconnect = false;
 let currentRole = '';
+let sessionDead = false;
 
 function connect(): void {
   const wsBase = new URL('./terminal', location.href);
@@ -172,12 +174,14 @@ function connect(): void {
 
     const sessionGone = event.code === 1000 || event.code === 4003 || event.code === 4029;
     if (sessionGone) {
+      sessionDead = true;
       // Session is permanently gone — hide all session controls.
       pinBtn.setAttribute('hidden', '');
       roleBadge.setAttribute('hidden', '');
       shareBtn.setAttribute('hidden', '');
       document.getElementById('clear-btn')!.setAttribute('hidden', '');
       document.querySelector('.dot.close')!.classList.add('disabled');
+      sharePopover.classList.remove('visible');
     }
 
     if (event.code === 1000 && event.reason === 'PTY process exited') {
@@ -249,6 +253,7 @@ function applyRole(role: string): void {
 }
 
 roleBadge.addEventListener('click', () => {
+  if (sessionDead) return;
   if (currentRole === 'viewer' && (wtoken || sessionStorage.getItem(IS_OWNER) === 'true')) {
     sessionStorage.removeItem(PREFER_VIEWER);
     term.reset();
@@ -295,6 +300,7 @@ const container = document.getElementById('terminal-container');
 if (container) new ResizeObserver(scheduleResize).observe(container);
 
 pinBtn.addEventListener('click', () => {
+  if (sessionDead) return;
   applyPinState(!pinned);
   sendAction({ type: 'pin', pinned });
 });
@@ -370,6 +376,7 @@ const shareError   = document.getElementById('share-error')!;
 
 shareBtn.addEventListener('click', async (e: MouseEvent) => {
   e.stopPropagation();
+  if (sessionDead) return;
   if (sharePopover.classList.contains('visible')) {
     sharePopover.classList.remove('visible');
     return;
