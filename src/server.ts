@@ -707,7 +707,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     const pinnedOther = sentRole === 'owner'
       ? [...sessions.entries()].filter(([sid, s]) => sid !== id && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
       : undefined;
-    ws.send(JSON.stringify({ type: 'role', role: sentRole, app: session.app, ...(sentRole === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
+    ws.send(JSON.stringify({ type: 'role', role: sentRole, credential, app: session.app, ...(sentRole === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
     if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
   } else {
     // New session — only owners may create one.
@@ -744,7 +744,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     const pinnedOther = credential === 'owner'
       ? [...sessions.entries()].filter(([sid, s]) => sid !== id && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
       : undefined;
-    ws.send(JSON.stringify({ type: 'role', role: credential, app: session.app, ...(credential === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
+    ws.send(JSON.stringify({ type: 'role', role: credential, credential, app: session.app, ...(credential === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
   }
 
   const currentSession = session;

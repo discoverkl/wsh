@@ -59,19 +59,26 @@ fetch('./').then(r => {
 
 // Writer share links embed the token in the hash: /#id?wt=...
 // Viewer share links are just /#id — the session ID alone is the viewer secret.
-function getSessionParams(): { sessionId: string; wtoken: string | null } {
+function getSessionParams(): { sessionId: string; wtoken: string | null; isNew: boolean } {
   const hash = location.hash.slice(1);
   const q = hash.indexOf('?');
   let id = q >= 0 ? hash.slice(0, q) : hash;
   const params = q >= 0 ? new URLSearchParams(hash.slice(q + 1)) : null;
-  if (!id) {
+  const isNew = !id;
+  if (isNew) {
     id = (crypto.getRandomValues(new Uint32Array(1))[0] % 2176782336).toString(36).padStart(6, '0');
     location.hash = id;
   }
-  return { sessionId: id, wtoken: params?.get('wt') ?? null };
+  return { sessionId: id, wtoken: params?.get('wt') ?? null, isNew };
 }
 
-const { sessionId, wtoken } = getSessionParams();
+const { sessionId, wtoken, isNew } = getSessionParams();
+
+// When joining an existing session, default to viewer mode.
+// The user can click the role badge to upgrade to writer.
+if (!isNew && sessionStorage.getItem(`wsh_prefer_viewer_${sessionId}`) === null) {
+  sessionStorage.setItem(`wsh_prefer_viewer_${sessionId}`, 'true');
+}
 
 // Extract app name from pathname (e.g., /python3 → "python3").
 let appName = location.pathname.replace(/^\/+|\/+$/g, '') || 'bash';
@@ -156,7 +163,7 @@ function connect(): void {
       term.write(new Uint8Array(event.data));
     } else if (typeof event.data === 'string') {
       try {
-        const msg = JSON.parse(event.data) as { type: string; role?: string; app?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[] };
+        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[] };
         if (msg.type === 'role' && msg.role) {
           if (msg.app && msg.app !== appName) {
             appName = msg.app;
@@ -164,7 +171,7 @@ function connect(): void {
             document.title = appName;
             history.replaceState(null, '', `/${appName}#${sessionId}`);
           }
-          applyRole(msg.role);
+          applyRole(msg.role, msg.credential);
           if (typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
           if (msg.pinnedOther && msg.pinnedOther.length > 0) showPinnedToast(msg.pinnedOther);
         }
@@ -229,12 +236,13 @@ function applyPinState(state: boolean): void {
   pinBtn.title = pinned ? 'Unpin (allow timeout after disconnect)' : 'Pin (keep alive after disconnect)';
 }
 
-function applyRole(role: string): void {
+function applyRole(role: string, credential?: string): void {
   currentRole = role;
 
+  // Track actual credential so we know upgrade is possible even when yielding.
+  if (credential === 'owner') sessionStorage.setItem(IS_OWNER, 'true');
+
   if (role === 'owner') {
-    // Remember we are the owner of this session for the lifetime of this tab.
-    sessionStorage.setItem(IS_OWNER, 'true');
     roleBadge.setAttribute('hidden', '');
     term.options.disableStdin = false;
     pinBtn.removeAttribute('hidden');
@@ -244,11 +252,9 @@ function applyRole(role: string): void {
   pinBtn.setAttribute('hidden', '');
 
   if (role === 'viewer') {
-    // Persist demotion so refresh reconnects as viewer rather than reclaiming writer.
     sessionStorage.setItem(PREFER_VIEWER, 'true');
   }
 
-  // Viewer can switch to writer if they hold a writer token OR are the session owner.
   const canUpgrade = role === 'viewer' && (!!wtoken || sessionStorage.getItem(IS_OWNER) === 'true');
   const switchable  = role === 'writer' || canUpgrade;
 
