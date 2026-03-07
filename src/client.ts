@@ -51,12 +51,6 @@ term.focus();
 
 const windowTitle = document.getElementById('window-title')!;
 
-term.onTitleChange((title: string) => {
-  const t = title || 'bash';
-  windowTitle.textContent = t;
-  document.title = t;
-});
-
 // Show app version as a tooltip on the window title.
 fetch('./').then(r => {
   const v = r.headers.get('X-App-Version');
@@ -81,6 +75,8 @@ const { sessionId, wtoken } = getSessionParams();
 
 // Extract app name from pathname (e.g., /python3 → "python3").
 const appName = location.pathname.replace(/^\/+|\/+$/g, '') || 'bash';
+windowTitle.textContent = appName;
+document.title = appName;
 
 // sessionStorage keys (tab-specific, survive refresh):
 // PREFER_VIEWER: this tab was demoted or self-switched to viewer — don't claim writer on reconnect.
