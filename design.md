@@ -63,14 +63,19 @@ Three roles: **owner**, **writer**, **viewer**.
 - Valid writer token (`?wtoken=`) -> `writer`
 - No credentials -> `viewer` (session ID alone is the viewer secret)
 
-**Yielding**: An owner/writer can voluntarily reconnect as viewer by setting `?yield=1`. The client tracks this in `sessionStorage` (`PREFER_VIEWER`) so refreshes maintain the choice.
-
 **Writer promotion**: When the active writer disconnects, the server promotes the first non-viewer peer. If none exist, the cleanup timer starts.
 
+**Default-to-viewer**: Opening an existing session in a new tab starts in view-only mode (even for owners). The user clicks the "View Only" badge to upgrade. Refreshing preserves the current role. This is tracked via `sessionStorage` (per-tab, survives refresh):
+
+| Key | Set when | Purpose |
+|---|---|---|
+| `wsh_visited_<id>` | Every page load | Distinguishes new tab (absent) from refresh (present) |
+| `wsh_prefer_viewer_<id>` | New tab joins existing session; or user voluntarily demotes | Sends `yield=1` on WS connect |
+| `wsh_is_owner_<id>` | Server sends `credential: 'owner'` in role message | Remembers upgrade capability across reconnects |
+
 **Role switching (client-side)**:
-- Viewers with credentials (writer token or owner status) see a clickable "View Only" badge to upgrade
-- Writers see a clickable "Writer" badge to voluntarily demote to viewer
-- Both trigger a WebSocket reconnect with updated query parameters
+- Viewers with credentials (writer token or owner status) see a clickable "View Only" badge to upgrade — clears `PREFER_VIEWER` and reconnects
+- Writers see a clickable "Writer" badge to voluntarily demote — sets `PREFER_VIEWER` and reconnects
 
 ## Security Model
 
