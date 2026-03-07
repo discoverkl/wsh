@@ -45,6 +45,94 @@ if (process.argv[2] === 'version') {
     console.error('No TLS key found. Run wsh once to generate it.');
     process.exit(1);
   }
+} else if (process.argv[2] === 'ls' || process.argv[2] === 'kill') {
+  const { execSync } = require('child_process') as typeof import('child_process');
+  const subcommand = process.argv[2];
+  const subArgs = process.argv.slice(3);
+
+  // Parse --port / -p, fallback to WSH_PORT env var, then default 7681
+  let port = parseInt(process.env.WSH_PORT || '', 10) || 7681;
+  const portIdx = subArgs.findIndex(a => a === '--port' || a === '-p');
+  if (portIdx !== -1 && subArgs[portIdx + 1]) {
+    port = parseInt(subArgs[portIdx + 1], 10);
+    subArgs.splice(portIdx, 2);
+  }
+
+  function curlRequest(method: string, urlPath: string): { status: number; body: string } {
+    const url = `http://127.0.0.1:${port}${urlPath}`;
+    try {
+      const body = execSync(`curl -sS -X ${method} -w '\\n%{http_code}' '${url}'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+      const lines = body.trimEnd().split('\n');
+      const httpCode = parseInt(lines.pop()!, 10);
+      return { status: httpCode, body: lines.join('\n') };
+    } catch (err: any) {
+      if (err.stderr?.includes('onnect') || err.stderr?.includes('refused')) {
+        console.error(`No wsh server running on localhost:${port}`);
+      } else {
+        console.error('Error:', err.stderr?.trim() || err.message);
+      }
+      process.exit(1);
+    }
+    return { status: 0, body: '' }; // unreachable
+  }
+
+  function formatDuration(ms: number): string {
+    const sec = Math.floor(ms / 1000);
+    if (sec < 60) return `${sec}s`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m`;
+    const hr = Math.floor(min / 60);
+    const rm = min % 60;
+    return rm ? `${hr}h ${rm}m` : `${hr}h`;
+  }
+
+  function formatSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function padRight(s: string, len: number): string { return s + ' '.repeat(Math.max(0, len - s.length)); }
+
+  if (subcommand === 'ls') {
+    const extended = subArgs.includes('-l');
+    const json = subArgs.includes('--json');
+    const { body } = curlRequest('GET', '/api/sessions');
+    const data = JSON.parse(body) as { sessions: any[] };
+    if (json) { console.log(JSON.stringify(data, null, 2)); process.exit(0); }
+    if (data.sessions.length === 0) { console.log('No active sessions.'); process.exit(0); }
+
+    const now = Date.now();
+    if (extended) {
+      const headers = ['ID', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IN', 'OUT', 'PID', 'SIZE', 'PROCESS'];
+      const rows = data.sessions.map((s: any) => [
+        s.id, s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
+        formatDuration(now - s.createdAt), formatDuration(now - s.lastInput), formatDuration(now - s.lastOutput),
+        String(s.pid), formatSize(s.scrollbackSize), s.process ?? '',
+      ]);
+      const widths = headers.map((h, i) => Math.max(h.length, ...rows.map(r => r[i].length)));
+      console.log(headers.map((h, i) => padRight(h, widths[i])).join('  '));
+      for (const row of rows) console.log(row.map((c, i) => padRight(c, widths[i])).join('  '));
+    } else {
+      const headers = ['ID', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IDLE'];
+      const rows = data.sessions.map((s: any) => [
+        s.id, s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
+        formatDuration(now - s.createdAt), formatDuration(now - Math.max(s.lastInput, s.lastOutput)),
+      ]);
+      const widths = headers.map((h, i) => Math.max(h.length, ...rows.map(r => r[i].length)));
+      console.log(headers.map((h, i) => padRight(h, widths[i])).join('  '));
+      for (const row of rows) console.log(row.map((c, i) => padRight(c, widths[i])).join('  '));
+    }
+  } else {
+    // kill
+    const sessionId = subArgs.find(a => !a.startsWith('-'));
+    if (!sessionId) { console.error('Usage: wsh kill <session-id>'); process.exit(1); }
+    const { status } = curlRequest('DELETE', `/api/sessions/${sessionId}`);
+    if (status === 404) { console.error(`Session "${sessionId}" not found.`); process.exit(1); }
+    if (status !== 200) { console.error(`Error: server returned ${status}`); process.exit(1); }
+    console.log(`Session "${sessionId}" killed.`);
+  }
+  process.exit(0);
 }
 
 const MAX_SCROLLBACK = 5 * 1024 * 1024; // 5 MB
@@ -64,6 +152,9 @@ interface Session {
   cleanupTimer: ReturnType<typeof setTimeout> | null;
   pinned: boolean;
   title: string;
+  createdAt: number;
+  lastInput: number;
+  lastOutput: number;
 }
 
 const sessions = new Map<string, Session>();
@@ -150,6 +241,7 @@ function spawnSession(id: string): Session {
     } as Record<string, string>,
   });
 
+  const now = Date.now();
   const session: Session = {
     pty: ptyProcess,
     scrollback: Buffer.alloc(0),
@@ -158,6 +250,9 @@ function spawnSession(id: string): Session {
     cleanupTimer: null,
     pinned: false,
     title: 'bash',
+    createdAt: now,
+    lastInput: now,
+    lastOutput: now,
   };
 
   sessions.set(id, session);
@@ -166,6 +261,7 @@ function spawnSession(id: string): Session {
   ptyProcess.onData((data: string) => {
     const m = data.match(oscTitleRe);
     if (m) session.title = m[1];
+    session.lastOutput = Date.now();
     const buf = Buffer.from(data, 'utf8');
     appendScrollback(session, buf);
     const send = (ws: WebSocket) => { if (ws.readyState === WebSocket.OPEN) ws.send(buf, { binary: true }); };
@@ -222,6 +318,8 @@ if (values.help) {
   console.log('       wsh token');
   console.log('');
   console.log('Commands:');
+  console.log('  ls                 List active sessions');
+  console.log('  kill <session-id>  Close a session');
   console.log('  update             Update to the latest version');
   console.log('  version            Print version and exit');
   console.log('  token              Print the auth token and exit');
@@ -235,6 +333,9 @@ if (values.help) {
   console.log('      --no-login     Spawn non-login shells (default: login shell)');
   console.log('  -v, --version      Print version and exit');
   console.log('  -h, --help         Show this help message');
+  console.log('');
+  console.log('Environment:');
+  console.log('  WSH_PORT           Default port for ls/kill commands (default: 7681)');
   process.exit(0);
 }
 
@@ -378,6 +479,30 @@ app.get('/api/share', (req: express.Request, res: express.Response) => {
   res.json({ wtoken: writerToken(sessionId) });
 });
 
+app.get('/api/sessions', (_req: express.Request, res: express.Response) => {
+  const list = [...sessions.entries()].map(([id, s]) => ({
+    id,
+    title: s.title,
+    pinned: s.pinned,
+    peers: s.peers.size,
+    hasWriter: s.writer !== null,
+    createdAt: s.createdAt,
+    lastInput: s.lastInput,
+    lastOutput: s.lastOutput,
+    pid: s.pty.pid,
+    scrollbackSize: s.scrollback.length,
+    process: s.pty.process,
+  }));
+  res.json({ sessions: list });
+});
+
+app.delete('/api/sessions/:id', (req: express.Request, res: express.Response) => {
+  const session = sessions.get(req.params.id);
+  if (!session) { res.status(404).json({ error: 'session not found' }); return; }
+  session.pty.kill('SIGHUP');
+  res.json({ ok: true });
+});
+
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const localServer   = http.createServer(app);
@@ -490,6 +615,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
     if (currentSession.writer !== ws) return; // only the active writer may send input
     if (isBinary) {
+      currentSession.lastInput = Date.now();
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
       currentSession.pty.write(buf.toString('binary'));
       return;

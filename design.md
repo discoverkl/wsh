@@ -102,3 +102,33 @@ Single executable, no prerequisites. On first run:
 Subsequent runs skip 1 and 2 — near-instant startup.
 
 Node.js (~30 MB) is downloaded, not embedded. The Go binary embeds `dist/`, `public/`, `node_modules/` (~15-18 MB total), including the platform-native `pty.node` addon. Build must run on the target platform for this reason.
+
+## CLI Session Management
+
+### API Endpoints
+
+**`GET /api/sessions`** — Returns all active sessions (owner auth required from non-loopback):
+```json
+{
+  "sessions": [
+    {
+      "id": "abc123", "title": "bash", "pinned": true,
+      "peers": 3, "hasWriter": true,
+      "createdAt": 1709800000000, "lastInput": 1709800500000, "lastOutput": 1709800502000,
+      "pid": 12345, "scrollbackSize": 1258000, "process": "node"
+    }
+  ]
+}
+```
+
+**`DELETE /api/sessions/:id`** — Kills a session via `SIGHUP`. Returns `{ ok: true }` or 404.
+
+### CLI Commands
+
+**`wsh ls`** — List active sessions on the local server.
+- `-l` — Extended output (IN, OUT, PID, SIZE, PROCESS columns)
+- `--json` — Raw JSON output with all fields
+- `-p, --port <port>` — Override server port (default: 7681)
+
+**`wsh kill <session-id>`** — Close a session.
+- `-p, --port <port>` — Override server port (default: 7681)
