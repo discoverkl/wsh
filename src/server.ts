@@ -589,7 +589,12 @@ if (token) app.use(makeTokenMiddleware(token));
 const router = express.Router();
 
 // Redirect bare / to /bash so the app name is always in the URL.
-router.get('/', (_req: express.Request, res: express.Response) => {
+// When BASE != '/', also redirect /base -> /base/ to fix relative URL resolution.
+router.get('/', (req: express.Request, res: express.Response) => {
+  if (BASE !== '/' && !req.originalUrl.endsWith('/')) {
+    res.redirect(301, BASE);
+    return;
+  }
   res.redirect(302, 'bash');
 });
 
