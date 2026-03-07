@@ -12,7 +12,7 @@ Browser (xterm.js)  <--WS-->  server.ts  <--bytes-->  node-pty (bash/claude)
 - **Client -> Server (binary)**: Raw bytes forwarded to PTY (keyboard input, legacy X10 mouse)
 - **Client -> Server (text/JSON)**: Control messages — `resize`, `close`, `clear`, `pin`
 - **Server -> Client (binary)**: Raw PTY output
-- **Server -> Client (text/JSON)**: Role assignments (`role`), pin state updates (`pin`)
+- **Server -> Client (text/JSON)**: Role assignments (`role` with `app`), pin state updates (`pin`)
 
 ## Critical Claude Code Requirements
 
@@ -96,7 +96,7 @@ When an owner connects, the server reports any other pinned sessions. The client
 
 Sessions can run different programs, not just `bash`. The app name is always in the URL: `/:app#:session`.
 
-**URL scheme**: `GET /` redirects to `/bash`. Every session URL has the form `/:appName#sessionId`. Refreshing or opening a new tab preserves the app — the client reads the app name from the pathname and passes it in the WebSocket `app` query parameter.
+**URL scheme**: `GET /` redirects to `/bash`. Every session URL has the form `/:appName#sessionId`. Refreshing or opening a new tab preserves the app — the client reads the app name from the pathname and passes it in the WebSocket `app` query parameter. On connect, the server sends the session's actual `app` in the `role` message; if it differs from the URL, the client corrects the pathname via `history.replaceState`.
 
 **Config**: Built-in app `bash` is always present. Additional apps are defined in `~/.wsh/apps.json`:
 

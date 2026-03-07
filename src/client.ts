@@ -74,7 +74,7 @@ function getSessionParams(): { sessionId: string; wtoken: string | null } {
 const { sessionId, wtoken } = getSessionParams();
 
 // Extract app name from pathname (e.g., /python3 → "python3").
-const appName = location.pathname.replace(/^\/+|\/+$/g, '') || 'bash';
+let appName = location.pathname.replace(/^\/+|\/+$/g, '') || 'bash';
 windowTitle.textContent = appName;
 document.title = appName;
 
@@ -156,8 +156,14 @@ function connect(): void {
       term.write(new Uint8Array(event.data));
     } else if (typeof event.data === 'string') {
       try {
-        const msg = JSON.parse(event.data) as { type: string; role?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[] };
+        const msg = JSON.parse(event.data) as { type: string; role?: string; app?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[] };
         if (msg.type === 'role' && msg.role) {
+          if (msg.app && msg.app !== appName) {
+            appName = msg.app;
+            windowTitle.textContent = appName;
+            document.title = appName;
+            history.replaceState(null, '', `/${appName}#${sessionId}`);
+          }
           applyRole(msg.role);
           if (typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
           if (msg.pinnedOther && msg.pinnedOther.length > 0) showPinnedToast(msg.pinnedOther);
