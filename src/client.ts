@@ -47,7 +47,6 @@ const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 term.open(document.getElementById('terminal-container') as HTMLElement);
 fitAddon.fit();
-term.focus();
 
 const windowTitle = document.getElementById('window-title')!;
 
@@ -119,6 +118,11 @@ document.getElementById('new-session')!.addEventListener('click', () => {
 
 document.querySelector('.dot.close')!.addEventListener('click', () => {
   if (sessionDead) return;
+  if (appType === 'web') {
+    const iframe = document.getElementById('web-frame') as HTMLIFrameElement;
+    iframe.src = 'about:blank';
+    document.getElementById('web-container')!.setAttribute('hidden', '');
+  }
   sendAction({ type: 'close' });
 });
 
@@ -128,10 +132,6 @@ document.getElementById('clear-btn')!.addEventListener('click', () => {
   sendAction({ type: 'clear' });
   term.focus();
 });
-
-if (localStorage.getItem('wsh_compact') === '1') {
-  document.documentElement.classList.add('compact');
-}
 
 document.querySelector('.dot.minimize')!.addEventListener('click', () => {
   const isCompact = document.documentElement.classList.toggle('compact');
@@ -178,10 +178,11 @@ function connect(): void {
 
   ws.addEventListener('open', () => {
     setConnStatus('connected');
-    if (appType !== 'web') {
+    if (!document.getElementById('desktop')!.hasAttribute('hidden') && appType !== 'web') {
       requestAnimationFrame(() => {
         fitAddon.fit();
         sendResize(term.cols, term.rows);
+        term.focus();
       });
     }
   });
@@ -200,12 +201,36 @@ function connect(): void {
             history.replaceState(null, '', `${appName}#${sessionId}`);
           }
           applyRole(msg.role, msg.credential);
-          if (msg.appType === 'web' && appType !== 'web') {
-            appType = 'web';
-            switchToWebMode();
+          const desktop = document.getElementById('desktop')!;
+          if (desktop.hasAttribute('hidden')) {
+            if (msg.appType === 'web') {
+              appType = 'web';
+              document.documentElement.classList.add('web', 'compact');
+              document.getElementById('web-container')!.removeAttribute('hidden');
+              document.getElementById('clear-btn')!.setAttribute('hidden', '');
+              document.getElementById('logs-btn')!.removeAttribute('hidden');
+              document.getElementById('share-btn')!.setAttribute('hidden', '');
+              term.options.convertEol = true;
+            } else {
+              document.getElementById('terminal-container')!.removeAttribute('hidden');
+            }
+            desktop.removeAttribute('hidden');
+            if (appType !== 'web') {
+              requestAnimationFrame(() => { fitAddon.fit(); sendResize(term.cols, term.rows); term.focus(); });
+            }
           }
           if (typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
           if (msg.pinnedOther && msg.pinnedOther.length > 0) showPinnedToast(msg.pinnedOther);
+        }
+        if (msg.type === 'ready' && appType === 'web') {
+          const iframe = document.getElementById('web-frame') as HTMLIFrameElement;
+          if (!iframe.src || iframe.src === 'about:blank') {
+            iframe.src = `./_p/${sessionId}/`;
+            iframe.addEventListener('load', () => {
+              document.getElementById('web-loading')!.setAttribute('hidden', '');
+              iframe.classList.add('loaded');
+            });
+          }
         }
         if (msg.type === 'pin' && typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
         if (msg.type === 'cookie' && msg.name && msg.value) {
@@ -248,41 +273,19 @@ function connect(): void {
 
 connect();
 
-function switchToWebMode(): void {
-  document.getElementById('terminal-container')!.setAttribute('hidden', '');
-  const webContainer = document.getElementById('web-container')!;
-  webContainer.removeAttribute('hidden');
-  const iframe = document.getElementById('web-frame') as HTMLIFrameElement;
-  iframe.src = `./_p/${sessionId}/`;
-  iframe.addEventListener('load', () => {
-    document.getElementById('web-loading')!.setAttribute('hidden', '');
-    iframe.classList.add('loaded');
-  });
-  document.getElementById('clear-btn')!.setAttribute('hidden', '');
-  document.getElementById('logs-btn')!.removeAttribute('hidden');
-  document.getElementById('share-btn')!.setAttribute('hidden', '');
-  // Web app logs come from pipes (\n only), not a PTY (\r\n)
-  term.options.convertEol = true;
-  // Auto-compact + light titlebar for web apps
-  document.documentElement.classList.add('compact', 'web-mode');
-}
-
 document.getElementById('logs-btn')!.addEventListener('click', () => {
   if (sessionDead) return;
   showingLogs = !showingLogs;
-  const logsBtn = document.getElementById('logs-btn')!;
   const termContainer = document.getElementById('terminal-container')!;
   const webContainer = document.getElementById('web-container')!;
   if (showingLogs) {
     webContainer.setAttribute('hidden', '');
     termContainer.removeAttribute('hidden');
     term.options.disableStdin = true;
-    logsBtn.classList.add('active');
     requestAnimationFrame(() => fitAddon.fit());
   } else {
     termContainer.setAttribute('hidden', '');
     webContainer.removeAttribute('hidden');
-    logsBtn.classList.remove('active');
   }
 });
 

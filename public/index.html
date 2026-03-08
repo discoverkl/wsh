@@ -19,6 +19,7 @@
       padding: 0;
       overflow: hidden;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #fff;
     }
 
     #desktop {
@@ -260,13 +261,11 @@
       flex: 1;
       overflow: hidden;
       position: relative;
-      background: #fff;
     }
     #web-frame {
       width: 100%;
       height: 100%;
       border: none;
-      background: #fff;
       opacity: 0;
       transition: opacity 0.3s ease;
     }
@@ -287,47 +286,51 @@
       background: #1e1e2e;
       z-index: 2;
     }
-    #web-loading .spinner {
-      width: 28px;
-      height: 28px;
-      border: 3px solid rgba(205, 214, 244, 0.12);
-      border-top-color: #89b4fa;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
     #web-loading .loading-text {
       color: #6c7086;
       font-size: 13px;
       letter-spacing: 0.03em;
     }
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
 
-    /* Web app mode: lighter titlebar to match iframe content */
-    .web-mode #titlebar {
-      background: #f5f5f5;
-      border-bottom: 1px solid #e0e0e0;
+    /* html.web light theme */
+    html.web body,
+    html.web #desktop {
+      background: #fff;
     }
-    .web-mode #window-title { color: #555; }
-    .web-mode #conn-status.connected {
-      background: #34a853;
-      box-shadow: 0 0 4px rgba(52, 168, 83, 0.6);
+    html.web #titlebar {
+      background: #f5f5f7;
+      border-bottom: 1px solid rgba(0, 0, 0, 0.1);
     }
-    .web-mode #clear-btn, .web-mode #logs-btn, .web-mode #share-btn,
-    .web-mode #new-session, .web-mode #pin-btn { color: #999; }
-    .web-mode #clear-btn:hover, .web-mode #logs-btn:hover, .web-mode #share-btn:hover,
-    .web-mode #new-session:hover, .web-mode #pin-btn:hover {
-      color: #333;
-      background: rgba(0, 0, 0, 0.06);
+    html.web #window-title {
+      color: #1d1d1f;
     }
-    .web-mode #pin-btn.pinned { color: #34a853; }
-    .web-mode #role-badge.writer { color: #34a853; background: rgba(52, 168, 83, 0.1); }
-    .web-mode #role-badge.viewer { color: #ea8600; background: rgba(234, 134, 0, 0.1); }
-    .web-mode .dot.close { background: #ff5f57; }
-    .web-mode .dot.minimize { background: #febc2e; }
-    .web-mode .dot.maximize { background: #28c840; }
-    .web-mode #logs-btn.active { color: #1a73e8; }
+    html.web #actions button {
+      color: #86868b;
+    }
+    html.web #actions button:hover {
+      color: #1d1d1f;
+      background: rgba(0, 0, 0, 0.08);
+    }
+    html.web #web-loading {
+      background: #fff;
+    }
+    html.web #web-loading .loading-text {
+      color: #86868b;
+    }
+    html.web #web-container {
+      background: #fff;
+    }
+    html.web #window {
+      box-shadow:
+        0 0 0 1px rgba(0, 0, 0, 0.08),
+        0 8px 32px rgba(0, 0, 0, 0.12),
+        0 32px 80px rgba(0, 0, 0, 0.08);
+    }
+    html.web #share-popover {
+      background: #fff;
+      border-color: rgba(0, 0, 0, 0.12);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+    }
 
     /* tighten xterm padding */
     .xterm-screen { padding: 0; }
@@ -341,12 +344,16 @@
     .compact #desktop {
       background: #1e1e2e;
     }
+    html.web.compact #desktop {
+      background: #fff;
+    }
     .compact #window {
       width: 100vw;
       height: 100dvh;
       border-radius: 0;
       box-shadow: none;
     }
+
 
     :fullscreen #desktop {
       background: #1e1e2e;
@@ -437,7 +444,7 @@
   </style>
 </head>
 <body>
-  <div id="desktop">
+  <div id="desktop" hidden>
     <div id="window">
       <div id="titlebar">
         <div id="controls">
@@ -498,10 +505,23 @@
           </svg>
         </button>
       </div>
-      <div id="terminal-container"></div>
+      <div id="terminal-container" hidden></div>
       <div id="web-container" hidden>
         <div id="web-loading">
-          <div class="spinner"></div>
+          <svg width="40" height="10" viewBox="0 0 40 10">
+            <circle cx="5" cy="5" r="4" fill="#86868b" opacity="0.6">
+              <animate attributeName="opacity" values="0.6;1;0.6" dur="1.2s" repeatCount="indefinite" begin="0s"/>
+              <animate attributeName="r" values="3;4.5;3" dur="1.2s" repeatCount="indefinite" begin="0s"/>
+            </circle>
+            <circle cx="20" cy="5" r="4" fill="#86868b" opacity="0.6">
+              <animate attributeName="opacity" values="0.6;1;0.6" dur="1.2s" repeatCount="indefinite" begin="0.2s"/>
+              <animate attributeName="r" values="3;4.5;3" dur="1.2s" repeatCount="indefinite" begin="0.2s"/>
+            </circle>
+            <circle cx="35" cy="5" r="4" fill="#86868b" opacity="0.6">
+              <animate attributeName="opacity" values="0.6;1;0.6" dur="1.2s" repeatCount="indefinite" begin="0.4s"/>
+              <animate attributeName="r" values="3;4.5;3" dur="1.2s" repeatCount="indefinite" begin="0.4s"/>
+            </circle>
+          </svg>
           <div class="loading-text">Starting up…</div>
         </div>
         <iframe id="web-frame"></iframe>
