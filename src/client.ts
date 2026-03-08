@@ -81,7 +81,7 @@ function getSessionParams(): { sessionId: string; wtoken: string | null } {
     } else {
       id = (crypto.getRandomValues(new Uint32Array(1))[0] % 2176782336).toString(36).padStart(6, '0');
     }
-    location.hash = id;
+    history.replaceState(null, '', `#${id}`);
   }
   return { sessionId: id, wtoken: params?.get('wt') ?? null };
 }
@@ -259,7 +259,7 @@ function connect(): void {
     }
 
     if (event.code === 1000 && (event.reason === 'PTY process exited' || event.reason === 'Process exited')) {
-      location.hash = '';
+      history.replaceState(null, '', location.pathname);
       term.write('\r\n[Process exited. Refresh to start a new session.]\r\n');
     } else if (event.code === 4003) {
       term.write('\r\n[Session not found.]\r\n');
