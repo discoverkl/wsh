@@ -289,8 +289,10 @@ node: node
   process.exit(0);
 }
 
-const MAX_SCROLLBACK = 5 * 1024 * 1024; // 5 MB
-const SESSION_TTL = 10 * 60 * 1000;     // 10 minutes
+const MAX_SCROLLBACK     = 5 * 1024 * 1024; // 5 MB
+const MAX_SCROLLBACK_WEB = 512 * 1024;      // 512 KB (web app logs)
+const SESSION_TTL     = 10 * 60 * 1000;     // 10 minutes
+const WEB_SESSION_TTL = 60 * 60 * 1000;     // 1 hour
 const PING_INTERVAL = 30_000;           // 30 seconds
 const PONG_TIMEOUT  = 10_000;           // 10 seconds
 const RATE_WINDOW   = 60_000;           // 1 minute
@@ -381,10 +383,11 @@ const handlers: Handlers = {
 };
 
 function appendScrollback(session: Session, data: Buffer): void {
+  const limit = session.appType === 'web' ? MAX_SCROLLBACK_WEB : MAX_SCROLLBACK;
   session.scrollback = Buffer.concat([session.scrollback, data]);
-  if (session.scrollback.length > MAX_SCROLLBACK) {
+  if (session.scrollback.length > limit) {
     session.scrollback = session.scrollback.slice(
-      session.scrollback.length - MAX_SCROLLBACK
+      session.scrollback.length - limit
     );
   }
 }
@@ -476,14 +479,15 @@ function pollUntilReady(port: number, timeoutMs = 30000): Promise<void> {
 async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig): Promise<Session> {
   const port = await findFreePort();
   const now = Date.now();
-  const timeoutMs = appConfig.timeout ? parseTimeout(appConfig.timeout) : undefined;
+  const configuredTimeout = appConfig.timeout ? parseTimeout(appConfig.timeout) : undefined;
+  const timeoutMs = (configuredTimeout != null && !isNaN(configuredTimeout)) ? configuredTimeout : WEB_SESSION_TTL;
   const session: Session = {
     pty: null,
     scrollback: Buffer.alloc(0),
     writer: null,
     peers: new Map(),
     cleanupTimer: null,
-    pinned: true,
+    pinned: false,
     title: appConfig.title ?? path.basename(appConfig.command),
     app: appKey,
     createdAt: now,
@@ -493,7 +497,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
     child: null,
     port,
     ready: false,
-    timeoutMs: (timeoutMs != null && !isNaN(timeoutMs)) ? timeoutMs : undefined,
+    timeoutMs,
   };
 
   sessions.set(id, session);
@@ -569,8 +573,7 @@ function scheduleCleanup(id: string, session: Session): void {
   }
   session.cleanupTimer = null;
   if (session.pinned) return;
-  if (session.appType === 'web' && session.timeoutMs == null) return; // web apps default pinned
-  const ttl = session.timeoutMs ?? SESSION_TTL;
+  const ttl = session.timeoutMs ?? (session.appType === 'web' ? WEB_SESSION_TTL : SESSION_TTL);
   session.cleanupTimer = setTimeout(() => {
     console.log(`[session ${id}] TTL expired, killing process`);
     if (session.child) session.child.kill('SIGTERM');
@@ -903,6 +906,8 @@ function proxyHandler(req: express.Request, res: express.Response): void {
     res.status(503).send('<!DOCTYPE html><html><body style="background:#1e1e2e;color:#cdd6f4;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div>Starting up\u2026</div></body></html>');
     return;
   }
+  // Track proxy activity for idle detection
+  session.lastOutput = Date.now();
   const proxyPrefix = BASE + '_p/' + sessionId;
   const prefix = '/_p/' + sessionId;
   const targetPath = req.url.slice(prefix.length) || '/';
