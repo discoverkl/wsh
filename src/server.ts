@@ -378,10 +378,19 @@ const handlers: Handlers = {
     session.pty.resize(cols, rows);
   },
   close(session) {
-    if (session.child) { session.child.kill('SIGTERM'); return; }
+    if (session.child) { killProcessGroup(session.child); return; }
     if (session.pty) session.pty.kill('SIGHUP');
   },
 };
+
+/** Kill a child process and its entire process group. */
+function killProcessGroup(child: ChildProcess): void {
+  if (child.pid != null) {
+    try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already dead */ }
+  } else {
+    child.kill('SIGTERM');
+  }
+}
 
 function appendScrollback(session: Session, data: Buffer): void {
   const limit = session.appType === 'web' ? MAX_SCROLLBACK_WEB : MAX_SCROLLBACK;
@@ -393,12 +402,18 @@ function appendScrollback(session: Session, data: Buffer): void {
   }
 }
 
+function expandHome(p: string): string {
+  if (p === '~') return os.homedir();
+  if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
 function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session {
   const ptyProcess = pty.spawn(appConfig.command, appConfig.args ?? [], {
     name: 'xterm-256color',
     cols: 80,
     rows: 24,
-    cwd: appConfig.cwd ?? process.env.HOME ?? process.cwd(),
+    cwd: appConfig.cwd ? expandHome(appConfig.cwd) : (process.env.HOME ?? process.cwd()),
     env: {
       ...process.env,
       TERM: 'xterm-256color',
@@ -509,16 +524,34 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
     ...(appConfig.env ?? {}),
     WSH_PORT: String(port),
     WSH_SESSION: id,
+    WSH_BASE_URL: BASE + '_p/' + id + '/',
   };
 
   const child = spawn(appConfig.command, appConfig.args ?? [], {
-    shell: true,
+    shell: process.env.SHELL || '/bin/sh',
+    detached: true,
     env: env as Record<string, string>,
-    cwd: appConfig.cwd ?? process.env.HOME ?? process.cwd(),
+    cwd: appConfig.cwd ? expandHome(appConfig.cwd) : (process.env.HOME ?? process.cwd()),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
   session.child = child;
+
+  // Log the launch command to the log terminal
+  const cmdLine = appConfig.args?.length
+    ? `${appConfig.command} ${appConfig.args.join(' ')}`
+    : appConfig.command;
+  const resolvedCmd = cmdLine
+    .replace(/\$WSH_PORT\b/g, String(port))
+    .replace(/\$WSH_SESSION\b/g, id)
+    .replace(/\$WSH_BASE_URL\b/g, BASE + '_p/' + id + '/');
+  const cwd = appConfig.cwd ? expandHome(appConfig.cwd) : (process.env.HOME ?? process.cwd());
+  const banner = `\x1b[90m$ cd ${cwd} && ${resolvedCmd}\x1b[0m\r\n`;
+  const bannerBuf = Buffer.from(banner);
+  appendScrollback(session, bannerBuf);
+  for (const ws of session.peers.keys()) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(bannerBuf, { binary: true });
+  }
 
   const appendOutput = (data: Buffer) => {
     session.lastOutput = Date.now();
@@ -578,9 +611,20 @@ function scheduleCleanup(id: string, session: Session): void {
   const ttl = session.timeoutMs ?? (session.appType === 'web' ? WEB_SESSION_TTL : SESSION_TTL);
   session.cleanupTimer = setTimeout(() => {
     console.log(`[session ${id}] TTL expired, killing process`);
-    if (session.child) session.child.kill('SIGTERM');
+    if (session.child) killProcessGroup(session.child);
     else if (session.pty) session.pty.kill('SIGHUP');
-    sessions.delete(id);
+    // Session cleanup happens in the process exit handler.
+    // For PTY sessions the exit handler fires synchronously after kill.
+    // Guard against processes that ignore SIGTERM (e.g. stuck):
+    if (sessions.has(id)) {
+      setTimeout(() => {
+        if (sessions.has(id)) {
+          console.log(`[session ${id}] process did not exit after SIGTERM, force killing`);
+          if (session.child) { try { process.kill(-session.child.pid!, 'SIGKILL'); } catch {} }
+          else if (session.pty) session.pty.kill('SIGKILL');
+        }
+      }, 5000);
+    }
   }, ttl);
 }
 
@@ -893,7 +937,7 @@ router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
 router.delete('/api/sessions/:id', (req: express.Request, res: express.Response) => {
   const session = sessions.get(req.params.id);
   if (!session) { res.status(404).json({ error: 'session not found' }); return; }
-  if (session.child) session.child.kill('SIGTERM');
+  if (session.child) killProcessGroup(session.child);
   else if (session.pty) session.pty.kill('SIGHUP');
   res.json({ ok: true });
 });

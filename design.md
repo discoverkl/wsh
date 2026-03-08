@@ -261,6 +261,7 @@ python-http:
 **Environment variables** injected into web app processes:
 - `WSH_PORT` — The port the app must listen on (dynamically assigned)
 - `WSH_SESSION` — The session ID
+- `WSH_BASE_URL` — The reverse proxy prefix path (e.g., `/_p/abc123/`); useful for apps that need a `--base-url` option
 
 ### Architecture
 

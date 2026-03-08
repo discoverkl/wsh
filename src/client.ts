@@ -256,25 +256,31 @@ function switchToWebMode(): void {
   iframe.src = `./_p/${sessionId}/`;
   iframe.addEventListener('load', () => {
     document.getElementById('web-loading')!.setAttribute('hidden', '');
+    iframe.classList.add('loaded');
   });
   document.getElementById('clear-btn')!.setAttribute('hidden', '');
   document.getElementById('logs-btn')!.removeAttribute('hidden');
   document.getElementById('share-btn')!.setAttribute('hidden', '');
+  // Auto-compact + light titlebar for web apps
+  document.documentElement.classList.add('compact', 'web-mode');
 }
 
 document.getElementById('logs-btn')!.addEventListener('click', () => {
   if (sessionDead) return;
   showingLogs = !showingLogs;
+  const logsBtn = document.getElementById('logs-btn')!;
   const termContainer = document.getElementById('terminal-container')!;
   const webContainer = document.getElementById('web-container')!;
   if (showingLogs) {
     webContainer.setAttribute('hidden', '');
     termContainer.removeAttribute('hidden');
     term.options.disableStdin = true;
+    logsBtn.classList.add('active');
     requestAnimationFrame(() => fitAddon.fit());
   } else {
     termContainer.setAttribute('hidden', '');
     webContainer.removeAttribute('hidden');
+    logsBtn.classList.remove('active');
   }
 });
 

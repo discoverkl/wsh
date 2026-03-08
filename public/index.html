@@ -260,12 +260,18 @@
       flex: 1;
       overflow: hidden;
       position: relative;
+      background: #fff;
     }
     #web-frame {
       width: 100%;
       height: 100%;
       border: none;
-      background: #1e1e2e;
+      background: #fff;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+    #web-frame.loaded {
+      opacity: 1;
     }
     #web-loading {
       position: absolute;
@@ -274,13 +280,54 @@
       right: 0;
       bottom: 0;
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
+      gap: 16px;
       background: #1e1e2e;
-      color: #cdd6f4;
-      font-size: 14px;
       z-index: 2;
     }
+    #web-loading .spinner {
+      width: 28px;
+      height: 28px;
+      border: 3px solid rgba(205, 214, 244, 0.12);
+      border-top-color: #89b4fa;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    #web-loading .loading-text {
+      color: #6c7086;
+      font-size: 13px;
+      letter-spacing: 0.03em;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Web app mode: lighter titlebar to match iframe content */
+    .web-mode #titlebar {
+      background: #f5f5f5;
+      border-bottom: 1px solid #e0e0e0;
+    }
+    .web-mode #window-title { color: #555; }
+    .web-mode #conn-status.connected {
+      background: #34a853;
+      box-shadow: 0 0 4px rgba(52, 168, 83, 0.6);
+    }
+    .web-mode #clear-btn, .web-mode #logs-btn, .web-mode #share-btn,
+    .web-mode #new-session, .web-mode #pin-btn { color: #999; }
+    .web-mode #clear-btn:hover, .web-mode #logs-btn:hover, .web-mode #share-btn:hover,
+    .web-mode #new-session:hover, .web-mode #pin-btn:hover {
+      color: #333;
+      background: rgba(0, 0, 0, 0.06);
+    }
+    .web-mode #pin-btn.pinned { color: #34a853; }
+    .web-mode #role-badge.writer { color: #34a853; background: rgba(52, 168, 83, 0.1); }
+    .web-mode #role-badge.viewer { color: #ea8600; background: rgba(234, 134, 0, 0.1); }
+    .web-mode .dot.close { background: #ff5f57; }
+    .web-mode .dot.minimize { background: #febc2e; }
+    .web-mode .dot.maximize { background: #28c840; }
+    .web-mode #logs-btn.active { color: #1a73e8; }
 
     /* tighten xterm padding */
     .xterm-screen { padding: 0; }
@@ -453,7 +500,10 @@
       </div>
       <div id="terminal-container"></div>
       <div id="web-container" hidden>
-        <div id="web-loading">Starting up...</div>
+        <div id="web-loading">
+          <div class="spinner"></div>
+          <div class="loading-text">Starting up…</div>
+        </div>
         <iframe id="web-frame"></iframe>
       </div>
     </div>
