@@ -980,17 +980,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
 
 router.get('/:appName', (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const apps = loadApps();
-  const appConfig = apps[req.params.appName];
-  if (!appConfig) { next(); return; }
-  // For web apps: check last-session cookie and redirect if session still exists
-  if (appConfig.type === 'web') {
-    const cookies = parseCookies(req.headers.cookie ?? '');
-    const lastSession = cookies[`wsh_last_${req.params.appName}`];
-    if (lastSession && sessions.has(lastSession)) {
-      res.redirect(302, `${req.params.appName}#${lastSession}`);
-      return;
-    }
-  }
+  if (!apps[req.params.appName]) { next(); return; }
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
