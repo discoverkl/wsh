@@ -111,6 +111,16 @@ document.getElementById('clear-btn')!.addEventListener('click', () => {
   term.focus();
 });
 
+if (localStorage.getItem('wsh_compact') === '1') {
+  document.documentElement.classList.add('compact');
+}
+
+document.querySelector('.dot.minimize')!.addEventListener('click', () => {
+  const isCompact = document.documentElement.classList.toggle('compact');
+  localStorage.setItem('wsh_compact', isCompact ? '1' : '0');
+  requestAnimationFrame(() => fitAddon.fit());
+});
+
 document.querySelector('.dot.maximize')!.addEventListener('click', () => {
   if (document.fullscreenElement) {
     document.exitFullscreen();

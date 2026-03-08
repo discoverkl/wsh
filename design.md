@@ -93,6 +93,22 @@ Three roles: **owner**, **writer**, **viewer**.
 - Viewer link: `<base>/<appName>#<sessionId>` — read-only access
 - Generated via `GET /api/share?session=<id>` (owner-only)
 
+## Window Modes
+
+Three display modes form a progressive escalation — **pretty → practical → focused**:
+
+| Mode | Titlebar | Padding | Fullscreen | Trigger |
+|---|---|---|---|---|
+| **Window** (default) | yes | yes | no | — |
+| **Compact** (yellow dot) | yes | no | no | Toggles `.compact` on `<html>` |
+| **Fullscreen** (green dot) | no | no | yes | Browser Fullscreen API |
+
+- **Window**: Decorative "macOS desktop" look with border-radius, shadow, and background texture. Good for demos and screenshots.
+- **Compact**: Terminal fills the browser tab; titlebar remains for controls. For daily work.
+- **Fullscreen**: Pure terminal, maximum space. Titlebar hidden via `:fullscreen` CSS.
+
+The red dot closes the session (owner-only). All three mode transitions trigger `fitAddon.fit()` to resize the terminal.
+
 ## Pinned Sessions Toast
 
 When an owner connects, the server reports any other pinned sessions. The client shows a dismissable toast with clickable chips linking to those sessions (max 3 shown, overflow indicated). The toast auto-dismisses after 8 seconds and is deduplicated per tab via `sessionStorage`.
