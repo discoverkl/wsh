@@ -120,6 +120,14 @@ header {
   height: 24px;
 }
 
+.card-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
 .card-title {
   font-size: 18px;
   font-weight: 600;
@@ -133,7 +141,6 @@ header {
   font-size: 11px;
   color: var(--text-tertiary);
   font-weight: 500;
-  margin-left: 8px;
   opacity: 0;
   transition: opacity 0.3s;
 }
@@ -183,11 +190,16 @@ header {
   text-transform: uppercase;
   padding: 1px 5px;
   border-radius: 3px;
-  margin-left: 8px;
   color: #3b82f6;
   background: rgba(59, 130, 246, 0.12);
   border: 1px solid rgba(59, 130, 246, 0.2);
   vertical-align: middle;
+}
+
+.card-badge-public {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.2);
 }
 
 /* Skeleton loading */
@@ -243,7 +255,7 @@ header {
 <div class="container">
   <header>
     <div class="wordmark">wsh</div>
-    <div class="tagline">Terminal apps in the browser</div>
+    <div class="tagline">Apps in the browser</div>
   </header>
   <div id="content" class="grid">
     <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-line title"></div><div class="skeleton-line desc"></div><div class="skeleton-line desc2"></div></div>
@@ -374,6 +386,7 @@ header {
           '<div class="card-title-row">' +
             '<span class="card-title">' + escapeHtml(app.title) + '</span>' +
             (app.type === 'web' ? '<span class="card-type-badge">WEB</span>' : '') +
+            (app.access === 'public' ? '<span class="card-type-badge card-badge-public">PUBLIC</span>' : '') +
             '<span class="card-sessions" data-app="' + escapeAttr(app.key) + '"></span>' +
           '</div>' +
         '</div>' +
