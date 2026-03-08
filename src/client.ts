@@ -261,6 +261,8 @@ function switchToWebMode(): void {
   document.getElementById('clear-btn')!.setAttribute('hidden', '');
   document.getElementById('logs-btn')!.removeAttribute('hidden');
   document.getElementById('share-btn')!.setAttribute('hidden', '');
+  // Web app logs come from pipes (\n only), not a PTY (\r\n)
+  term.options.convertEol = true;
   // Auto-compact + light titlebar for web apps
   document.documentElement.classList.add('compact', 'web-mode');
 }
