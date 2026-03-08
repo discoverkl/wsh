@@ -99,11 +99,14 @@ if (process.argv[2] === 'version') {
 #     env:                   # (optional) extra environment variables
 #       NODE_ENV: development
 #
+# Config layers (each overrides the previous):
+#   1. Default: bash is always available as a fallback
+#   2. System:  /etc/wsh/apps.yaml — admin-managed, shared across users
+#   3. User:    ~/.wsh/apps.yaml   — personal additions/overrides
+#
 # Notes:
-#   - The built-in "bash" app is always available and cannot be
-#     overridden here.
-#   - Changes to this file take effect on the next session created;
-#     no server restart is required.
+#   - Any layer can override entries from previous layers, including bash.
+#   - Changes take effect on the next session created; no restart needed.
 #   - To remove an app, delete or comment out its entry.
 #
 # ──────────────────────────────────────────────────────────
@@ -122,30 +125,33 @@ node: node
   const apps: Record<string, { command: string; args?: string[]; title?: string }> = {
     bash: { command: '/bin/bash', title: 'bash' },
   };
-  // Load apps.yaml, fall back to apps.json
-  let configPath = appsPath;
-  let parsed: any = null;
-  try { parsed = YAML.parse(fs.readFileSync(appsPath, 'utf8')); } catch {
-    const jsonPath = path.join(os.homedir(), '.wsh', 'apps.json');
-    try { parsed = JSON.parse(fs.readFileSync(jsonPath, 'utf8')); configPath = jsonPath; } catch {}
-  }
-  if (parsed && typeof parsed === 'object') {
-    const entries = (parsed.apps && typeof parsed.apps === 'object') ? parsed.apps : parsed;
-    for (const [key, value] of Object.entries(entries as Record<string, unknown>)) {
-      if (key in apps) continue;
-      if (typeof value === 'string') apps[key] = { command: value };
-      else if (value && typeof value === 'object' && typeof (value as any).command === 'string')
-        apps[key] = value as any;
+  const systemDir = '/etc/wsh';
+  const userDir = path.join(os.homedir(), '.wsh');
+  function loadAndMerge(dir: string) {
+    let parsed: any = null;
+    try { parsed = YAML.parse(fs.readFileSync(path.join(dir, 'apps.yaml'), 'utf8')); } catch {
+      try { parsed = JSON.parse(fs.readFileSync(path.join(dir, 'apps.json'), 'utf8')); } catch {}
+    }
+    if (parsed && typeof parsed === 'object') {
+      const entries = (parsed.apps && typeof parsed.apps === 'object') ? parsed.apps : parsed;
+      for (const [key, value] of Object.entries(entries as Record<string, unknown>)) {
+        if (typeof value === 'string') apps[key] = { command: value };
+        else if (value && typeof value === 'object' && typeof (value as any).command === 'string')
+          apps[key] = value as any;
+      }
     }
   }
+  loadAndMerge(systemDir);
+  loadAndMerge(userDir);
   console.log('Available apps:');
   for (const [key, app] of Object.entries(apps)) {
     const title = app.title ?? path.basename(app.command);
     const args = app.args?.length ? ' ' + app.args.join(' ') : '';
     console.log(`  ${key}  ${title}  (${app.command}${args})`);
   }
-  console.log(`\nConfig: ${configPath}`);
-  console.log('Run "wsh apps init" to create a starter config.');
+  console.log(`\nSystem config: ${path.join(systemDir, 'apps.yaml')}`);
+  console.log(`User config:   ${appsPath}`);
+  console.log('Run "wsh apps init" to create a starter user config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
   const { execSync } = require('child_process') as typeof import('child_process');
@@ -520,7 +526,7 @@ interface AppConfig {
   title?: string;
 }
 
-const BUILTIN_APPS: Record<string, AppConfig> = {
+const DEFAULT_APPS: Record<string, AppConfig> = {
   bash: {
     command: '/bin/bash',
     args: values['no-login'] ? [] : ['-l'],
@@ -528,17 +534,12 @@ const BUILTIN_APPS: Record<string, AppConfig> = {
   },
 };
 
-function loadAppsFile(): Record<string, unknown> | null {
-  const dir = path.join(os.homedir(), '.wsh');
+const SYSTEM_CONFIG_DIR = '/etc/wsh';
+
+function loadConfigFile(dir: string): Record<string, unknown> | null {
   // Prefer apps.yaml, fall back to apps.json
-  const yamlPath = path.join(dir, 'apps.yaml');
-  try {
-    return YAML.parse(fs.readFileSync(yamlPath, 'utf8'));
-  } catch {}
-  const jsonPath = path.join(dir, 'apps.json');
-  try {
-    return JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
-  } catch {}
+  try { return YAML.parse(fs.readFileSync(path.join(dir, 'apps.yaml'), 'utf8')); } catch {}
+  try { return JSON.parse(fs.readFileSync(path.join(dir, 'apps.json'), 'utf8')); } catch {}
   return null;
 }
 
@@ -549,17 +550,23 @@ function normalizeAppEntry(value: unknown): AppConfig | null {
   return null;
 }
 
-function loadApps(): Record<string, AppConfig> {
-  const apps = { ...BUILTIN_APPS };
-  const parsed = loadAppsFile();
-  if (!parsed || typeof parsed !== 'object') return apps;
+function mergeApps(apps: Record<string, AppConfig>, parsed: Record<string, unknown>): void {
   // Support both wrapped { apps: { ... } } and bare { key: ... }
   const entries = (parsed.apps && typeof parsed.apps === 'object') ? parsed.apps : parsed;
   for (const [key, value] of Object.entries(entries as Record<string, unknown>)) {
-    if (key in BUILTIN_APPS) continue;
     const config = normalizeAppEntry(value);
     if (config) apps[key] = config;
   }
+}
+
+function loadApps(): Record<string, AppConfig> {
+  const apps = { ...DEFAULT_APPS };
+  // Layer 1: system config (/etc/wsh/apps.yaml)
+  const system = loadConfigFile(SYSTEM_CONFIG_DIR);
+  if (system && typeof system === 'object') mergeApps(apps, system);
+  // Layer 2: user config (~/.wsh/apps.yaml) — overrides system
+  const user = loadConfigFile(path.join(os.homedir(), '.wsh'));
+  if (user && typeof user === 'object') mergeApps(apps, user);
   return apps;
 }
 
