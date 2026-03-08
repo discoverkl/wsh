@@ -535,61 +535,34 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
   child.stdout!.on('data', appendOutput);
   child.stderr!.on('data', appendOutput);
 
-  const healthPath = appConfig.healthCheck || (session.stripPrefix ? '/' : BASE + '_p/' + id + '/');
-  const startupTimeoutMs = appConfig.startupTimeout ? parseTimeout(appConfig.startupTimeout) : 30000;
-  const effectiveStartupTimeout = (!isNaN(startupTimeoutMs) && startupTimeoutMs > 0) ? startupTimeoutMs : 30000;
-
-  const startHealthCheck = () => {
-    pollUntilReady(port, healthPath, effectiveStartupTimeout).then(() => {
-      session.ready = true;
-      console.log(`[session ${id}] web app ready`);
-      const readyMsg = JSON.stringify({ type: 'ready' });
-      for (const ws of session.peers.keys()) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(readyMsg);
-      }
-    }).catch(() => {
-      if (sessions.has(id)) {
-        console.log(`[session ${id}] health check failed, but process still running`);
-      }
-    });
-  };
-
-  const onChildExit = (code: number | null) => {
+  child.on('exit', (code) => {
     console.log(`[session ${id}] web process exited (code ${code})`);
-
-    // If peers are still connected, respawn the process (live reload)
-    const activePeers = [...session.peers.keys()].filter(ws => ws.readyState === WebSocket.OPEN);
-    if (activePeers.length > 0) {
-      console.log(`[session ${id}] respawning web app (${activePeers.length} peer(s) connected)`);
-      session.ready = false;
-      const newChild = spawn(appConfig.command, appConfig.args ?? [], {
-        shell: process.env.SHELL || '/bin/sh',
-        detached: true,
-        env: env as Record<string, string>,
-        cwd: appConfig.cwd ? expandHome(appConfig.cwd) : (process.env.HOME ?? process.cwd()),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      session.child = newChild;
-      const restartBanner = Buffer.from(`\x1b[90m--- process restarted ---\x1b[0m\r\n`);
-      appendScrollback(session, restartBanner);
-      for (const ws of activePeers) ws.send(restartBanner, { binary: true });
-      newChild.stdout!.on('data', appendOutput);
-      newChild.stderr!.on('data', appendOutput);
-      newChild.on('exit', onChildExit);
-      startHealthCheck();
-      return;
+    for (const ws of session.peers.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'Process exited');
     }
-
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
     sessions.delete(id);
-  };
-  child.on('exit', onChildExit);
+  });
 
   console.log(`[session ${id}] web app spawned on port ${port}`);
 
   // Poll for readiness in the background — don't block session creation.
   // The client shows its own loading spinner until the iframe loads.
-  startHealthCheck();
+  const healthPath = appConfig.healthCheck || (session.stripPrefix ? '/' : BASE + '_p/' + id + '/');
+  const startupTimeoutMs = appConfig.startupTimeout ? parseTimeout(appConfig.startupTimeout) : 30000;
+  const effectiveStartupTimeout = (!isNaN(startupTimeoutMs) && startupTimeoutMs > 0) ? startupTimeoutMs : 30000;
+  pollUntilReady(port, healthPath, effectiveStartupTimeout).then(() => {
+    session.ready = true;
+    console.log(`[session ${id}] web app ready`);
+    const readyMsg = JSON.stringify({ type: 'ready' });
+    for (const ws of session.peers.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(readyMsg);
+    }
+  }).catch(() => {
+    if (sessions.has(id)) {
+      console.log(`[session ${id}] health check failed, but process still running`);
+    }
+  });
 
   return session;
 }

@@ -166,7 +166,6 @@ All CLI commands accept `-p, --port` and read `WSH_PORT` / `WSH_BASE_PATH` env v
 2. `pollUntilReady()` polls `http://127.0.0.1:{port}{healthCheck}` every 500ms (up to `startupTimeout`, default 30s) in the background
 3. When the health check passes, the server sends `{ type: 'ready' }` to all connected peers
 4. The client sets `iframe.src` to `./_p/{sessionId}/` to load the app
-5. If the child process exits while peers are still connected, the server respawns it, re-runs the health check, and sends `ready` again so the client reloads the iframe
 
 ### Reverse Proxy
 

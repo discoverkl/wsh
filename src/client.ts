@@ -224,14 +224,13 @@ function connect(): void {
         }
         if (msg.type === 'ready' && appType === 'web') {
           const iframe = document.getElementById('web-frame') as HTMLIFrameElement;
-          const iframeSrc = `./_p/${sessionId}/`;
           if (!iframe.src || iframe.src === 'about:blank') {
+            iframe.src = `./_p/${sessionId}/`;
             iframe.addEventListener('load', () => {
               document.getElementById('web-loading')!.setAttribute('hidden', '');
               iframe.classList.add('loaded');
             });
           }
-          iframe.src = iframeSrc;
         }
         if (msg.type === 'pin' && typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
         if (msg.type === 'cookie' && msg.name && msg.value) {
