@@ -46,7 +46,26 @@ if (process.argv[2] === 'version') {
     process.exit(1);
   }
 } else if (process.argv[2] === 'apps') {
+  const subCmd = process.argv[3];
   const appsPath = path.join(os.homedir(), '.wsh', 'apps.json');
+
+  if (subCmd === 'init') {
+    if (fs.existsSync(appsPath)) {
+      console.error(`Already exists: ${appsPath}`);
+      process.exit(1);
+    }
+    const template = {
+      apps: {
+        python3: { title: 'Python REPL', command: 'python3' },
+        node: { title: 'Node.js REPL', command: 'node' },
+      },
+    };
+    fs.mkdirSync(path.dirname(appsPath), { recursive: true });
+    fs.writeFileSync(appsPath, JSON.stringify(template, null, 2) + '\n');
+    console.log(`Created ${appsPath}`);
+    process.exit(0);
+  }
+
   const apps: Record<string, { command: string; args?: string[]; title?: string }> = {
     bash: { command: '/bin/bash', title: 'bash' },
   };
@@ -65,6 +84,8 @@ if (process.argv[2] === 'version') {
     const args = app.args?.length ? ' ' + app.args.join(' ') : '';
     console.log(`  ${key}  ${title}  (${app.command}${args})`);
   }
+  console.log(`\nConfig: ${appsPath}`);
+  console.log('Run "wsh apps init" to create a starter config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
   const { execSync } = require('child_process') as typeof import('child_process');
@@ -603,6 +624,16 @@ router.get('/api/share', (req: express.Request, res: express.Response) => {
   if (!sessionId) { res.status(400).json({ error: 'session ID required' }); return; }
   if (!tls) { res.status(503).json({ error: 'Network sharing not available' }); return; }
   res.json({ wtoken: writerToken(sessionId) });
+});
+
+router.get('/api/apps', (_req: express.Request, res: express.Response) => {
+  const apps = loadApps();
+  const list = Object.entries(apps).map(([key, app]) => ({
+    key,
+    title: app.title ?? path.basename(app.command),
+    command: app.command,
+  }));
+  res.json({ apps: list });
 });
 
 router.get('/api/sessions', (_req: express.Request, res: express.Response) => {

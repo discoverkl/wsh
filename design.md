@@ -123,7 +123,9 @@ Each entry: `command` (required), `args` (optional string array), `title` (optio
 | `GET {BASE}:appName` | Serves `index.html`. Client generates a session ID and connects via WebSocket with `?app=appName`. |
 | `POST {BASE}api/sessions` | JSON body `{ "app": "appName" }` — spawns a pinned session, returns `{ id, url }`. Defaults to `bash`. |
 
-**CLI**: `wsh apps` lists available apps. `wsh new [appName]` creates a session via the API.
+**API**: `GET {BASE}api/apps` returns `{ apps: [{ key, title, command }] }` — lists all available apps (owner auth required from non-loopback).
+
+**CLI**: `wsh apps` lists available apps. `wsh apps init` creates a starter `~/.wsh/apps.json`. `wsh new [appName]` creates a session via the API.
 
 ## Base Path Routing
 
