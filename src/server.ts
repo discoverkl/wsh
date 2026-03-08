@@ -318,6 +318,7 @@ interface Session {
   ready?: boolean;
   timeoutMs?: number;
   access?: 'public' | 'private';
+  stripPrefix?: boolean;
 }
 
 const sessions = new Map<string, Session>();
@@ -515,6 +516,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
     ready: false,
     timeoutMs,
     access: appConfig.access,
+    stripPrefix: appConfig.stripPrefix,
   };
 
   sessions.set(id, session);
@@ -575,15 +577,20 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
 
   console.log(`[session ${id}] web app spawned on port ${port}`);
 
-  try {
-    await pollUntilReady(port);
+  // Poll for readiness in the background — don't block session creation.
+  // The client shows its own loading spinner until the iframe loads.
+  pollUntilReady(port).then(() => {
     session.ready = true;
     console.log(`[session ${id}] web app ready`);
-  } catch {
+    const readyMsg = JSON.stringify({ type: 'ready' });
+    for (const ws of session.peers.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(readyMsg);
+    }
+  }).catch(() => {
     if (sessions.has(id)) {
       console.log(`[session ${id}] health check failed, but process still running`);
     }
-  }
+  });
 
   return session;
 }
@@ -710,6 +717,7 @@ interface AppConfig {
   type?: 'pty' | 'web';
   timeout?: string;
   access?: 'public' | 'private';
+  stripPrefix?: boolean;
 }
 
 const DEFAULT_APPS: Record<string, AppConfig> = {
@@ -964,8 +972,9 @@ function proxyHandler(req: express.Request, res: express.Response): void {
   }
   // Track proxy activity for idle detection
   session.lastOutput = Date.now();
-  // Forward the full prefixed path — apps must configure --base-url=$WSH_BASE_URL or use relative URLs
-  const targetPath = BASE + '_p/' + sessionId + (req.url.slice(('/_p/' + sessionId).length) || '/');
+  // stripPrefix: send just the relative path (e.g. '/'); otherwise forward the full prefixed path
+  const suffix = req.url.slice(('/_p/' + sessionId).length) || '/';
+  const targetPath = session.stripPrefix ? suffix : BASE + '_p/' + sessionId + suffix;
 
   const proxyReq = http.request({
     hostname: '127.0.0.1',
@@ -1080,8 +1089,8 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
       }
     }
     const target = net.connect(wsSession.port, '127.0.0.1', () => {
-      const wsProxyPrefix = BASE + '_p/' + wsSessionId;
-      const targetPath = wsProxyPrefix + (slashIdx >= 0 ? '/' + rest.slice(slashIdx + 1) : '/') + (url.search || '');
+      const wsSuffix = (slashIdx >= 0 ? '/' + rest.slice(slashIdx + 1) : '/') + (url.search || '');
+      const targetPath = wsSession.stripPrefix ? wsSuffix : BASE + '_p/' + wsSessionId + wsSuffix;
       let upgradeReq = `${req.method} ${targetPath} HTTP/1.1\r\n`;
       for (const [key, val] of Object.entries(req.headers)) {
         if (val) {
@@ -1152,6 +1161,9 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     const sentRole = (yields && !effectiveWriter) ? 'viewer' : credential;
     session.peers.set(ws, sentRole);
     sendRoleMessage(ws, id, session, sentRole, credential);
+    if (session.appType === 'web' && session.ready) {
+      ws.send(JSON.stringify({ type: 'ready' }));
+    }
     if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
   } else {
     // New session — only owners may create one.
