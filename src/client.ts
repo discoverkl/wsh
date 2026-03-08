@@ -260,6 +260,11 @@ function connect(): void {
 
     if (event.code === 1000 && (event.reason === 'PTY process exited' || event.reason === 'Process exited')) {
       history.replaceState(null, '', location.pathname);
+      if (appType === 'web') {
+        document.getElementById('web-container')!.setAttribute('hidden', '');
+        document.getElementById('terminal-container')!.removeAttribute('hidden');
+        requestAnimationFrame(() => fitAddon.fit());
+      }
       term.write('\r\n[Process exited. Refresh to start a new session.]\r\n');
     } else if (event.code === 4003) {
       term.write('\r\n[Session not found.]\r\n');
