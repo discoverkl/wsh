@@ -259,6 +259,7 @@ function switchToWebMode(): void {
   });
   document.getElementById('clear-btn')!.setAttribute('hidden', '');
   document.getElementById('logs-btn')!.removeAttribute('hidden');
+  document.getElementById('share-btn')!.setAttribute('hidden', '');
 }
 
 document.getElementById('logs-btn')!.addEventListener('click', () => {

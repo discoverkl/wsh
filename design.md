@@ -222,7 +222,19 @@ Node.js (~30 MB) is downloaded, not embedded. The Go binary embeds `dist/`, `pub
 
 ## Web App Support
 
-wsh can host web-based apps (Jupyter, VS Code Server, Streamlit, etc.) that render in an iframe instead of a terminal. The session lifecycle, URL scheme, catalog, access control, sharing, and pinning all work the same as PTY apps.
+wsh can host web-based apps (Jupyter, VS Code Server, Streamlit, etc.) that render in an iframe instead of a terminal.
+
+### TUI vs Web Apps
+
+| Aspect | TUI apps | Web apps |
+|---|---|---|
+| **Session creation** | PTY spawned on first WS connect | Child process spawned on first WS connect |
+| **Process model** | One PTY per session | One HTTP server per session (child process) |
+| **Client rendering** | xterm.js terminal | iframe pointing at reverse proxy |
+| **Lifecycle** | 10 min TTL after last disconnect (or pinned) | 1h default timeout from last proxy activity (configurable via `timeout`) |
+| **Access control** | Per-session roles: owner / writer / viewer | App-level: `access: public` (anyone) or `private` (owner only, default) |
+| **Sharing** | Share links with writer/viewer tokens | No share links — use `access: public` for open access |
+| **Config** | `type: pty` (default) | `type: web`, must listen on `$WSH_PORT` |
 
 ### Configuration
 
@@ -238,13 +250,17 @@ python-http:
   title: Python HTTP Server
   command: python3 -m http.server $WSH_PORT
   type: web
+  access: public    # accessible without owner token
 ```
+
+**Fields specific to web apps**:
+- `type: web` — (required) marks the app as a web app
+- `access: public | private` — (optional, default `private`) controls who can access the proxy
+- `timeout: '24h'` — (optional, default `1h`) idle timeout; supports `ms`, `s`, `m`, `h`, `d` units
 
 **Environment variables** injected into web app processes:
 - `WSH_PORT` — The port the app must listen on (dynamically assigned)
 - `WSH_SESSION` — The session ID
-
-**Optional `timeout` field**: Web apps are pinned by default (no auto-timeout). To override, set `timeout: '24h'` (supports `ms`, `s`, `m`, `h`, `d` units).
 
 ### Architecture
 
@@ -264,19 +280,41 @@ Browser (xterm.js) <--WS-->  server.ts  <--log stream-->  web app stdout/stderr
 
 **Health check**: `pollUntilReady()` polls `http://127.0.0.1:{port}/` every 500ms until a response is received (up to 30s timeout).
 
+### Lifecycle
+
+Web app sessions differ from TUI sessions:
+- **Default timeout**: 1 hour of proxy inactivity (not 10 min like TUI). Configurable via `timeout` field.
+- **Activity tracking**: Every proxied HTTP request updates `lastOutput`, resetting the idle timer.
+- **Log buffer**: stdout/stderr is captured into a 512 KB scrollback buffer, broadcast to WS clients as binary frames.
+- **Not pinned by default**: Web sessions start unpinned and time out after the configured idle period.
+
+### Access Control
+
+Web apps use **app-level** access control instead of per-session share links:
+
+| `access` | Loopback | LAN with `wsh_token` cookie | LAN without token |
+|---|---|---|---|
+| `private` (default) | allowed | allowed | **401 Unauthorized** |
+| `public` | allowed | allowed | allowed |
+
+- The proxy handler checks `session.access` on every HTTP request and WebSocket upgrade
+- The token middleware no longer gates `_p/` paths — the proxy does its own auth based on access level
+- The share button is hidden for web apps (no per-session writer/viewer distinction)
+
 ### Client Behavior
 
 When the server sends `appType: 'web'` in the role message, the client:
 1. Hides `#terminal-container`, shows `#web-container` with an iframe
 2. Sets `iframe.src` to `./_p/{sessionId}/`
 3. Shows a "Logs" button (replaces the "Clear Scrollback" button)
-4. Guards all PTY-specific handlers (input, resize) to no-op for web apps
+4. Hides the share button (web apps use app-level access, not share links)
+5. Guards all PTY-specific handlers (input, resize) to no-op for web apps
 
 **Log viewer**: stdout/stderr from the web app process is captured and broadcast to connected WebSocket clients as binary frames (same as PTY output). The xterm.js terminal accumulates this data in the background. Clicking "Logs" toggles between the iframe and the terminal log view.
 
 ### Last-Session Cookie
 
-When a web session is created, a `wsh_last_{appKey}` cookie is set. On subsequent visits to `GET {BASE}{appName}`, if the cookie references an active session, the server redirects to `{appName}#{sessionId}`. This provides a "return to existing session" experience for web apps.
+When a web session is created, the server sends a `cookie` message to the client, which sets `wsh_last_{appKey}` as a client-side cookie. On subsequent visits to `GET {BASE}{appName}`, the client checks this cookie and navigates to the existing session if present. This is handled entirely client-side (no server redirect).
 
 ### Web Apps and `--base-url`
 

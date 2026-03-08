@@ -317,6 +317,7 @@ interface Session {
   port?: number;
   ready?: boolean;
   timeoutMs?: number;
+  access?: 'public' | 'private';
 }
 
 const sessions = new Map<string, Session>();
@@ -498,6 +499,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
     port,
     ready: false,
     timeoutMs,
+    access: appConfig.access,
   };
 
   sessions.set(id, session);
@@ -663,6 +665,7 @@ interface AppConfig {
   description?: string;
   type?: 'pty' | 'web';
   timeout?: string;
+  access?: 'public' | 'private';
 }
 
 const DEFAULT_APPS: Record<string, AppConfig> = {
@@ -814,7 +817,7 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
       return res.redirect(302, url.pathname + url.search);
     }
 
-    if (url.pathname.startsWith(BASE + 'api/') || url.pathname.startsWith(BASE + '_p/')) {
+    if (url.pathname.startsWith(BASE + 'api/')) {
       res.status(401).send('Unauthorized');
     } else {
       next(); // static pages load without auth; WebSocket handles its own auth
@@ -861,6 +864,7 @@ router.get('/api/apps', (_req: express.Request, res: express.Response) => {
     icon: app.icon ?? null,
     description: app.description ?? null,
     type: app.type ?? 'pty',
+    access: app.access ?? null,
   }));
   res.json({ apps: list });
 });
@@ -901,6 +905,14 @@ function proxyHandler(req: express.Request, res: express.Response): void {
   if (!session || session.appType !== 'web' || !session.port) {
     res.status(404).json({ error: 'session not found' });
     return;
+  }
+  // Access control: non-public web apps require owner auth
+  if (session.access !== 'public' && token && !isLoopback(req.socket.remoteAddress)) {
+    const cookies = parseCookies(req.headers.cookie as string ?? '');
+    if (cookies['wsh_token'] !== token) {
+      res.status(401).send('Unauthorized');
+      return;
+    }
   }
   if (!session.ready) {
     res.status(503).send('<!DOCTYPE html><html><body style="background:#1e1e2e;color:#cdd6f4;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div>Starting up\u2026</div></body></html>');
@@ -1026,6 +1038,15 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
       socket.destroy();
       return;
     }
+    // Access control: non-public web apps require owner auth
+    if (wsSession.access !== 'public' && token && !isLoopback(req.socket.remoteAddress)) {
+      const cookies = parseCookies(req.headers.cookie ?? '');
+      if (cookies['wsh_token'] !== token) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+    }
     const target = net.connect(wsSession.port, '127.0.0.1', () => {
       const targetPath = (slashIdx >= 0 ? '/' + rest.slice(slashIdx + 1) : '/') + (url.search || '');
       let upgradeReq = `${req.method} ${targetPath} HTTP/1.1\r\n`;
@@ -1085,7 +1106,9 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       clearTimeout(session.cleanupTimer);
       session.cleanupTimer = null;
     }
-    if (isWriter) {
+    // If the session has no active writer, promote even yielding owners/writers.
+    const effectiveWriter = isWriter || (yields && session.writer === null);
+    if (effectiveWriter) {
       if (session.writer && session.writer.readyState === WebSocket.OPEN) {
         session.writer.send(JSON.stringify({ type: 'role', role: 'viewer' }));
       }
@@ -1095,7 +1118,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       console.log(`[session ${id}] ${yields ? 'yielding owner' : 'viewer'} attached`);
     }
     // Store 'viewer' for yielding connections so auto-promotion on writer-disconnect skips them.
-    const sentRole = yields ? 'viewer' : credential;
+    const sentRole = (yields && !effectiveWriter) ? 'viewer' : credential;
     session.peers.set(ws, sentRole);
     sendRoleMessage(ws, id, session, sentRole, credential);
     if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
