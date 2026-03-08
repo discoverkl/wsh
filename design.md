@@ -270,16 +270,14 @@ Browser (iframe)  <--HTTP/WS-->  server.ts (reverse proxy)  <--HTTP/WS-->  web a
 Browser (xterm.js) <--WS-->  server.ts  <--log stream-->  web app stdout/stderr
 ```
 
-**Reverse proxy**: All requests to `{BASE}_p/{sessionId}/...` are proxied to the web app's local port. The proxy:
-- Rewrites `Location` headers on redirects (prepends proxy prefix)
-- Rewrites `Set-Cookie` `Path` attributes (scopes to proxy prefix)
+**Reverse proxy**: All requests to `{BASE}_p/{sessionId}/...` are proxied to the web app's local port. The proxy forwards the **full prefixed path** unchanged — apps must configure their base URL via `$WSH_BASE_URL` or use relative URLs. No path rewriting is performed (no `Location` header or `Set-Cookie` rewriting). The proxy:
 - Proxies WebSocket upgrades via raw TCP socket piping
 - Returns 503 with "Starting up..." splash while the app's health check is pending
 - Returns 502 on proxy errors
 
 **Port assignment**: `findFreePort()` binds to port 0 on localhost to get an OS-assigned ephemeral port.
 
-**Health check**: `pollUntilReady()` polls `http://127.0.0.1:{port}/` every 500ms until a response is received (up to 30s timeout).
+**Health check**: `pollUntilReady()` polls `http://127.0.0.1:{port}{WSH_BASE_URL}` every 500ms until a response is received (up to 30s timeout).
 
 ### Lifecycle
 
@@ -319,4 +317,8 @@ When a web session is created, the server sends a `cookie` message to the client
 
 ### Web Apps and `--base-url`
 
-Some web apps serve assets with absolute paths (e.g., `/static/app.js`). Since wsh proxies under `{BASE}_p/{sessionId}/`, these absolute paths break. If a web app supports a `--base-url` or similar option, configure it to use the proxy prefix path. For apps that don't support this, wsh's proxy transparently handles most cases via header rewriting.
+The proxy forwards the full prefixed path to the web app unchanged. Web apps **must** either:
+1. Configure their base URL via `$WSH_BASE_URL` (e.g., `--ServerApp.base_url=$WSH_BASE_URL` for Jupyter), or
+2. Use only relative URLs for all assets, links, and API calls
+
+Apps that use absolute paths (e.g., `/static/app.js`) without configuring a base URL will break — no path rewriting is performed by the proxy.

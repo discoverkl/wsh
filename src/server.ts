@@ -475,12 +475,12 @@ function findFreePort(): Promise<number> {
   });
 }
 
-function pollUntilReady(port: number, timeoutMs = 30000): Promise<void> {
+function pollUntilReady(port: number, healthPath = '/', timeoutMs = 30000): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
     const check = () => {
       if (Date.now() > deadline) { reject(new Error('Health check timeout')); return; }
-      const req = http.request({ hostname: '127.0.0.1', port, path: '/', method: 'GET', timeout: 2000 }, (res) => {
+      const req = http.request({ hostname: '127.0.0.1', port, path: healthPath, method: 'GET', timeout: 2000 }, (res) => {
         res.resume();
         resolve();
       });
@@ -576,7 +576,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
   console.log(`[session ${id}] web app spawned on port ${port}`);
 
   try {
-    await pollUntilReady(port, 30000);
+    await pollUntilReady(port, BASE + '_p/' + id + '/', 30000);
     session.ready = true;
     console.log(`[session ${id}] web app ready`);
   } catch {
@@ -964,9 +964,8 @@ function proxyHandler(req: express.Request, res: express.Response): void {
   }
   // Track proxy activity for idle detection
   session.lastOutput = Date.now();
-  const proxyPrefix = BASE + '_p/' + sessionId;
-  const prefix = '/_p/' + sessionId;
-  const targetPath = req.url.slice(prefix.length) || '/';
+  // Forward the full prefixed path — apps must configure --base-url=$WSH_BASE_URL or use relative URLs
+  const targetPath = BASE + '_p/' + sessionId + (req.url.slice(('/_p/' + sessionId).length) || '/');
 
   const proxyReq = http.request({
     hostname: '127.0.0.1',
@@ -975,17 +974,6 @@ function proxyHandler(req: express.Request, res: express.Response): void {
     method: req.method,
     headers: { ...req.headers, host: `localhost:${session.port}` },
   }, (proxyRes) => {
-    if (proxyRes.headers.location) {
-      const loc = proxyRes.headers.location;
-      if (loc.startsWith('/')) {
-        proxyRes.headers.location = proxyPrefix + loc;
-      }
-    }
-    if (proxyRes.headers['set-cookie']) {
-      proxyRes.headers['set-cookie'] = (proxyRes.headers['set-cookie'] as string[]).map(c =>
-        c.replace(/[Pp]ath=\//g, `Path=${proxyPrefix}/`)
-      );
-    }
     res.writeHead(proxyRes.statusCode!, proxyRes.headers);
     proxyRes.pipe(res);
   });
@@ -1092,7 +1080,8 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
       }
     }
     const target = net.connect(wsSession.port, '127.0.0.1', () => {
-      const targetPath = (slashIdx >= 0 ? '/' + rest.slice(slashIdx + 1) : '/') + (url.search || '');
+      const wsProxyPrefix = BASE + '_p/' + wsSessionId;
+      const targetPath = wsProxyPrefix + (slashIdx >= 0 ? '/' + rest.slice(slashIdx + 1) : '/') + (url.search || '');
       let upgradeReq = `${req.method} ${targetPath} HTTP/1.1\r\n`;
       for (const [key, val] of Object.entries(req.headers)) {
         if (key.toLowerCase() === 'host') {
@@ -1209,6 +1198,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     session.writer = ws;
     session.peers.set(ws, credential);
     sendRoleMessage(ws, id, session, credential, credential);
+    if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
     if (session.appType === 'web') {
       ws.send(JSON.stringify({ type: 'cookie', name: `wsh_last_${appKey}`, value: id }));
     }
