@@ -341,23 +341,14 @@
     ::-webkit-scrollbar-thumb { background: #45475a; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #585b70; }
 
-    .compact #desktop {
+    .compact #desktop,
+    :fullscreen #desktop {
       background: #1e1e2e;
     }
     html.web.compact #desktop {
       background: #fff;
     }
-    .compact #window {
-      width: 100vw;
-      height: 100dvh;
-      border-radius: 0;
-      box-shadow: none;
-    }
-
-
-    :fullscreen #desktop {
-      background: #1e1e2e;
-    }
+    .compact #window,
     :fullscreen #window {
       width: 100vw;
       height: 100dvh;

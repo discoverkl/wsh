@@ -1,4 +1,4 @@
-import { exec, spawn, ChildProcess } from 'child_process';
+import { exec, execSync, spawn, ChildProcess } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import http from 'http';
@@ -22,7 +22,6 @@ if (process.argv[2] === 'version') {
   console.log(`v${version}`);
   process.exit(0);
 } else if (process.argv[2] === 'update') {
-  const { execSync } = require('child_process') as typeof import('child_process');
   try {
     const body = execSync('curl -fsSL https://api.github.com/repos/discoverkl/wsh/releases/latest', { encoding: 'utf8' });
     const latest = (JSON.parse(body) as { tag_name: string }).tag_name.replace(/^v/, '');
@@ -156,7 +155,6 @@ node: node
   console.log('Run "wsh apps init" to create a starter user config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
-  const { execSync } = require('child_process') as typeof import('child_process');
   const subArgs = process.argv.slice(3);
 
   let port = parseInt(process.env.WSH_PORT || '', 10) || 7681;
@@ -196,7 +194,6 @@ node: node
   }
   process.exit(0);
 } else if (process.argv[2] === 'ls' || process.argv[2] === 'kill') {
-  const { execSync } = require('child_process') as typeof import('child_process');
   const subcommand = process.argv[2];
   const subArgs = process.argv.slice(3);
 
@@ -257,26 +254,20 @@ node: node
     if (data.sessions.length === 0) { console.log('No active sessions.'); process.exit(0); }
 
     const now = Date.now();
-    if (extended) {
-      const headers = ['ID', 'APP', 'TYPE', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IN', 'OUT', 'PID', 'SIZE', 'PROCESS'];
-      const rows = data.sessions.map((s: any) => [
-        s.id, s.app ?? '', s.appType ?? 'pty', s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
-        formatDuration(now - s.createdAt), formatDuration(now - s.lastInput), formatDuration(now - s.lastOutput),
-        String(s.pid), formatSize(s.scrollbackSize), s.process ?? '',
-      ]);
-      const widths = headers.map((h, i) => Math.max(h.length, ...rows.map(r => r[i].length)));
-      console.log(headers.map((h, i) => padRight(h, widths[i])).join('  '));
-      for (const row of rows) console.log(row.map((c, i) => padRight(c, widths[i])).join('  '));
-    } else {
-      const headers = ['ID', 'APP', 'TYPE', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IDLE'];
-      const rows = data.sessions.map((s: any) => [
-        s.id, s.app ?? '', s.appType ?? 'pty', s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
-        formatDuration(now - s.createdAt), formatDuration(now - Math.max(s.lastInput, s.lastOutput)),
-      ]);
-      const widths = headers.map((h, i) => Math.max(h.length, ...rows.map(r => r[i].length)));
-      console.log(headers.map((h, i) => padRight(h, widths[i])).join('  '));
-      for (const row of rows) console.log(row.map((c, i) => padRight(c, widths[i])).join('  '));
-    }
+    const base = (s: any) => [
+      s.id, s.app ?? '', s.appType ?? 'pty', s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
+      formatDuration(now - s.createdAt),
+    ];
+    const headers = extended
+      ? ['ID', 'APP', 'TYPE', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IN', 'OUT', 'PID', 'SIZE', 'PROCESS']
+      : ['ID', 'APP', 'TYPE', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IDLE'];
+    const rows = data.sessions.map((s: any) => extended
+      ? [...base(s), formatDuration(now - s.lastInput), formatDuration(now - s.lastOutput), String(s.pid), formatSize(s.scrollbackSize), s.process ?? '']
+      : [...base(s), formatDuration(now - Math.max(s.lastInput, s.lastOutput))],
+    );
+    const widths = headers.map((h, i) => Math.max(h.length, ...rows.map(r => r[i].length)));
+    console.log(headers.map((h, i) => padRight(h, widths[i])).join('  '));
+    for (const row of rows) console.log(row.map((c, i) => padRight(c, widths[i])).join('  '));
   } else {
     // kill
     const sessionId = subArgs.find(a => !a.startsWith('-'));
@@ -369,20 +360,6 @@ function parseClientMessage(text: string): ClientMessage | null {
   return null;
 }
 
-type Handlers = { [K in (ResizeMessage | CloseMessage)['type']]: (session: Session, msg: Extract<ClientMessage, { type: K }>) => void };
-
-const handlers: Handlers = {
-  resize(session, msg) {
-    if (!session.pty) return; // no-op for web apps
-    const cols = Math.max(1, Math.min(msg.cols, 65535));
-    const rows = Math.max(1, Math.min(msg.rows, 65535));
-    session.pty.resize(cols, rows);
-  },
-  close(session) {
-    if (session.child) { killProcessGroup(session.child); return; }
-    if (session.pty) session.pty.kill('SIGHUP');
-  },
-};
 
 /** Kill a child process and its entire process group. */
 function killProcessGroup(child: ChildProcess): void {
@@ -401,6 +378,25 @@ function appendScrollback(session: Session, data: Buffer): void {
       session.scrollback.length - limit
     );
   }
+}
+
+function baseSession(appKey: string, appConfig: AppConfig): Session {
+  const now = Date.now();
+  return {
+    pty: null,
+    scrollback: Buffer.alloc(0),
+    writer: null,
+    peers: new Map(),
+    cleanupTimer: null,
+    pinned: false,
+    title: appConfig.title ?? path.basename(appConfig.command),
+    app: appKey,
+    createdAt: now,
+    lastInput: now,
+    lastOutput: now,
+    appType: 'pty',
+    child: null,
+  };
 }
 
 function expandHome(p: string): string {
@@ -423,22 +419,7 @@ function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session
     } as Record<string, string>,
   });
 
-  const now = Date.now();
-  const session: Session = {
-    pty: ptyProcess,
-    scrollback: Buffer.alloc(0),
-    writer: null,
-    peers: new Map(),
-    cleanupTimer: null,
-    pinned: false,
-    title: appConfig.title ?? path.basename(appConfig.command),
-    app: appKey,
-    createdAt: now,
-    lastInput: now,
-    lastOutput: now,
-    appType: 'pty',
-    child: null,
-  };
+  const session: Session = { ...baseSession(appKey, appConfig), pty: ptyProcess };
 
   sessions.set(id, session);
 
@@ -495,23 +476,11 @@ function pollUntilReady(port: number, timeoutMs = 30000): Promise<void> {
 
 async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig): Promise<Session> {
   const port = await findFreePort();
-  const now = Date.now();
   const configuredTimeout = appConfig.timeout ? parseTimeout(appConfig.timeout) : undefined;
   const timeoutMs = (configuredTimeout != null && !isNaN(configuredTimeout)) ? configuredTimeout : WEB_SESSION_TTL;
   const session: Session = {
-    pty: null,
-    scrollback: Buffer.alloc(0),
-    writer: null,
-    peers: new Map(),
-    cleanupTimer: null,
-    pinned: false,
-    title: appConfig.title ?? path.basename(appConfig.command),
-    app: appKey,
-    createdAt: now,
-    lastInput: now,
-    lastOutput: now,
+    ...baseSession(appKey, appConfig),
     appType: 'web',
-    child: null,
     port,
     ready: false,
     timeoutMs,
@@ -1230,25 +1199,35 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     if (msg) {
       // Only owner can close or pin; writers can resize and clear.
       if ((msg.type === 'close' || msg.type === 'pin') && credential !== 'owner') return;
-      if (msg.type === 'clear') {
-        currentSession.scrollback = Buffer.alloc(0);
-        // Ask the shell to redraw its prompt so new scrollback isn't empty.
-        if (currentSession.pty) currentSession.pty.write('\f');
-        console.log(`[session ${id}] scrollback cleared`);
-        return;
-      }
-      if (msg.type === 'pin') {
-        currentSession.pinned = msg.pinned;
-        if (!msg.pinned && currentSession.writer === null) scheduleCleanup(id, currentSession);
-        console.log(`[session ${id}] ${msg.pinned ? 'pinned (no timeout)' : 'unpinned'}`);
-        for (const [peer, peerRole] of currentSession.peers) {
-          if (peerRole === 'owner' && peer.readyState === WebSocket.OPEN) {
-            peer.send(JSON.stringify({ type: 'pin', pinned: currentSession.pinned }));
+      switch (msg.type) {
+        case 'resize':
+          if (currentSession.pty) {
+            currentSession.pty.resize(
+              Math.max(1, Math.min(msg.cols, 65535)),
+              Math.max(1, Math.min(msg.rows, 65535)),
+            );
           }
-        }
-        return;
+          break;
+        case 'close':
+          if (currentSession.child) killProcessGroup(currentSession.child);
+          else if (currentSession.pty) currentSession.pty.kill('SIGHUP');
+          break;
+        case 'clear':
+          currentSession.scrollback = Buffer.alloc(0);
+          if (currentSession.pty) currentSession.pty.write('\f');
+          console.log(`[session ${id}] scrollback cleared`);
+          break;
+        case 'pin':
+          currentSession.pinned = msg.pinned;
+          if (!msg.pinned && currentSession.writer === null) scheduleCleanup(id, currentSession);
+          console.log(`[session ${id}] ${msg.pinned ? 'pinned (no timeout)' : 'unpinned'}`);
+          for (const [peer, peerRole] of currentSession.peers) {
+            if (peerRole === 'owner' && peer.readyState === WebSocket.OPEN) {
+              peer.send(JSON.stringify({ type: 'pin', pinned: currentSession.pinned }));
+            }
+          }
+          break;
       }
-      (handlers[msg.type] as (session: Session, msg: ClientMessage) => void)(currentSession, msg);
     } else {
       if (currentSession.pty) currentSession.pty.write(text);
     }

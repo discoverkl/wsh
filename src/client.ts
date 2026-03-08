@@ -156,7 +156,7 @@ const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 function buildWsQuery(): URLSearchParams {
   const isViewer = sessionStorage.getItem(ROLE_KEY) === 'viewer';
   const query = new URLSearchParams({ session: sessionId });
-  if (appName) query.set('app', appName);
+  query.set('app', appName);
   if (wtoken && !isViewer) query.set('wtoken', wtoken);
   if (isViewer) query.set('yield', '1');
   return query;
