@@ -1,8 +1,9 @@
-import { exec } from 'child_process';
+import { exec, spawn, ChildProcess } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import http from 'http';
 import https from 'https';
+import net from 'net';
 import os from 'os';
 import path from 'path';
 import { Duplex } from 'stream';
@@ -147,7 +148,8 @@ node: node
   for (const [key, app] of Object.entries(apps)) {
     const title = app.title ?? path.basename(app.command);
     const args = app.args?.length ? ' ' + app.args.join(' ') : '';
-    console.log(`  ${key}  ${title}  (${app.command}${args})`);
+    const webTag = (app as any).type === 'web' ? ' [web]' : '';
+    console.log(`  ${key}  ${title}  (${app.command}${args})${webTag}`);
   }
   console.log(`\nSystem config: ${path.join(systemDir, 'apps.yaml')}`);
   console.log(`User config:   ${appsPath}`);
@@ -256,9 +258,9 @@ node: node
 
     const now = Date.now();
     if (extended) {
-      const headers = ['ID', 'APP', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IN', 'OUT', 'PID', 'SIZE', 'PROCESS'];
+      const headers = ['ID', 'APP', 'TYPE', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IN', 'OUT', 'PID', 'SIZE', 'PROCESS'];
       const rows = data.sessions.map((s: any) => [
-        s.id, s.app ?? '', s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
+        s.id, s.app ?? '', s.appType ?? 'pty', s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
         formatDuration(now - s.createdAt), formatDuration(now - s.lastInput), formatDuration(now - s.lastOutput),
         String(s.pid), formatSize(s.scrollbackSize), s.process ?? '',
       ]);
@@ -266,9 +268,9 @@ node: node
       console.log(headers.map((h, i) => padRight(h, widths[i])).join('  '));
       for (const row of rows) console.log(row.map((c, i) => padRight(c, widths[i])).join('  '));
     } else {
-      const headers = ['ID', 'APP', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IDLE'];
+      const headers = ['ID', 'APP', 'TYPE', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IDLE'];
       const rows = data.sessions.map((s: any) => [
-        s.id, s.app ?? '', s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
+        s.id, s.app ?? '', s.appType ?? 'pty', s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
         formatDuration(now - s.createdAt), formatDuration(now - Math.max(s.lastInput, s.lastOutput)),
       ]);
       const widths = headers.map((h, i) => Math.max(h.length, ...rows.map(r => r[i].length)));
@@ -297,7 +299,7 @@ const RATE_MAX_MISS = 10;               // max invalid session attempts per IP p
 type Role = 'owner' | 'writer' | 'viewer';
 
 interface Session {
-  pty: IPty;
+  pty: IPty | null;
   scrollback: Buffer;
   writer: WebSocket | null;
   peers: Map<WebSocket, Role>; // every connected WS → its original role
@@ -308,6 +310,11 @@ interface Session {
   createdAt: number;
   lastInput: number;
   lastOutput: number;
+  appType: 'pty' | 'web';
+  child: ChildProcess | null;
+  port?: number;
+  ready?: boolean;
+  timeoutMs?: number;
 }
 
 const sessions = new Map<string, Session>();
@@ -362,12 +369,14 @@ type Handlers = { [K in (ResizeMessage | CloseMessage)['type']]: (session: Sessi
 
 const handlers: Handlers = {
   resize(session, msg) {
+    if (!session.pty) return; // no-op for web apps
     const cols = Math.max(1, Math.min(msg.cols, 65535));
     const rows = Math.max(1, Math.min(msg.rows, 65535));
     session.pty.resize(cols, rows);
   },
   close(session) {
-    session.pty.kill('SIGHUP');
+    if (session.child) { session.child.kill('SIGTERM'); return; }
+    if (session.pty) session.pty.kill('SIGHUP');
   },
 };
 
@@ -407,6 +416,8 @@ function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session
     createdAt: now,
     lastInput: now,
     lastOutput: now,
+    appType: 'pty',
+    child: null,
   };
 
   sessions.set(id, session);
@@ -434,17 +445,138 @@ function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session
   return session;
 }
 
+function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const port = (srv.address() as net.AddressInfo).port;
+      srv.close(() => resolve(port));
+    });
+    srv.on('error', reject);
+  });
+}
+
+function pollUntilReady(port: number, timeoutMs = 30000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const check = () => {
+      if (Date.now() > deadline) { reject(new Error('Health check timeout')); return; }
+      const req = http.request({ hostname: '127.0.0.1', port, path: '/', method: 'GET', timeout: 2000 }, (res) => {
+        res.resume();
+        resolve();
+      });
+      req.on('error', () => setTimeout(check, 500));
+      req.on('timeout', () => { req.destroy(); setTimeout(check, 500); });
+      req.end();
+    };
+    check();
+  });
+}
+
+async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig): Promise<Session> {
+  const port = await findFreePort();
+  const now = Date.now();
+  const timeoutMs = appConfig.timeout ? parseTimeout(appConfig.timeout) : undefined;
+  const session: Session = {
+    pty: null,
+    scrollback: Buffer.alloc(0),
+    writer: null,
+    peers: new Map(),
+    cleanupTimer: null,
+    pinned: true,
+    title: appConfig.title ?? path.basename(appConfig.command),
+    app: appKey,
+    createdAt: now,
+    lastInput: now,
+    lastOutput: now,
+    appType: 'web',
+    child: null,
+    port,
+    ready: false,
+    timeoutMs: (timeoutMs != null && !isNaN(timeoutMs)) ? timeoutMs : undefined,
+  };
+
+  sessions.set(id, session);
+
+  const env = {
+    ...process.env,
+    ...(appConfig.env ?? {}),
+    WSH_PORT: String(port),
+    WSH_SESSION: id,
+  };
+
+  const child = spawn(appConfig.command, appConfig.args ?? [], {
+    shell: true,
+    env: env as Record<string, string>,
+    cwd: appConfig.cwd ?? process.env.HOME ?? process.cwd(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  session.child = child;
+
+  const appendOutput = (data: Buffer) => {
+    session.lastOutput = Date.now();
+    appendScrollback(session, data);
+    for (const ws of session.peers.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: true });
+    }
+  };
+
+  child.stdout!.on('data', appendOutput);
+  child.stderr!.on('data', appendOutput);
+
+  child.on('exit', (code) => {
+    console.log(`[session ${id}] web process exited (code ${code})`);
+    for (const ws of session.peers.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'Process exited');
+    }
+    if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
+    sessions.delete(id);
+  });
+
+  console.log(`[session ${id}] web app spawned on port ${port}`);
+
+  try {
+    await pollUntilReady(port, 30000);
+    session.ready = true;
+    console.log(`[session ${id}] web app ready`);
+  } catch {
+    if (sessions.has(id)) {
+      console.log(`[session ${id}] health check failed, but process still running`);
+    }
+  }
+
+  return session;
+}
+
+function parseTimeout(str: string): number {
+  const m = str.match(/^(\d+)\s*(ms|s|m|h|d)$/);
+  if (!m) return NaN;
+  const n = parseInt(m[1], 10);
+  switch (m[2]) {
+    case 'ms': return n;
+    case 's': return n * 1000;
+    case 'm': return n * 60_000;
+    case 'h': return n * 3_600_000;
+    case 'd': return n * 86_400_000;
+    default: return NaN;
+  }
+}
+
 function scheduleCleanup(id: string, session: Session): void {
   if (session.cleanupTimer !== null) {
     clearTimeout(session.cleanupTimer);
   }
   session.cleanupTimer = null;
   if (session.pinned) return;
+  if (session.appType === 'web' && session.timeoutMs == null) return; // web apps default pinned
+  const ttl = session.timeoutMs ?? SESSION_TTL;
   session.cleanupTimer = setTimeout(() => {
-    console.log(`[session ${id}] TTL expired, killing PTY`);
-    session.pty.kill('SIGHUP');
+    console.log(`[session ${id}] TTL expired, killing process`);
+    if (session.child) session.child.kill('SIGTERM');
+    else if (session.pty) session.pty.kill('SIGHUP');
     sessions.delete(id);
-  }, SESSION_TTL);
+  }, ttl);
 }
 
 // --- Args ---
@@ -526,6 +658,8 @@ interface AppConfig {
   title?: string;
   icon?: string;
   description?: string;
+  type?: 'pty' | 'web';
+  timeout?: string;
 }
 
 const DEFAULT_APPS: Record<string, AppConfig> = {
@@ -677,7 +811,7 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
       return res.redirect(302, url.pathname + url.search);
     }
 
-    if (url.pathname.startsWith(BASE + 'api/')) {
+    if (url.pathname.startsWith(BASE + 'api/') || url.pathname.startsWith(BASE + '_p/')) {
       res.status(401).send('Unauthorized');
     } else {
       next(); // static pages load without auth; WebSocket handles its own auth
@@ -723,6 +857,7 @@ router.get('/api/apps', (_req: express.Request, res: express.Response) => {
     command: app.command,
     icon: app.icon ?? null,
     description: app.description ?? null,
+    type: app.type ?? 'pty',
   }));
   res.json({ apps: list });
 });
@@ -732,15 +867,18 @@ router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
     id,
     title: s.title,
     app: s.app,
+    appType: s.appType,
     pinned: s.pinned,
     peers: s.peers.size,
     hasWriter: s.writer !== null,
     createdAt: s.createdAt,
     lastInput: s.lastInput,
     lastOutput: s.lastOutput,
-    pid: s.pty.pid,
+    pid: s.pty?.pid ?? s.child?.pid ?? null,
     scrollbackSize: s.scrollback.length,
-    process: s.pty.process,
+    process: s.pty?.process ?? null,
+    port: s.port ?? null,
+    ready: s.ready ?? null,
   }));
   res.json({ sessions: list });
 });
@@ -748,13 +886,62 @@ router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
 router.delete('/api/sessions/:id', (req: express.Request, res: express.Response) => {
   const session = sessions.get(req.params.id);
   if (!session) { res.status(404).json({ error: 'session not found' }); return; }
-  session.pty.kill('SIGHUP');
+  if (session.child) session.child.kill('SIGTERM');
+  else if (session.pty) session.pty.kill('SIGHUP');
   res.json({ ok: true });
 });
 
+// HTTP reverse proxy for web apps — must be before express.json() to preserve request body
+function proxyHandler(req: express.Request, res: express.Response): void {
+  const sessionId = req.params.sessionId;
+  const session = sessions.get(sessionId);
+  if (!session || session.appType !== 'web' || !session.port) {
+    res.status(404).json({ error: 'session not found' });
+    return;
+  }
+  if (!session.ready) {
+    res.status(503).send('<!DOCTYPE html><html><body style="background:#1e1e2e;color:#cdd6f4;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div>Starting up\u2026</div></body></html>');
+    return;
+  }
+  const proxyPrefix = BASE + '_p/' + sessionId;
+  const prefix = '/_p/' + sessionId;
+  const targetPath = req.url.slice(prefix.length) || '/';
+
+  const proxyReq = http.request({
+    hostname: '127.0.0.1',
+    port: session.port,
+    path: targetPath,
+    method: req.method,
+    headers: { ...req.headers, host: `localhost:${session.port}` },
+  }, (proxyRes) => {
+    if (proxyRes.headers.location) {
+      const loc = proxyRes.headers.location;
+      if (loc.startsWith('/')) {
+        proxyRes.headers.location = proxyPrefix + loc;
+      }
+    }
+    if (proxyRes.headers['set-cookie']) {
+      proxyRes.headers['set-cookie'] = (proxyRes.headers['set-cookie'] as string[]).map(c =>
+        c.replace(/[Pp]ath=\//g, `Path=${proxyPrefix}/`)
+      );
+    }
+    res.writeHead(proxyRes.statusCode!, proxyRes.headers);
+    proxyRes.pipe(res);
+  });
+
+  proxyReq.on('error', () => {
+    if (!res.headersSent) res.status(502).send('Bad Gateway');
+  });
+
+  req.pipe(proxyReq);
+}
+
+router.all('/_p/:sessionId', proxyHandler as any);
+router.all('/_p/:sessionId/*', proxyHandler as any);
+
 router.use(express.json());
 
-router.post('/api/sessions', (req: express.Request, res: express.Response) => {
+router.post('/api/sessions', async (req: express.Request, res: express.Response) => {
   const appKey = (req.body?.app as string) || 'bash';
   const apps = loadApps();
   const appConfig = apps[appKey];
@@ -762,23 +949,43 @@ router.post('/api/sessions', (req: express.Request, res: express.Response) => {
 
   const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
 
-  try {
-    const session = spawnSession(id, appKey, appConfig);
-    session.pinned = true;
-  } catch (err) {
-    console.error('Failed to spawn PTY:', err);
-    res.status(500).json({ error: 'Failed to spawn session' }); return;
+  if (appConfig.type === 'web') {
+    try {
+      await spawnWebSession(id, appKey, appConfig);
+    } catch (err) {
+      console.error('Failed to spawn web app:', err);
+      res.status(500).json({ error: 'Failed to spawn session' }); return;
+    }
+  } else {
+    try {
+      const session = spawnSession(id, appKey, appConfig);
+      session.pinned = true;
+    } catch (err) {
+      console.error('Failed to spawn PTY:', err);
+      res.status(500).json({ error: 'Failed to spawn session' }); return;
+    }
   }
 
   const base = networkBase ?? `http://localhost:${PORT}`;
+  if (appConfig.type === 'web') {
+    res.cookie(`wsh_last_${appKey}`, id, { path: BASE, maxAge: 365 * 24 * 60 * 60 * 1000 });
+  }
   res.json({ id, url: `${base}${BASE}${appKey}#${id}` });
 });
 
 router.get('/:appName', (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const apps = loadApps();
-  if (!apps[req.params.appName]) { next(); return; }
-  // Serve index.html — the client reads the app name from the pathname
-  // and passes it in the WebSocket query so the correct app is spawned.
+  const appConfig = apps[req.params.appName];
+  if (!appConfig) { next(); return; }
+  // For web apps: check last-session cookie and redirect if session still exists
+  if (appConfig.type === 'web') {
+    const cookies = parseCookies(req.headers.cookie ?? '');
+    const lastSession = cookies[`wsh_last_${req.params.appName}`];
+    if (lastSession && sessions.has(lastSession)) {
+      res.redirect(302, `${req.params.appName}#${lastSession}`);
+      return;
+    }
+  }
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
@@ -807,11 +1014,46 @@ function sendRoleMessage(ws: WebSocket, sessionId: string, session: Session, rol
   const pinnedOther = role === 'owner'
     ? [...sessions.entries()].filter(([sid, s]) => sid !== sessionId && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
     : undefined;
-  ws.send(JSON.stringify({ type: 'role', role, credential, app: session.app, ...(role === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
+  ws.send(JSON.stringify({ type: 'role', role, credential, app: session.app, appType: session.appType, ...(role === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
 }
 
 function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+
+  // WebSocket proxy for web apps
+  if (url.pathname.startsWith(BASE + '_p/')) {
+    const rest = url.pathname.slice((BASE + '_p/').length);
+    const slashIdx = rest.indexOf('/');
+    const wsSessionId = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
+    const wsSession = sessions.get(wsSessionId);
+    if (!wsSession || wsSession.appType !== 'web' || !wsSession.port) {
+      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    const target = net.connect(wsSession.port, '127.0.0.1', () => {
+      const targetPath = (slashIdx >= 0 ? '/' + rest.slice(slashIdx + 1) : '/') + (url.search || '');
+      let upgradeReq = `${req.method} ${targetPath} HTTP/1.1\r\n`;
+      for (const [key, val] of Object.entries(req.headers)) {
+        if (key.toLowerCase() === 'host') {
+          upgradeReq += `Host: localhost:${wsSession.port}\r\n`;
+        } else if (val) {
+          upgradeReq += `${key}: ${Array.isArray(val) ? val.join(', ') : val}\r\n`;
+        }
+      }
+      upgradeReq += '\r\n';
+      target.write(upgradeReq);
+      target.write(head);
+      target.pipe(socket);
+      socket.pipe(target);
+    });
+    target.on('error', () => socket.destroy());
+    socket.on('error', () => target.destroy());
+    socket.on('close', () => target.destroy());
+    target.on('close', () => socket.destroy());
+    return;
+  }
+
   if (url.pathname !== BASE + 'terminal') { socket.destroy(); return; }
 
   const sessionId = url.searchParams.get('session') ?? '';
@@ -829,7 +1071,7 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
 localServer.on('upgrade', handleUpgrade);
 if (networkServer) networkServer.on('upgrade', handleUpgrade);
 
-wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
+wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const id  = url.searchParams.get('session');
 
@@ -884,16 +1126,30 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     const requestedApp = url.searchParams.get('app') || 'bash';
     const appKey = apps[requestedApp] ? requestedApp : 'bash';
     const appConfig = apps[appKey];
-    try {
-      session = spawnSession(id, appKey, appConfig);
-    } catch (err) {
-      console.error('Failed to spawn PTY:', err);
-      ws.close(1011, 'Failed to spawn PTY');
-      return;
+    if (appConfig.type === 'web') {
+      try {
+        ws.send(JSON.stringify({ type: 'status', status: 'starting' }));
+        session = await spawnWebSession(id, appKey, appConfig);
+      } catch (err) {
+        console.error('Failed to spawn web app:', err);
+        ws.close(1011, 'Failed to spawn web app');
+        return;
+      }
+    } else {
+      try {
+        session = spawnSession(id, appKey, appConfig);
+      } catch (err) {
+        console.error('Failed to spawn PTY:', err);
+        ws.close(1011, 'Failed to spawn PTY');
+        return;
+      }
     }
     session.writer = ws;
     session.peers.set(ws, credential);
     sendRoleMessage(ws, id, session, credential, credential);
+    if (session.appType === 'web') {
+      ws.send(JSON.stringify({ type: 'cookie', name: `wsh_last_${appKey}`, value: id }));
+    }
   }
 
   const currentSession = session;
@@ -901,9 +1157,10 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
     if (currentSession.writer !== ws) return; // only the active writer may send input
     if (isBinary) {
+      if (currentSession.appType === 'web') return; // no PTY input for web apps
       currentSession.lastInput = Date.now();
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
-      currentSession.pty.write(buf.toString('binary'));
+      currentSession.pty!.write(buf.toString('binary'));
       return;
     }
     const text = (data as Buffer).toString();
@@ -914,7 +1171,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       if (msg.type === 'clear') {
         currentSession.scrollback = Buffer.alloc(0);
         // Ask the shell to redraw its prompt so new scrollback isn't empty.
-        currentSession.pty.write('\f');
+        if (currentSession.pty) currentSession.pty.write('\f');
         console.log(`[session ${id}] scrollback cleared`);
         return;
       }
@@ -931,7 +1188,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       }
       (handlers[msg.type] as (session: Session, msg: ClientMessage) => void)(currentSession, msg);
     } else {
-      currentSession.pty.write(text);
+      if (currentSession.pty) currentSession.pty.write(text);
     }
   });
 

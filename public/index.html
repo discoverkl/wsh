@@ -171,7 +171,7 @@
     #pin-btn.pinned { color: #a6e3a1; }
     #pin-btn[hidden] { display: none; }
 
-    #clear-btn, #share-btn, #new-session, #pin-btn {
+    #clear-btn, #logs-btn, #share-btn, #new-session, #pin-btn {
       background: none;
       border: none;
       padding: 0;
@@ -185,7 +185,7 @@
       cursor: pointer;
       transition: color 0.15s, background 0.15s;
     }
-    #clear-btn:hover, #share-btn:hover, #new-session:hover, #pin-btn:hover {
+    #clear-btn:hover, #logs-btn:hover, #share-btn:hover, #new-session:hover, #pin-btn:hover {
       color: #cdd6f4;
       background: rgba(205, 214, 244, 0.07);
     }
@@ -256,6 +256,32 @@
       padding: 6px 10px;
     }
 
+    #web-container {
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+    #web-frame {
+      width: 100%;
+      height: 100%;
+      border: none;
+      background: #1e1e2e;
+    }
+    #web-loading {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      font-size: 14px;
+      z-index: 2;
+    }
+
     /* tighten xterm padding */
     .xterm-screen { padding: 0; }
 
@@ -286,6 +312,9 @@
     }
     :fullscreen #titlebar {
       display: none;
+    }
+    :fullscreen #web-container {
+      height: 100dvh;
     }
 
     #pinned-toast {
@@ -382,6 +411,14 @@
               <line x1="8.5" y1="5.5" x2="8.5" y2="9.5"/>
             </svg>
           </button>
+          <button id="logs-btn" title="View Logs" hidden>
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="2" y1="3" x2="12" y2="3"/>
+              <line x1="2" y1="6" x2="10" y2="6"/>
+              <line x1="2" y1="9" x2="12" y2="9"/>
+              <line x1="2" y1="12" x2="8" y2="12"/>
+            </svg>
+          </button>
           <button id="share-btn" title="Share Session">
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="11" cy="2.5" r="1.5"/><circle cx="11" cy="11.5" r="1.5"/><circle cx="3" cy="7" r="1.5"/>
@@ -415,6 +452,10 @@
         </button>
       </div>
       <div id="terminal-container"></div>
+      <div id="web-container" hidden>
+        <div id="web-loading">Starting up...</div>
+        <iframe id="web-frame"></iframe>
+      </div>
     </div>
   </div>
 

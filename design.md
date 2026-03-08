@@ -219,3 +219,65 @@ Node.js (~30 MB) is downloaded, not embedded. The Go binary embeds `dist/`, `pub
 
 **`wsh kill <session-id>`** — Close a session.
 - `-p, --port <port>` — Override server port (default: 7681)
+
+## Web App Support
+
+wsh can host web-based apps (Jupyter, VS Code Server, Streamlit, etc.) that render in an iframe instead of a terminal. The session lifecycle, URL scheme, catalog, access control, sharing, and pinning all work the same as PTY apps.
+
+### Configuration
+
+Add `type: web` to an app entry. The app's command must listen on the port provided via `$WSH_PORT`.
+
+```yaml
+jupyter:
+  title: Jupyter Notebook
+  command: jupyter notebook --no-browser --port=$WSH_PORT --NotebookApp.token=''
+  type: web
+
+python-http:
+  title: Python HTTP Server
+  command: python3 -m http.server $WSH_PORT
+  type: web
+```
+
+**Environment variables** injected into web app processes:
+- `WSH_PORT` — The port the app must listen on (dynamically assigned)
+- `WSH_SESSION` — The session ID
+
+**Optional `timeout` field**: Web apps are pinned by default (no auto-timeout). To override, set `timeout: '24h'` (supports `ms`, `s`, `m`, `h`, `d` units).
+
+### Architecture
+
+```
+Browser (iframe)  <--HTTP/WS-->  server.ts (reverse proxy)  <--HTTP/WS-->  web app (localhost:port)
+Browser (xterm.js) <--WS-->  server.ts  <--log stream-->  web app stdout/stderr
+```
+
+**Reverse proxy**: All requests to `{BASE}_p/{sessionId}/...` are proxied to the web app's local port. The proxy:
+- Rewrites `Location` headers on redirects (prepends proxy prefix)
+- Rewrites `Set-Cookie` `Path` attributes (scopes to proxy prefix)
+- Proxies WebSocket upgrades via raw TCP socket piping
+- Returns 503 with "Starting up..." splash while the app's health check is pending
+- Returns 502 on proxy errors
+
+**Port assignment**: `findFreePort()` binds to port 0 on localhost to get an OS-assigned ephemeral port.
+
+**Health check**: `pollUntilReady()` polls `http://127.0.0.1:{port}/` every 500ms until a response is received (up to 30s timeout).
+
+### Client Behavior
+
+When the server sends `appType: 'web'` in the role message, the client:
+1. Hides `#terminal-container`, shows `#web-container` with an iframe
+2. Sets `iframe.src` to `./_p/{sessionId}/`
+3. Shows a "Logs" button (replaces the "Clear Scrollback" button)
+4. Guards all PTY-specific handlers (input, resize) to no-op for web apps
+
+**Log viewer**: stdout/stderr from the web app process is captured and broadcast to connected WebSocket clients as binary frames (same as PTY output). The xterm.js terminal accumulates this data in the background. Clicking "Logs" toggles between the iframe and the terminal log view.
+
+### Last-Session Cookie
+
+When a web session is created, a `wsh_last_{appKey}` cookie is set. On subsequent visits to `GET {BASE}{appName}`, if the cookie references an active session, the server redirects to `{appName}#{sessionId}`. This provides a "return to existing session" experience for web apps.
+
+### Web Apps and `--base-url`
+
+Some web apps serve assets with absolute paths (e.g., `/static/app.js`). Since wsh proxies under `{BASE}_p/{sessionId}/`, these absolute paths break. If a web app supports a `--base-url` or similar option, configure it to use the proxy prefix path. For apps that don't support this, wsh's proxy transparently handles most cases via header rewriting.

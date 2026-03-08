@@ -175,6 +175,21 @@ header {
   letter-spacing: 0.3px;
 }
 
+.card-type-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 8px;
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  vertical-align: middle;
+}
+
 /* Skeleton loading */
 .skeleton-card {
   background: var(--bg-card);
@@ -358,6 +373,7 @@ header {
           '<div class="card-icon" style="color:' + color + '">' + icons[iconId] + '</div>' +
           '<div class="card-title-row">' +
             '<span class="card-title">' + escapeHtml(app.title) + '</span>' +
+            (app.type === 'web' ? '<span class="card-type-badge">WEB</span>' : '') +
             '<span class="card-sessions" data-app="' + escapeAttr(app.key) + '"></span>' +
           '</div>' +
         '</div>' +

@@ -148,6 +148,8 @@ let ws: WebSocket;
 let intentionalReconnect = false;
 let currentRole = '';
 let sessionDead = false;
+let appType: 'pty' | 'web' = 'pty';
+let showingLogs = false;
 
 function connect(): void {
   const wsBase = new URL('./terminal', location.href);
@@ -158,10 +160,12 @@ function connect(): void {
 
   ws.addEventListener('open', () => {
     setConnStatus('connected');
-    requestAnimationFrame(() => {
-      fitAddon.fit();
-      sendResize(term.cols, term.rows);
-    });
+    if (appType !== 'web') {
+      requestAnimationFrame(() => {
+        fitAddon.fit();
+        sendResize(term.cols, term.rows);
+      });
+    }
   });
 
   ws.addEventListener('message', (event: MessageEvent) => {
@@ -169,7 +173,7 @@ function connect(): void {
       term.write(new Uint8Array(event.data));
     } else if (typeof event.data === 'string') {
       try {
-        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[] };
+        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string };
         if (msg.type === 'role' && msg.role) {
           if (msg.app && msg.app !== appName) {
             appName = msg.app;
@@ -178,10 +182,18 @@ function connect(): void {
             history.replaceState(null, '', `${appName}#${sessionId}`);
           }
           applyRole(msg.role, msg.credential);
+          if (msg.appType === 'web' && appType !== 'web') {
+            appType = 'web';
+            switchToWebMode();
+          }
           if (typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
           if (msg.pinnedOther && msg.pinnedOther.length > 0) showPinnedToast(msg.pinnedOther);
         }
         if (msg.type === 'pin' && typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
+        if (msg.type === 'cookie' && msg.name && msg.value) {
+          const basePath = location.pathname.split('/').slice(0, -1).join('/') || '/';
+          document.cookie = `${msg.name}=${msg.value}; path=${basePath}; max-age=${365 * 24 * 60 * 60}`;
+        }
       } catch { /* ignore */ }
     }
   });
@@ -203,7 +215,7 @@ function connect(): void {
       document.querySelector('.dot.close')!.classList.add('disabled');
     }
 
-    if (event.code === 1000 && event.reason === 'PTY process exited') {
+    if (event.code === 1000 && (event.reason === 'PTY process exited' || event.reason === 'Process exited')) {
       location.hash = '';
       term.write('\r\n[Process exited. Refresh to start a new session.]\r\n');
     } else if (event.code === 4003) {
@@ -217,6 +229,35 @@ function connect(): void {
 }
 
 connect();
+
+function switchToWebMode(): void {
+  document.getElementById('terminal-container')!.setAttribute('hidden', '');
+  const webContainer = document.getElementById('web-container')!;
+  webContainer.removeAttribute('hidden');
+  const iframe = document.getElementById('web-frame') as HTMLIFrameElement;
+  iframe.src = `./_p/${sessionId}/`;
+  iframe.addEventListener('load', () => {
+    document.getElementById('web-loading')!.setAttribute('hidden', '');
+  });
+  document.getElementById('clear-btn')!.setAttribute('hidden', '');
+  document.getElementById('logs-btn')!.removeAttribute('hidden');
+}
+
+document.getElementById('logs-btn')!.addEventListener('click', () => {
+  if (sessionDead) return;
+  showingLogs = !showingLogs;
+  const termContainer = document.getElementById('terminal-container')!;
+  const webContainer = document.getElementById('web-container')!;
+  if (showingLogs) {
+    webContainer.setAttribute('hidden', '');
+    termContainer.removeAttribute('hidden');
+    term.options.disableStdin = true;
+    requestAnimationFrame(() => fitAddon.fit());
+  } else {
+    termContainer.setAttribute('hidden', '');
+    webContainer.removeAttribute('hidden');
+  }
+});
 
 function sendAction(msg: Record<string, unknown>): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
@@ -284,10 +325,12 @@ term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
 });
 
 term.onData((data: string) => {
+  if (appType === 'web') return;
   if (ws.readyState === WebSocket.OPEN) ws.send(data);
 });
 
 term.onBinary((data: string) => {
+  if (appType === 'web') return;
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(Uint8Array.from(data, (c) => c.charCodeAt(0)).buffer);
   }
@@ -299,7 +342,10 @@ function scheduleResize(): void {
   resizeTimer = setTimeout(() => fitAddon.fit(), 150);
 }
 
-term.onResize(({ cols, rows }: { cols: number; rows: number }) => sendResize(cols, rows));
+term.onResize(({ cols, rows }: { cols: number; rows: number }) => {
+  if (appType === 'web') return;
+  sendResize(cols, rows);
+});
 window.addEventListener('resize', scheduleResize);
 
 const container = document.getElementById('terminal-container');
