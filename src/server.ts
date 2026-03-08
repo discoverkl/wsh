@@ -475,12 +475,12 @@ function findFreePort(): Promise<number> {
   });
 }
 
-function pollUntilReady(port: number, healthPath = '/', timeoutMs = 30000): Promise<void> {
+function pollUntilReady(port: number, timeoutMs = 30000): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
     const check = () => {
       if (Date.now() > deadline) { reject(new Error('Health check timeout')); return; }
-      const req = http.request({ hostname: '127.0.0.1', port, path: healthPath, method: 'GET', timeout: 2000 }, (res) => {
+      const req = http.request({ hostname: '127.0.0.1', port, path: '/', method: 'GET', timeout: 2000 }, (res) => {
         res.resume();
         resolve();
       });
@@ -576,7 +576,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
   console.log(`[session ${id}] web app spawned on port ${port}`);
 
   try {
-    await pollUntilReady(port, BASE + '_p/' + id + '/', 30000);
+    await pollUntilReady(port);
     session.ready = true;
     console.log(`[session ${id}] web app ready`);
   } catch {

@@ -277,7 +277,7 @@ Browser (xterm.js) <--WS-->  server.ts  <--log stream-->  web app stdout/stderr
 
 **Port assignment**: `findFreePort()` binds to port 0 on localhost to get an OS-assigned ephemeral port.
 
-**Health check**: `pollUntilReady()` polls `http://127.0.0.1:{port}{WSH_BASE_URL}` every 500ms until a response is received (up to 30s timeout).
+**Health check**: `pollUntilReady()` polls `http://127.0.0.1:{port}/` every 500ms until any HTTP response is received (up to 30s timeout). The path doesn't matter — it just confirms the process is listening.
 
 ### Lifecycle
 
