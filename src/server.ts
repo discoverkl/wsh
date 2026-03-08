@@ -972,7 +972,7 @@ function proxyHandler(req: express.Request, res: express.Response): void {
     port: session.port,
     path: targetPath,
     method: req.method,
-    headers: { ...req.headers, host: `localhost:${session.port}` },
+    headers: req.headers,
   }, (proxyRes) => {
     res.writeHead(proxyRes.statusCode!, proxyRes.headers);
     proxyRes.pipe(res);
@@ -1084,9 +1084,7 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
       const targetPath = wsProxyPrefix + (slashIdx >= 0 ? '/' + rest.slice(slashIdx + 1) : '/') + (url.search || '');
       let upgradeReq = `${req.method} ${targetPath} HTTP/1.1\r\n`;
       for (const [key, val] of Object.entries(req.headers)) {
-        if (key.toLowerCase() === 'host') {
-          upgradeReq += `Host: localhost:${wsSession.port}\r\n`;
-        } else if (val) {
+        if (val) {
           upgradeReq += `${key}: ${Array.isArray(val) ? val.join(', ') : val}\r\n`;
         }
       }
