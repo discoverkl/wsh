@@ -101,7 +101,7 @@ When an owner connects, the server reports any other pinned sessions. The client
 
 Sessions can run different programs, not just `bash`. The app name is always in the URL: `{BASE}:app#:session`.
 
-**URL scheme**: `GET {BASE}` redirects to `{BASE}bash`. Every session URL has the form `{BASE}:appName#sessionId`. Refreshing or opening a new tab preserves the app — the client extracts the app name from the last segment of the pathname and passes it in the WebSocket `app` query parameter. On connect, the server sends the session's actual `app` in the `role` message; if it differs from the URL, the client corrects the pathname via `history.replaceState`.
+**URL scheme**: `GET {BASE}` serves the catalog page (`catalog.html`) — a visual app launcher showing all configured apps as cards. Every session URL has the form `{BASE}:appName#sessionId`. Refreshing or opening a new tab preserves the app — the client extracts the app name from the last segment of the pathname and passes it in the WebSocket `app` query parameter. On connect, the server sends the session's actual `app` in the `role` message; if it differs from the URL, the client corrects the pathname via `history.replaceState`.
 
 **Config**: Apps are loaded from three layers, each overriding the previous:
 
@@ -125,7 +125,7 @@ traecli:
     MY_VAR: hello
 ```
 
-Each entry: `command` (required), `args` (optional string array), `title` (optional display name), `env` (optional), `cwd` (optional). A bare string value is shorthand for `{ command: "..." }`. Both wrapped (`{ apps: { ... } }`) and bare top-level formats are accepted. Any layer can override entries from previous layers, including the default `bash`.
+Each entry: `command` (required), `args` (optional string array), `title` (optional display name), `icon` (optional built-in icon ID), `description` (optional short description for catalog card), `env` (optional), `cwd` (optional). A bare string value is shorthand for `{ command: "..." }`. Both wrapped (`{ apps: { ... } }`) and bare top-level formats are accepted. Any layer can override entries from previous layers, including the default `bash`.
 
 **Session creation**:
 
@@ -134,7 +134,16 @@ Each entry: `command` (required), `args` (optional string array), `title` (optio
 | `GET {BASE}:appName` | Serves `index.html`. Client generates a session ID and connects via WebSocket with `?app=appName`. |
 | `POST {BASE}api/sessions` | JSON body `{ "app": "appName" }` — spawns a pinned session, returns `{ id, url }`. Defaults to `bash`. |
 
-**API**: `GET {BASE}api/apps` returns `{ apps: [{ key, title, command }] }` — lists all available apps (owner auth required from non-loopback).
+**API**: `GET {BASE}api/apps` returns `{ apps: [{ key, title, command, icon, description }] }` — lists all available apps (owner auth required from non-loopback). `icon` and `description` are `null` when not set in config.
+
+**Catalog page**: `GET {BASE}` serves `public/catalog.html` — a self-contained page (inline CSS/JS, no build step) that fetches `/api/apps` and renders app cards in a responsive grid. Features:
+- "Slate Night" dark theme with Inter font
+- Cards with 48x48 icons, title, description, and app key footer
+- Built-in SVG icons for ~12 categories (terminal, python, node, ai, database, etc.)
+- Auto-generated descriptions for well-known apps (bash -> "Bourne Again Shell", etc.)
+- Icon resolution: explicit `icon` field -> app key alias -> command basename alias -> default
+- Skeleton loading animation, error states, staggered card entrance animation
+- Relative links (`./appKey`) that work correctly under any `--base` prefix
 
 **CLI**: `wsh apps` lists available apps. `wsh apps init` creates a starter `~/.wsh/apps.yaml`. `wsh new [appName]` creates a session via the API.
 

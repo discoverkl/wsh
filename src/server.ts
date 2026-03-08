@@ -524,6 +524,8 @@ interface AppConfig {
   env?: Record<string, string>;
   cwd?: string;
   title?: string;
+  icon?: string;
+  description?: string;
 }
 
 const DEFAULT_APPS: Record<string, AppConfig> = {
@@ -696,14 +698,14 @@ if (token) app.use(makeTokenMiddleware(token));
 
 const router = express.Router();
 
-// Redirect bare / to /bash so the app name is always in the URL.
+// Serve the catalog page at /.
 // When BASE != '/', also redirect /base -> /base/ to fix relative URL resolution.
 router.get('/', (req: express.Request, res: express.Response) => {
   if (BASE !== '/' && !req.originalUrl.endsWith('/')) {
     res.redirect(301, BASE);
     return;
   }
-  res.redirect(302, 'bash');
+  res.sendFile(path.join(__dirname, '..', 'public', 'catalog.html'));
 });
 
 router.get('/api/share', (req: express.Request, res: express.Response) => {
@@ -719,6 +721,8 @@ router.get('/api/apps', (_req: express.Request, res: express.Response) => {
     key,
     title: app.title ?? path.basename(app.command),
     command: app.command,
+    icon: app.icon ?? null,
+    description: app.description ?? null,
   }));
   res.json({ apps: list });
 });
@@ -995,7 +999,7 @@ function openBrowser(url: string): void {
 const httpsOnly   = BIND_ADDR === '0.0.0.0' && !!networkServer;
 const networkBind = httpsOnly ? '0.0.0.0' : (BIND_ADDR ?? primaryLanIP);
 
-const localURL   = httpsOnly ? `https://localhost:${PORT}${BASE}bash` : `http://localhost:${PORT}${BASE}bash`;
+const localURL   = httpsOnly ? `https://localhost:${PORT}${BASE}` : `http://localhost:${PORT}${BASE}`;
 const networkURL = networkBase && token ? `${networkBase}${BASE}?token=${token}` : null;
 
 let serversStarted = 0;

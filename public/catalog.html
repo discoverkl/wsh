@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wsh</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-page: #0a0a0f;
+  --bg-card: #141419;
+  --bg-card-hover: #1a1a22;
+  --border: #23232e;
+  --border-hover: #33334a;
+  --text-primary: #ececf1;
+  --text-secondary: #8e8ea0;
+  --text-tertiary: #565669;
+  --accent: #6366f1;
+  --icon-bg: #1e1e2a;
+  --icon-color: #a5a5ba;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+header {
+  padding: 64px 0 48px;
+  text-align: center;
+}
+
+.wordmark {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  color: var(--text-primary);
+}
+
+.tagline {
+  margin-top: 8px;
+  font-size: 15px;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  padding-bottom: 64px;
+}
+
+.card {
+  display: block;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.card.visible {
+  opacity: 1;
+  transform: translateY(0);
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s, opacity 0.35s ease-out, transform 0.35s ease-out;
+}
+
+.card:hover {
+  border-color: var(--border-hover);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+  transform: translateY(-2px);
+  background: var(--bg-card-hover);
+}
+
+.card-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  background: var(--icon-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
+.card-icon svg {
+  width: 24px;
+  height: 24px;
+  color: var(--icon-color);
+}
+
+.card-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.card-desc {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.card-footer {
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-weight: 500;
+  letter-spacing: 0.3px;
+}
+
+/* Skeleton loading */
+.skeleton-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+}
+
+.skeleton-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  background: var(--icon-bg);
+  margin-bottom: 16px;
+}
+
+.skeleton-line {
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--icon-bg) 25%, #252535 50%, var(--icon-bg) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+.skeleton-line.title { width: 60%; height: 16px; margin-bottom: 10px; }
+.skeleton-line.desc { width: 85%; margin-bottom: 6px; }
+.skeleton-line.desc2 { width: 65%; }
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Error / Empty */
+.message {
+  text-align: center;
+  padding: 80px 24px;
+  color: var(--text-secondary);
+  font-size: 15px;
+}
+
+.message.error { color: #ef4444; }
+
+@media (max-width: 640px) {
+  header { padding: 48px 0 32px; }
+  .grid { gap: 12px; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="wordmark">wsh</div>
+    <div class="tagline">Terminal apps in the browser</div>
+  </header>
+  <div id="content" class="grid">
+    <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-line title"></div><div class="skeleton-line desc"></div><div class="skeleton-line desc2"></div></div>
+    <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-line title"></div><div class="skeleton-line desc"></div><div class="skeleton-line desc2"></div></div>
+    <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-line title"></div><div class="skeleton-line desc"></div><div class="skeleton-line desc2"></div></div>
+  </div>
+</div>
+<script>
+(function() {
+  // Built-in SVG icons
+  var icons = {
+    terminal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
+    python: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2c-1.7 0-3 .5-3.8 1.2C7.5 3.9 7 4.8 7 6v2h5v1H6c-1.7 0-3.2 1.3-3.5 3.2-.4 2.2-.4 3.6 0 5.6C2.8 19.7 3.8 21 5.5 21H7v-2.5c0-1.9 1.6-3.5 3.5-3.5h5c1.4 0 2.5-1.1 2.5-2.5V6c0-1.4-1.3-2.6-2.7-3.2C14.5 2.3 13.3 2 12 2zM9.5 4a1 1 0 110 2 1 1 0 010-2z"/><path d="M12 22c1.7 0 3-.5 3.8-1.2.7-.7 1.2-1.6 1.2-2.8v-2h-5v-1h6c1.7 0 3.2-1.3 3.5-3.2.4-2.2.4-3.6 0-5.6C21.2 4.3 20.2 3 18.5 3H17v2.5c0 1.9-1.6 3.5-3.5 3.5h-5C7.1 9 6 10.1 6 11.5V18c0 1.4 1.3 2.6 2.7 3.2 1.1.5 2.1.8 3.3.8zM14.5 20a1 1 0 110-2 1 1 0 010 2z"/></svg>',
+    node: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l9 5v10l-9 5-9-5V7l9-5z"/><path d="M12 7v10"/><path d="M7 9.5l5 3 5-3"/></svg>',
+    vim: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 17 12 3 21 17"/><line x1="12" y1="10" x2="12" y2="14"/><circle cx="12" cy="16" r="0.5"/></svg>',
+    monitor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
+    docker: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11c.6-.4 1-1.1.7-2-.4-1-1.7-1.5-2.7-1.2"/><rect x="2" y="10" width="4" height="4" rx="0.5"/><rect x="7" y="10" width="4" height="4" rx="0.5"/><rect x="12" y="10" width="4" height="4" rx="0.5"/><rect x="7" y="5.5" width="4" height="4" rx="0.5"/><rect x="12" y="5.5" width="4" height="4" rx="0.5"/><rect x="12" y="1" width="4" height="4" rx="0.5"/><path d="M1 14c1 4 4.5 7 9.5 7 6 0 10-4 11.5-8"/></svg>',
+    git: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 009 9"/></svg>',
+    ruby: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8 5 20 19 20 22 8"/><line x1="12" y1="2" x2="12" y2="20"/><line x1="2" y1="8" x2="22" y2="8"/></svg>',
+    ai: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 014 4v1h1a4 4 0 014 4v0a4 4 0 01-2.5 3.7L18 15l.5 5H5.5L6 15l-.5-.3A4 4 0 013 11v0a4 4 0 014-4h1V6a4 4 0 014-4z"/><circle cx="9" cy="11" r="1.5" fill="currentColor" stroke="none"/><circle cx="15" cy="11" r="1.5" fill="currentColor" stroke="none"/></svg>',
+    database: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
+    network: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>',
+    default: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="13" x2="13" y2="13"/></svg>'
+  };
+
+  // Icon alias table: app key or command basename -> icon ID
+  var iconAliases = {
+    bash: 'terminal', zsh: 'terminal', sh: 'terminal', fish: 'terminal',
+    python: 'python', python3: 'python',
+    node: 'node', nodejs: 'node',
+    vim: 'vim', nvim: 'vim', neovim: 'vim',
+    htop: 'monitor', btop: 'monitor', top: 'monitor',
+    docker: 'docker',
+    git: 'git',
+    ruby: 'ruby', irb: 'ruby',
+    claude: 'ai', chatgpt: 'ai', ollama: 'ai', aider: 'ai',
+    mysql: 'database', psql: 'database', 'redis-cli': 'database', sqlite3: 'database',
+    ssh: 'network', curl: 'network', wget: 'network'
+  };
+
+  // Auto-generated descriptions for well-known apps
+  var defaultDescriptions = {
+    bash: 'Bourne Again Shell',
+    zsh: 'Z Shell',
+    sh: 'POSIX Shell',
+    fish: 'Friendly Interactive Shell',
+    python: 'Python REPL',
+    python3: 'Python 3 REPL',
+    node: 'Node.js REPL',
+    nodejs: 'Node.js REPL',
+    vim: 'Vi IMproved text editor',
+    nvim: 'Neovim text editor',
+    neovim: 'Neovim text editor',
+    htop: 'Interactive process viewer',
+    btop: 'Resource monitor',
+    top: 'Process monitor',
+    docker: 'Container runtime',
+    git: 'Version control',
+    ruby: 'Ruby REPL',
+    irb: 'Interactive Ruby',
+    claude: 'AI coding assistant',
+    chatgpt: 'AI assistant',
+    ollama: 'Local AI models',
+    aider: 'AI pair programming',
+    mysql: 'MySQL client',
+    psql: 'PostgreSQL client',
+    'redis-cli': 'Redis client',
+    sqlite3: 'SQLite console',
+    ssh: 'Secure Shell',
+    curl: 'HTTP client',
+    wget: 'File downloader'
+  };
+
+  function resolveIcon(app) {
+    // 1. Explicit icon field
+    if (app.icon && icons[app.icon]) return icons[app.icon];
+    // 2. Match app key
+    if (iconAliases[app.key]) return icons[iconAliases[app.key]];
+    // 3. Match command basename
+    var basename = app.command.split('/').pop();
+    if (iconAliases[basename]) return icons[iconAliases[basename]];
+    // 4. Fallback
+    return icons.default;
+  }
+
+  function resolveDescription(app) {
+    if (app.description) return app.description;
+    if (defaultDescriptions[app.key]) return defaultDescriptions[app.key];
+    // Match command basename
+    var basename = app.command.split('/').pop();
+    if (defaultDescriptions[basename]) return defaultDescriptions[basename];
+    // Fallback to command path
+    return app.command;
+  }
+
+  function renderCards(apps) {
+    var content = document.getElementById('content');
+    if (apps.length === 0) {
+      content.className = '';
+      content.innerHTML = '<div class="message">No apps configured</div>';
+      return;
+    }
+    content.innerHTML = '';
+    apps.forEach(function(app, i) {
+      var a = document.createElement('a');
+      a.href = './' + app.key;
+      a.className = 'card';
+      a.innerHTML =
+        '<div class="card-icon">' + resolveIcon(app) + '</div>' +
+        '<div class="card-title">' + escapeHtml(app.title) + '</div>' +
+        '<div class="card-desc">' + escapeHtml(resolveDescription(app)) + '</div>' +
+        '<div class="card-footer">' + escapeHtml(app.key) + '</div>';
+      content.appendChild(a);
+      // Staggered entrance animation
+      setTimeout(function() { a.classList.add('visible'); }, 30 * i);
+    });
+  }
+
+  function escapeHtml(s) {
+    var div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  function showError(msg) {
+    var content = document.getElementById('content');
+    content.className = '';
+    content.innerHTML = '<div class="message error">' + escapeHtml(msg) + '</div>';
+  }
+
+  fetch('./api/apps')
+    .then(function(res) {
+      if (res.status === 401) throw new Error('Authentication required');
+      if (!res.ok) throw new Error('Failed to load apps (HTTP ' + res.status + ')');
+      return res.json();
+    })
+    .then(function(data) {
+      renderCards(data.apps || []);
+    })
+    .catch(function(err) {
+      showError(err.message);
+    });
+})();
+</script>
+</body>
+</html>
