@@ -12,6 +12,7 @@ import selfsigned from 'selfsigned';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
+import YAML from 'yaml';
 import { version } from '../package.json';
 
 // --- Subcommands (handled before server startup) ---
@@ -46,22 +47,74 @@ if (process.argv[2] === 'version') {
     process.exit(1);
   }
 } else if (process.argv[2] === 'apps') {
+  const YAML = require('yaml') as typeof import('yaml');
   const subCmd = process.argv[3];
-  const appsPath = path.join(os.homedir(), '.wsh', 'apps.json');
+  const appsPath = path.join(os.homedir(), '.wsh', 'apps.yaml');
 
   if (subCmd === 'init') {
     if (fs.existsSync(appsPath)) {
       console.error(`Already exists: ${appsPath}`);
       process.exit(1);
     }
-    const template = {
-      apps: {
-        python3: { title: 'Python REPL', command: 'python3' },
-        node: { title: 'Node.js REPL', command: 'node' },
-      },
-    };
+    // Also check for legacy apps.json
+    const jsonPath = path.join(os.homedir(), '.wsh', 'apps.json');
+    if (fs.existsSync(jsonPath)) {
+      console.error(`Found existing ${jsonPath} — rename or remove it first.`);
+      process.exit(1);
+    }
+    const template = `# ──────────────────────────────────────────────────────────
+# wsh App Catalog
+# ──────────────────────────────────────────────────────────
+#
+# This file defines the apps available in wsh. Each top-level
+# key becomes an app you can launch from the browser or CLI.
+#
+# URLS
+#   Browser:  http://host:7681/<app-key>
+#   Each session gets a unique ID: http://host:7681/<app-key>#<session-id>
+#
+# CREATING SESSIONS
+#   Browser:  Visit the app URL — a session is created automatically.
+#   CLI:      wsh new <app-key>
+#
+# LISTING APPS
+#   CLI:      wsh apps
+#
+# ──────────────────────────────────────────────────────────
+# Format
+# ──────────────────────────────────────────────────────────
+#
+# String shorthand — the value is used as the command:
+#
+#   htop: htop
+#   python3: python3
+#
+# Object form — for commands that need arguments or options:
+#
+#   node:
+#     command: node          # (required) executable name or path
+#     args: [--inspect]      # (optional) argument list
+#     title: Node.js REPL    # (optional) display name in UI
+#     cwd: /home/user/proj   # (optional) working directory
+#     env:                   # (optional) extra environment variables
+#       NODE_ENV: development
+#
+# Notes:
+#   - The built-in "bash" app is always available and cannot be
+#     overridden here.
+#   - Changes to this file take effect on the next session created;
+#     no server restart is required.
+#   - To remove an app, delete or comment out its entry.
+#
+# ──────────────────────────────────────────────────────────
+# Apps
+# ──────────────────────────────────────────────────────────
+
+python3: python3
+node: node
+`;
     fs.mkdirSync(path.dirname(appsPath), { recursive: true });
-    fs.writeFileSync(appsPath, JSON.stringify(template, null, 2) + '\n');
+    fs.writeFileSync(appsPath, template);
     console.log(`Created ${appsPath}`);
     process.exit(0);
   }
@@ -69,22 +122,29 @@ if (process.argv[2] === 'version') {
   const apps: Record<string, { command: string; args?: string[]; title?: string }> = {
     bash: { command: '/bin/bash', title: 'bash' },
   };
-  try {
-    const parsed = JSON.parse(fs.readFileSync(appsPath, 'utf8'));
-    if (parsed.apps && typeof parsed.apps === 'object') {
-      for (const [key, app] of Object.entries(parsed.apps)) {
-        if (key in apps) continue;
-        if (typeof (app as any).command === 'string') apps[key] = app as any;
-      }
+  // Load apps.yaml, fall back to apps.json
+  let configPath = appsPath;
+  let parsed: any = null;
+  try { parsed = YAML.parse(fs.readFileSync(appsPath, 'utf8')); } catch {
+    const jsonPath = path.join(os.homedir(), '.wsh', 'apps.json');
+    try { parsed = JSON.parse(fs.readFileSync(jsonPath, 'utf8')); configPath = jsonPath; } catch {}
+  }
+  if (parsed && typeof parsed === 'object') {
+    const entries = (parsed.apps && typeof parsed.apps === 'object') ? parsed.apps : parsed;
+    for (const [key, value] of Object.entries(entries as Record<string, unknown>)) {
+      if (key in apps) continue;
+      if (typeof value === 'string') apps[key] = { command: value };
+      else if (value && typeof value === 'object' && typeof (value as any).command === 'string')
+        apps[key] = value as any;
     }
-  } catch {}
+  }
   console.log('Available apps:');
   for (const [key, app] of Object.entries(apps)) {
     const title = app.title ?? path.basename(app.command);
     const args = app.args?.length ? ' ' + app.args.join(' ') : '';
     console.log(`  ${key}  ${title}  (${app.command}${args})`);
   }
-  console.log(`\nConfig: ${appsPath}`);
+  console.log(`\nConfig: ${configPath}`);
   console.log('Run "wsh apps init" to create a starter config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
@@ -468,18 +528,38 @@ const BUILTIN_APPS: Record<string, AppConfig> = {
   },
 };
 
+function loadAppsFile(): Record<string, unknown> | null {
+  const dir = path.join(os.homedir(), '.wsh');
+  // Prefer apps.yaml, fall back to apps.json
+  const yamlPath = path.join(dir, 'apps.yaml');
+  try {
+    return YAML.parse(fs.readFileSync(yamlPath, 'utf8'));
+  } catch {}
+  const jsonPath = path.join(dir, 'apps.json');
+  try {
+    return JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+  } catch {}
+  return null;
+}
+
+function normalizeAppEntry(value: unknown): AppConfig | null {
+  if (typeof value === 'string') return { command: value };
+  if (value && typeof value === 'object' && typeof (value as any).command === 'string')
+    return value as AppConfig;
+  return null;
+}
+
 function loadApps(): Record<string, AppConfig> {
   const apps = { ...BUILTIN_APPS };
-  const appsPath = path.join(os.homedir(), '.wsh', 'apps.json');
-  try {
-    const parsed = JSON.parse(fs.readFileSync(appsPath, 'utf8'));
-    if (parsed.apps && typeof parsed.apps === 'object') {
-      for (const [key, app] of Object.entries(parsed.apps)) {
-        if (key in BUILTIN_APPS) continue;
-        if (typeof (app as any).command === 'string') apps[key] = app as AppConfig;
-      }
-    }
-  } catch {}
+  const parsed = loadAppsFile();
+  if (!parsed || typeof parsed !== 'object') return apps;
+  // Support both wrapped { apps: { ... } } and bare { key: ... }
+  const entries = (parsed.apps && typeof parsed.apps === 'object') ? parsed.apps : parsed;
+  for (const [key, value] of Object.entries(entries as Record<string, unknown>)) {
+    if (key in BUILTIN_APPS) continue;
+    const config = normalizeAppEntry(value);
+    if (config) apps[key] = config;
+  }
   return apps;
 }
 

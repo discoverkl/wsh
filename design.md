@@ -103,18 +103,23 @@ Sessions can run different programs, not just `bash`. The app name is always in 
 
 **URL scheme**: `GET {BASE}` redirects to `{BASE}bash`. Every session URL has the form `{BASE}:appName#sessionId`. Refreshing or opening a new tab preserves the app — the client extracts the app name from the last segment of the pathname and passes it in the WebSocket `app` query parameter. On connect, the server sends the session's actual `app` in the `role` message; if it differs from the URL, the client corrects the pathname via `history.replaceState`.
 
-**Config**: Built-in app `bash` is always present. Additional apps are defined in `~/.wsh/apps.json`:
+**Config**: Built-in app `bash` is always present. Additional apps are defined in `~/.wsh/apps.yaml` (falls back to `~/.wsh/apps.json` for backward compat):
 
-```json
-{
-  "apps": {
-    "python3": { "title": "Python REPL", "command": "python3" },
-    "traecli": { "title": "Trae CLI", "command": "traecli" }
-  }
-}
+```yaml
+# String shorthand — value is the command
+python3: python3
+htop: htop
+
+# Full form with options
+traecli:
+  title: Trae CLI
+  command: traecli
+  args: [--flag]
+  env:
+    MY_VAR: hello
 ```
 
-Each entry: `command` (required), `args` (optional string array), `title` (optional display name). Built-in keys cannot be overridden.
+Each entry: `command` (required), `args` (optional string array), `title` (optional display name), `env` (optional), `cwd` (optional). A bare string value is shorthand for `{ command: "..." }`. Both wrapped (`{ apps: { ... } }`) and bare top-level formats are accepted. Built-in keys cannot be overridden.
 
 **Session creation**:
 
@@ -125,7 +130,7 @@ Each entry: `command` (required), `args` (optional string array), `title` (optio
 
 **API**: `GET {BASE}api/apps` returns `{ apps: [{ key, title, command }] }` — lists all available apps (owner auth required from non-loopback).
 
-**CLI**: `wsh apps` lists available apps. `wsh apps init` creates a starter `~/.wsh/apps.json`. `wsh new [appName]` creates a session via the API.
+**CLI**: `wsh apps` lists available apps. `wsh apps init` creates a starter `~/.wsh/apps.yaml`. `wsh new [appName]` creates a session via the API.
 
 ## Base Path Routing
 
