@@ -125,7 +125,7 @@ Sessions can run different programs, not just `bash`. The app name is always in 
 2. **System**: `/etc/wsh/apps.yaml` — admin-managed, shared across users
 3. **User**: `~/.wsh/apps.yaml` — personal additions/overrides
 
-Each layer falls back to `.json` if no `.yaml` is found.
+Each layer falls back to `.json` if no `.yaml` is found. The file format is identical for both system and user configs. System config is useful for multi-user deployments (e.g., behind a reverse proxy) where an admin wants to define a shared set of apps for all users. To set up system apps, create `/etc/wsh/apps.yaml` manually (there is no CLI helper — `wsh apps init` only creates the user config). Users can override any system-level entry in their own `~/.wsh/apps.yaml`.
 
 ```yaml
 # String shorthand — value is the command
