@@ -318,6 +318,40 @@ function applyPinState(state: boolean): void {
   pinBtn.title = pinned ? 'Unpin (allow timeout after disconnect)' : 'Pin (keep alive after disconnect)';
 }
 
+// --- View-only toast ---
+
+const viewonlyToast = document.getElementById('viewonly-toast')!;
+const viewonlyUpgrade = document.getElementById('viewonly-upgrade')!;
+let viewonlyToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showViewonlyToast(canUpgrade: boolean): void {
+  if (canUpgrade) {
+    viewonlyUpgrade.removeAttribute('hidden');
+  } else {
+    viewonlyUpgrade.setAttribute('hidden', '');
+  }
+  viewonlyToast.classList.add('visible');
+  if (viewonlyToastTimer !== null) clearTimeout(viewonlyToastTimer);
+  viewonlyToastTimer = setTimeout(() => {
+    viewonlyToast.classList.remove('visible');
+    viewonlyToastTimer = null;
+  }, 5000);
+}
+
+function hideViewonlyToast(): void {
+  viewonlyToast.classList.remove('visible');
+  if (viewonlyToastTimer !== null) { clearTimeout(viewonlyToastTimer); viewonlyToastTimer = null; }
+}
+
+viewonlyUpgrade.addEventListener('click', () => {
+  if (sessionDead) return;
+  sessionStorage.setItem(ROLE_KEY, 'active');
+  term.reset();
+  intentionalReconnect = true;
+  ws.close();
+  connect();
+});
+
 function applyRole(role: string, credential?: string): void {
   currentRole = role;
   if (credential === 'owner') isOwner = true;
@@ -325,7 +359,10 @@ function applyRole(role: string, credential?: string): void {
   if (role === 'owner') {
     roleBadge.setAttribute('hidden', '');
     term.options.disableStdin = false;
+    term.options.cursorStyle = 'block';
+    term.options.cursorBlink = true;
     pinBtn.removeAttribute('hidden');
+    hideViewonlyToast();
     return;
   }
 
@@ -338,6 +375,16 @@ function applyRole(role: string, credential?: string): void {
   roleBadge.className = role + (switchable ? ' switchable' : '');
   roleBadge.removeAttribute('hidden');
   term.options.disableStdin = role !== 'writer';
+
+  if (role === 'viewer') {
+    term.options.cursorStyle = 'underline';
+    term.options.cursorBlink = false;
+    showViewonlyToast(canUpgrade);
+  } else {
+    term.options.cursorStyle = 'block';
+    term.options.cursorBlink = true;
+    hideViewonlyToast();
+  }
 }
 
 roleBadge.addEventListener('click', () => {
@@ -351,10 +398,22 @@ roleBadge.addEventListener('click', () => {
   connect();
 });
 
+let flashTimer: ReturnType<typeof setTimeout> | null = null;
+
 term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
   if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
     if (e.type === 'keydown' && ws.readyState === WebSocket.OPEN) ws.send('\x1b[13;2u');
     return false;
+  }
+  // Flash toast when viewer tries to type
+  if (e.type === 'keydown' && currentRole === 'viewer' && !e.metaKey && !e.ctrlKey && e.key.length === 1) {
+    viewonlyToast.classList.add('visible', 'flash');
+    if (flashTimer !== null) clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => {
+      viewonlyToast.classList.remove('flash');
+      // Hide after a bit if it wasn't already showing
+      flashTimer = setTimeout(() => { viewonlyToast.classList.remove('visible'); flashTimer = null; }, 2000);
+    }, 300);
   }
   return true;
 });

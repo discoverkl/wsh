@@ -432,6 +432,54 @@
       transition: color 0.15s, background 0.15s;
     }
     #toast-dismiss:hover { color: #cdd6f4; background: rgba(205, 214, 244, 0.08); }
+
+    /* View-only toast */
+    #viewonly-toast {
+      position: absolute;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%) translateY(4px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(17, 17, 27, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(249, 226, 175, 0.18);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 12px;
+      color: #cdd6f4;
+      white-space: nowrap;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.55);
+    }
+    #viewonly-toast.visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+      pointer-events: auto;
+    }
+    #viewonly-toast .vo-icon {
+      color: #f9e2af;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    #viewonly-toast .vo-action {
+      color: #89b4fa;
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    #viewonly-toast .vo-action:hover {
+      color: #b4d0fb;
+    }
+    #viewonly-toast.flash {
+      border-color: rgba(243, 139, 168, 0.5);
+    }
   </style>
 </head>
 <body>
@@ -495,6 +543,15 @@
             <line x1="1.5" y1="1.5" x2="7.5" y2="7.5"/><line x1="7.5" y1="1.5" x2="1.5" y2="7.5"/>
           </svg>
         </button>
+      </div>
+      <div id="viewonly-toast">
+        <span class="vo-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+          </svg>
+        </span>
+        <span>View only</span>
+        <span class="vo-action" id="viewonly-upgrade" hidden>Take control</span>
       </div>
       <div id="terminal-container" hidden></div>
       <div id="web-container" hidden>
