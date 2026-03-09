@@ -210,19 +210,24 @@ node: node
   if (!basePath.endsWith('/')) basePath += '/';
 
   function curlRequest(method: string, urlPath: string): { status: number; body: string } {
-    const url = `http://127.0.0.1:${port}${urlPath}`;
-    try {
-      const body = execSync(`curl -sS -X ${method} -w '\\n%{http_code}' '${url}'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-      const lines = body.trimEnd().split('\n');
-      const httpCode = parseInt(lines.pop()!, 10);
-      return { status: httpCode, body: lines.join('\n') };
-    } catch (err: any) {
-      if (err.stderr?.includes('onnect') || err.stderr?.includes('refused')) {
-        console.error(`No wsh server running on localhost:${port}`);
-      } else {
-        console.error('Error:', err.stderr?.trim() || err.message);
+    // Try HTTP first; if it fails (e.g. httpsOnly mode), retry with HTTPS.
+    for (const scheme of ['http', 'https'] as const) {
+      const url = `${scheme}://127.0.0.1:${port}${urlPath}`;
+      const flags = scheme === 'https' ? '-sSk' : '-sS';
+      try {
+        const body = execSync(`curl ${flags} -X ${method} -w '\\n%{http_code}' '${url}'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+        const lines = body.trimEnd().split('\n');
+        const httpCode = parseInt(lines.pop()!, 10);
+        return { status: httpCode, body: lines.join('\n') };
+      } catch (err: any) {
+        if (scheme === 'http') continue;
+        if (err.stderr?.includes('onnect') || err.stderr?.includes('refused')) {
+          console.error(`No wsh server running on localhost:${port}`);
+        } else {
+          console.error('Error:', err.stderr?.trim() || err.message);
+        }
+        process.exit(1);
       }
-      process.exit(1);
     }
     return { status: 0, body: '' }; // unreachable
   }
@@ -1295,13 +1300,18 @@ function openBrowser(url: string): void {
 
 // --- Listen ---
 
-const networkBind = BIND_ADDR ?? primaryLanIP;
+// When --bind 0.0.0.0, run HTTPS-only on all interfaces: mixing HTTP and HTTPS on one
+// port via protocol sniffing doesn't work because Node.js TLS reads from the native
+// libuv handle directly, bypassing any JS-layer unshift(). HTTPS-only is fine for the
+// Docker --network host use case where browsers access via the host's LAN IP over HTTPS.
+const httpsOnly   = BIND_ADDR === '0.0.0.0' && !!networkServer;
+const networkBind = httpsOnly ? '0.0.0.0' : (BIND_ADDR ?? primaryLanIP);
 
-const localURL   = `http://localhost:${PORT}${BASE}`;
+const localURL   = httpsOnly ? `https://localhost:${PORT}${BASE}` : `http://localhost:${PORT}${BASE}`;
 const networkURL = networkBase && token ? `${networkBase}${BASE}?token=${token}` : null;
 
 let serversStarted = 0;
-const totalServers = networkServer && networkBind ? 2 : 1;
+const totalServers = httpsOnly ? 1 : (networkServer && networkBind ? 2 : 1);
 
 function onListening(): void {
   if (++serversStarted < totalServers) return;
@@ -1316,7 +1326,9 @@ function onListening(): void {
   if (!values['no-open']) openBrowser(localURL);
 }
 
-// Always bind local HTTP on 127.0.0.1 — the specific bind takes precedence
-// over 0.0.0.0 for loopback traffic, so both can share the same port.
-localServer.listen(PORT, '127.0.0.1', onListening);
-if (networkServer && networkBind) networkServer.listen(PORT, networkBind, onListening);
+if (httpsOnly) {
+  networkServer!.listen(PORT, '0.0.0.0', onListening);
+} else {
+  localServer.listen(PORT, '127.0.0.1', onListening);
+  if (networkServer && networkBind) networkServer.listen(PORT, networkBind, onListening);
+}

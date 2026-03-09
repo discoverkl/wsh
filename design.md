@@ -88,8 +88,6 @@ Set to `viewer` on first load with a hash (joining existing), `active` on first 
 
 ## Security Model
 
-**Server binding**: HTTP always listens on `127.0.0.1:PORT`. If a LAN IP is detected (or `--bind` is set), HTTPS also listens on that address on the same port. Both can share the same port because the specific `127.0.0.1` bind takes precedence over `0.0.0.0` for loopback traffic. CLI commands always connect over HTTP to localhost.
-
 - **Localhost**: Plain HTTP, no auth (loopback = owner)
 - **LAN**: HTTPS with self-signed cert (generated on first run, stored in `~/.wsh/tls/`)
   - Fingerprint printed at startup for manual verification
