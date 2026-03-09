@@ -105,6 +105,12 @@ Set to `viewer` on first load with a hash (joining existing), `active` on first 
 
 `GET {BASE}` serves `catalog.html` — a visual launcher showing all configured apps as cards with icons, descriptions, session counts, and type/access badges.
 
+The page title and tagline are customizable via CLI flags:
+- `--title <name>` — sets the browser tab title and wordmark (default: `wsh`)
+- `--tagline <text>` — sets the subtitle below the wordmark (default: `Apps in the browser`)
+
+The HTML uses `{{title}}` and `{{tagline}}` placeholders, replaced server-side at serve time with HTML-escaped values.
+
 ### Configuration
 
 Apps load from three layers (each overrides the previous):

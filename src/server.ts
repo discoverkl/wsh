@@ -625,6 +625,8 @@ const { values } = parseArgs({
     help:       { type: 'boolean', short: 'h', default: false },
     version:    { type: 'boolean', short: 'v', default: false },
     base:       { type: 'string', default: '/' },
+    title:      { type: 'string', default: 'wsh' },
+    tagline:    { type: 'string', default: 'Apps in the browser' },
   },
 });
 
@@ -652,6 +654,8 @@ if (values.help) {
   console.log('      --bind <addr>  Bind network server to this address (default: auto-detect LAN IP)');
   console.log('                     Use 0.0.0.0 to listen on all interfaces (e.g. inside Docker --network host)');
   console.log('      --base <path>  Base path prefix (default: /)');
+  console.log('      --title <name> Custom title for the index page (default: wsh)');
+  console.log('      --tagline <text>  Custom tagline below the title (default: Apps in the browser)');
   console.log('      --no-open      Do not open browser on start');
   console.log('      --no-login     Spawn non-login shells (default: login shell)');
   console.log('  -v, --version      Print version and exit');
@@ -671,6 +675,8 @@ function normalizeBase(raw: string): string {
 }
 
 const BASE = normalizeBase(values.base!);
+const SITE_TITLE = values.title!;
+const SITE_TAGLINE = values.tagline!;
 
 const PORT = parseInt(values.port!, 10);
 const CUSTOM_URL = values.url || null;
@@ -876,7 +882,9 @@ router.get('/', (req: express.Request, res: express.Response) => {
     res.redirect(301, BASE);
     return;
   }
-  res.sendFile(path.join(__dirname, '..', 'public', 'catalog.html'));
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'catalog.html'), 'utf8');
+  const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  res.type('html').send(html.replace(/\{\{title\}\}/g, escHtml(SITE_TITLE)).replace(/\{\{tagline\}\}/g, escHtml(SITE_TAGLINE)));
 });
 
 router.get('/api/share', (req: express.Request, res: express.Response) => {
