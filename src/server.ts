@@ -1295,18 +1295,13 @@ function openBrowser(url: string): void {
 
 // --- Listen ---
 
-// When --bind 0.0.0.0, run HTTPS-only on all interfaces: mixing HTTP and HTTPS on one
-// port via protocol sniffing doesn't work because Node.js TLS reads from the native
-// libuv handle directly, bypassing any JS-layer unshift(). HTTPS-only is fine for the
-// Docker --network host use case where browsers access via the host's LAN IP over HTTPS.
-const httpsOnly   = BIND_ADDR === '0.0.0.0' && !!networkServer;
-const networkBind = httpsOnly ? '0.0.0.0' : (BIND_ADDR ?? primaryLanIP);
+const networkBind = BIND_ADDR ?? primaryLanIP;
 
-const localURL   = httpsOnly ? `https://localhost:${PORT}${BASE}` : `http://localhost:${PORT}${BASE}`;
+const localURL   = `http://localhost:${PORT}${BASE}`;
 const networkURL = networkBase && token ? `${networkBase}${BASE}?token=${token}` : null;
 
 let serversStarted = 0;
-const totalServers = httpsOnly ? 1 : (networkServer && networkBind ? 2 : 1);
+const totalServers = networkServer && networkBind ? 2 : 1;
 
 function onListening(): void {
   if (++serversStarted < totalServers) return;
@@ -1321,9 +1316,7 @@ function onListening(): void {
   if (!values['no-open']) openBrowser(localURL);
 }
 
-if (httpsOnly) {
-  networkServer!.listen(PORT, '0.0.0.0', onListening);
-} else {
-  localServer.listen(PORT, '127.0.0.1', onListening);
-  if (networkServer && networkBind) networkServer.listen(PORT, networkBind, onListening);
-}
+// Always bind local HTTP on 127.0.0.1 — the specific bind takes precedence
+// over 0.0.0.0 for loopback traffic, so both can share the same port.
+localServer.listen(PORT, '127.0.0.1', onListening);
+if (networkServer && networkBind) networkServer.listen(PORT, networkBind, onListening);
