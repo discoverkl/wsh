@@ -183,11 +183,9 @@ Apps load from three layers (each overrides the previous):
 Each layer falls back to `.json` if no `.yaml` is found.
 
 ```yaml
-# String shorthand
-python3: python3
-htop: htop
+python3:
+  command: python3
 
-# Full form
 node:
   command: node
   args: [--inspect]
