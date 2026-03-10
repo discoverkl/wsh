@@ -106,7 +106,7 @@ htop:
 #
 # Extra fields for web apps:
 #   type: web     (required) marks this as a web app
-#   healthCheck   readiness endpoint to poll (default: /)
+#   healthCheck   app-relative path to poll for readiness (default: /)
 #   startupTimeout  max wait for healthCheck (default: 30s)
 #   timeout       idle session lifetime after disconnect (default: 1h)
 #   access        private (default) or public — controls LAN visibility
@@ -610,7 +610,8 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
 
   // Poll for readiness in the background — don't block session creation.
   // The client shows its own loading spinner until the iframe loads.
-  const healthPath = appConfig.healthCheck || (session.stripPrefix ? '/' : BASE + '_p/' + id + '/');
+  const healthBase = session.stripPrefix ? '' : BASE + '_p/' + id;
+  const healthPath = healthBase + (appConfig.healthCheck || '/');
   const startupTimeoutMs = appConfig.startupTimeout ? parseTimeout(appConfig.startupTimeout) : 30000;
   const effectiveStartupTimeout = (!isNaN(startupTimeoutMs) && startupTimeoutMs > 0) ? startupTimeoutMs : 30000;
   pollUntilReady(port, healthPath, effectiveStartupTimeout).then(() => {
