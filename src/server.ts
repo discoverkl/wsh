@@ -62,59 +62,51 @@ if (process.argv[2] === 'version') {
       console.error(`Found existing ${jsonPath} — rename or remove it first.`);
       process.exit(1);
     }
-    const template = `# ──────────────────────────────────────────────────────────
-# wsh App Catalog
-# ──────────────────────────────────────────────────────────
-#
-# This file defines the apps available in wsh. Each top-level
-# key becomes an app you can launch from the browser or CLI.
-#
-# URLS
-#   Browser:  http://host:7681/<app-key>
-#   Each session gets a unique ID: http://host:7681/<app-key>#<session-id>
-#
-# CREATING SESSIONS
-#   Browser:  Visit the app URL — a session is created automatically.
-#   CLI:      wsh new <app-key>
-#
-# LISTING APPS
-#   CLI:      wsh apps
-#
-# ──────────────────────────────────────────────────────────
-# Format
-# ──────────────────────────────────────────────────────────
-#
-# String shorthand — the value is used as the command:
-#
-#   htop: htop
-#   python3: python3
-#
-# Object form — for commands that need arguments or options:
-#
-#   node:
-#     command: node          # (required) executable name or path
-#     args: [--inspect]      # (optional) argument list
-#     title: Node.js REPL    # (optional) display name in UI
-#     cwd: /home/user/proj   # (optional) working directory
-#     env:                   # (optional) extra environment variables
-#       NODE_ENV: development
+    const template = `# wsh apps — each key becomes a launchable app.
+# Docs: wsh apps --help | Browser: http://host:7681/<key>
+# Changes take effect on the next session (no restart needed).
 #
 # Config layers (each overrides the previous):
-#   1. Default: bash is always available as a fallback
-#   2. System:  /etc/wsh/apps.yaml — admin-managed, shared across users
-#   3. User:    ~/.wsh/apps.yaml   — personal additions/overrides
-#
-# Notes:
-#   - Any layer can override entries from previous layers, including bash.
-#   - Changes take effect on the next session created; no restart needed.
-#   - To remove an app, delete or comment out its entry.
-#
-# ──────────────────────────────────────────────────────────
-# Apps
-# ──────────────────────────────────────────────────────────
+#   1. bash (always available)
+#   2. /etc/wsh/apps.yaml
+#   3. ~/.wsh/apps.yaml (this file)
 
-python3: python3
-node: node
+# ── TUI apps ─────────────────────────────────────────────
+
+python3:
+  command: python3
+
+node:
+  command: node
+  args: [--inspect]
+  title: Node.js REPL
+  # cwd: ~/projects
+  # env:
+  #   NODE_ENV: development
+
+# ── Web apps ─────────────────────────────────────────────
+# Set type: web to run an HTTP server in an iframe.
+# wsh assigns a port via $WSH_PORT, sets $WSH_BASE_URL to
+# the reverse-proxy prefix, and polls healthCheck until ready.
+#
+# Use stripPrefix: true for servers that can't set a base URL.
+
+# jupyter:
+#   type: web
+#   command: jupyter
+#   args: [lab, --port=$WSH_PORT, --ServerApp.base_url=$WSH_BASE_URL, --no-browser]
+#   title: Jupyter Lab
+#   healthCheck: /api
+#   startupTimeout: 60s
+#   timeout: 2h
+
+# file-browser:
+#   type: web
+#   command: python3
+#   args: [-m, http.server, $WSH_PORT]
+#   title: File Browser
+#   stripPrefix: true
+#   access: public
 `;
     fs.mkdirSync(path.dirname(appsPath), { recursive: true });
     fs.writeFileSync(appsPath, template);
@@ -147,8 +139,11 @@ node: node
   for (const [key, app] of Object.entries(apps)) {
     const title = app.title ?? path.basename(app.command);
     const args = app.args?.length ? ' ' + app.args.join(' ') : '';
-    const webTag = (app as any).type === 'web' ? ' [web]' : '';
-    console.log(`  ${key}  ${title}  (${app.command}${args})${webTag}`);
+    const tags = [];
+    if ((app as any).type === 'web') tags.push('web');
+    if ((app as any).access === 'public') tags.push('public');
+    const tagStr = tags.length ? ' [' + tags.join(', ') + ']' : '';
+    console.log(`  ${key}  ${title}  (${app.command}${args})${tagStr}`);
   }
   console.log(`\nSystem config: ${path.join(systemDir, 'apps.yaml')}`);
   console.log(`User config:   ${appsPath}`);
