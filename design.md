@@ -69,10 +69,16 @@ Three roles: **owner**, **writer**, **viewer**.
 | **Writer** | no | yes | yes | yes | no | no |
 | **Viewer** | no | no | no | no | no | no |
 
-**Role assignment** (server-side):
+**Role assignment** (server-side, standard mode):
 - Loopback or valid `wsh_token` cookie -> `owner`
 - Valid writer token (`?wtoken=`) -> `writer`
 - No credentials -> `viewer` (session ID alone is the viewer secret)
+
+**Role assignment** (`--trust-proxy` mode):
+- `X-WSH-User` header matches `ABOX_USER` env var or is `*` -> `owner`
+- Valid writer token (`?wtoken=`) -> `writer`
+- Other `X-WSH-User` value -> `viewer`
+- No `X-WSH-User` header -> rejected (401)
 
 **Writer promotion**: When the active writer disconnects, the server promotes the first peer with `owner` or `writer` credential. If none exist, the cleanup timer starts.
 
@@ -96,6 +102,28 @@ Set to `viewer` on first load with a hash (joining existing), `active` on first 
   - Salt: random 32 bytes persisted in `~/.wsh/tls/writer-salt.txt`
 - **Viewer access**: Session ID only (6-char base-36); treat as semi-private
 - **Rate limiting**: Non-loopback IPs get at most 10 invalid session attempts per minute before WS close 4029
+
+### `--trust-proxy` Mode
+
+When `--trust-proxy` is set, wsh disables the loopback auth bypass and instead reads the `X-WSH-User` header set by the reverse proxy to determine user identity. This is required when wsh runs behind a reverse proxy (e.g. the abox gateway), because the proxy connects to wsh via `127.0.0.1`, making all requests appear as loopback.
+
+The proxy is responsible for:
+1. Authenticating the user
+2. Setting `X-WSH-User` to the authenticated username (or `*` for admin)
+3. Stripping any client-supplied `X-WSH-User` header to prevent spoofing
+
+wsh compares the `X-WSH-User` value against the `ABOX_USER` environment variable (the box owner):
+
+| `X-WSH-User` | TUI role | Private web app |
+|---|---|---|
+| Matches `ABOX_USER` or `*` | owner | allowed |
+| Other + valid `?wtoken=` | writer | blocked (401) |
+| Other | viewer | blocked (401) |
+| Missing | rejected (401) | rejected (401) |
+
+The standard `wsh_token` cookie and loopback-based auth are bypassed entirely in this mode — all auth decisions are based on the header. Writer tokens (`?wtoken=`) still work for shared write access.
+
+Rate limiting still uses raw loopback detection (not affected by `--trust-proxy`) to avoid rate-limiting the proxy itself.
 
 **Share URLs** (TUI apps only; generated via `GET /api/share?session=<id>`):
 - Writer: `{base}/{app}#{id}?wt={token}`
@@ -197,12 +225,12 @@ The proxy also:
 
 Web apps use **app-level** access instead of per-session share links:
 
-| `access` | Loopback | LAN with token | LAN without token |
-|---|---|---|---|
-| `private` (default) | allowed | allowed | **401** |
-| `public` | allowed | allowed | allowed |
+| `access` | Loopback | LAN with token | LAN without token | `--trust-proxy` (owner) | `--trust-proxy` (other) |
+|---|---|---|---|---|---|
+| `private` (default) | allowed | allowed | **401** | allowed | **401** |
+| `public` | allowed | allowed | allowed | allowed | allowed |
 
-Checked on every HTTP request and WebSocket upgrade by the proxy handler itself (not the token middleware).
+Checked on every HTTP request and WebSocket upgrade by the proxy handler itself (not the token middleware). In `--trust-proxy` mode, "owner" means `X-WSH-User` matches `ABOX_USER` or is `*`.
 
 ### Client Behavior
 

@@ -622,6 +622,7 @@ const { values } = parseArgs({
     bind:      { type: 'string',              default: '' },
     'no-open':  { type: 'boolean',             default: false },
     'no-login': { type: 'boolean',             default: false },
+    'trust-proxy': { type: 'boolean',          default: false },
     help:       { type: 'boolean', short: 'h', default: false },
     version:    { type: 'boolean', short: 'v', default: false },
     base:       { type: 'string', default: '/' },
@@ -658,6 +659,7 @@ if (values.help) {
   console.log('      --tagline <text>  Custom tagline below the title (default: Apps in the browser)');
   console.log('      --no-open      Do not open browser on start');
   console.log('      --no-login     Spawn non-login shells (default: login shell)');
+  console.log('      --trust-proxy  Disable loopback auth bypass (use behind a reverse proxy)');
   console.log('  -v, --version      Print version and exit');
   console.log('  -h, --help         Show this help message');
   console.log('');
@@ -681,6 +683,7 @@ const SITE_TAGLINE = values.tagline!;
 const PORT = parseInt(values.port!, 10);
 const CUSTOM_URL = values.url || null;
 const BIND_ADDR  = values.bind || null;
+const TRUST_PROXY = values['trust-proxy']!;
 
 if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
   console.error(`Error: invalid port "${values.port}"`);
@@ -754,6 +757,7 @@ function loadApps(): Record<string, AppConfig> {
 function isLoopback(ip: string | undefined): boolean {
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
+
 
 function getLanIPs(): string[] {
   const ips: string[] = [];
@@ -838,6 +842,17 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
       if (sessionParam) { res.redirect(302, `bash#${sessionParam}`); return; }
       next();
     };
+
+    // Trust-proxy mode: gateway sets X-WSH-User header
+    if (TRUST_PROXY) {
+      if (req.headers['x-wsh-user']) return proceed();
+      if (url.pathname.startsWith(BASE + 'api/')) {
+        res.status(401).send('Unauthorized');
+      } else {
+        next();
+      }
+      return;
+    }
 
     if (isLoopback(req.socket.remoteAddress)) return proceed();
 
@@ -946,11 +961,19 @@ function proxyHandler(req: express.Request, res: express.Response): void {
     return;
   }
   // Access control: non-public web apps require owner auth
-  if (session.access !== 'public' && token && !isLoopback(req.socket.remoteAddress)) {
-    const cookies = parseCookies(req.headers.cookie as string ?? '');
-    if (cookies['wsh_token'] !== token) {
-      res.status(401).send('Unauthorized');
-      return;
+  if (session.access !== 'public') {
+    if (TRUST_PROXY) {
+      const xUser = req.headers['x-wsh-user'] as string | undefined;
+      if (xUser !== process.env.ABOX_USER && xUser !== '*') {
+        res.status(401).send('Unauthorized');
+        return;
+      }
+    } else if (token && !isLoopback(req.socket.remoteAddress)) {
+      const cookies = parseCookies(req.headers.cookie as string ?? '');
+      if (cookies['wsh_token'] !== token) {
+        res.status(401).send('Unauthorized');
+        return;
+      }
     }
   }
   if (!session.ready) {
@@ -1034,6 +1057,16 @@ const networkServer = tls ? https.createServer({ key: tls.key, cert: tls.cert },
 const wss = new WebSocketServer({ noServer: true });
 
 function getRoleForSession(req: http.IncomingMessage, sessionId: string): Role | null {
+  // Trust-proxy mode: role determined by X-WSH-User header from gateway
+  if (TRUST_PROXY) {
+    const xUser = req.headers['x-wsh-user'] as string | undefined;
+    if (xUser === process.env.ABOX_USER || xUser === '*') return 'owner';
+    // Check for shared writer token
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const wt = url.searchParams.get('wtoken');
+    if (wt !== null && tls) return wt === writerToken(sessionId) ? 'writer' : null;
+    return 'viewer';
+  }
   if (isLoopback(req.socket.remoteAddress) || !token) return 'owner';
   const cookies = parseCookies(req.headers.cookie ?? '');
   if (cookies['wsh_token'] === token) return 'owner';
@@ -1067,12 +1100,21 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
       return;
     }
     // Access control: non-public web apps require owner auth
-    if (wsSession.access !== 'public' && token && !isLoopback(req.socket.remoteAddress)) {
-      const cookies = parseCookies(req.headers.cookie ?? '');
-      if (cookies['wsh_token'] !== token) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-        socket.destroy();
-        return;
+    if (wsSession.access !== 'public') {
+      if (TRUST_PROXY) {
+        const xUser = req.headers['x-wsh-user'] as string | undefined;
+        if (xUser !== process.env.ABOX_USER && xUser !== '*') {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+      } else if (token && !isLoopback(req.socket.remoteAddress)) {
+        const cookies = parseCookies(req.headers.cookie ?? '');
+        if (cookies['wsh_token'] !== token) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
       }
     }
     const target = net.connect(wsSession.port, '127.0.0.1', () => {
@@ -1100,7 +1142,13 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
   if (url.pathname !== BASE + 'terminal') { socket.destroy(); return; }
 
   const sessionId = url.searchParams.get('session') ?? '';
-  if (token && !isLoopback(req.socket.remoteAddress) && getRoleForSession(req, sessionId) === null) {
+  if (TRUST_PROXY) {
+    if (!req.headers['x-wsh-user'] || getRoleForSession(req, sessionId) === null) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+  } else if (token && !isLoopback(req.socket.remoteAddress) && getRoleForSession(req, sessionId) === null) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
     return;
