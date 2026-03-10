@@ -59,75 +59,108 @@ The cleanup timer starts from the moment of disconnect, not from last activity. 
 - Pin state is in-memory only; a server restart resets it
 - OSC title sequences (`\e]0;title\a`) are parsed from PTY output and stored on the session
 
-## Roles and Access Control
+## Authentication & Access Control
 
-Three roles: **owner**, **writer**, **viewer**.
+### Tokens
 
-| | Create | Input | Resize | Clear | Close | Pin |
-|---|---|---|---|---|---|---|
-| **Owner** | yes | yes | yes | yes | yes | yes |
-| **Writer** | no | yes | yes | yes | no | no |
-| **Viewer** | no | no | no | no | no | no |
+All tokens are derived from the TLS private key generated on first run (`~/.wsh/tls/`):
 
-**Role assignment** (server-side, standard mode):
-- Loopback or valid `wsh_token` cookie -> `owner`
-- Valid writer token (`?wtoken=`) -> `writer`
-- No credentials -> `viewer` (session ID alone is the viewer secret)
+| Token | Derivation | Format | Delivery |
+|---|---|---|---|
+| **Owner** | `SHA256(TLS key)[0:16]` | 16-char hex | `HttpOnly` cookie `wsh_token` (10-year, `SameSite=Strict`) |
+| **Writer** | `SHA256(TLS key + salt + sessionId)[0:16]` | 16-char hex, per-session | URL param `?wt=<token>` in share links |
+| **Viewer** | *(none)* | Session ID itself is the secret | URL hash `#<sessionId>` |
 
-**Role assignment** (`--trust-proxy` mode):
-- `X-WSH-User` header matches `ABOX_USER` env var or is `*` -> `owner`
-- Valid writer token (`?wtoken=`) -> `writer`
-- Other `X-WSH-User` value -> `viewer`
-- No `X-WSH-User` header -> rejected (401)
+The writer salt is 32 random bytes persisted in `~/.wsh/tls/writer-salt.txt`.
 
-**Writer promotion**: When the active writer disconnects, the server promotes the first peer with `owner` or `writer` credential. If none exist, the cleanup timer starts.
+On first LAN visit, the owner token is passed as `?token=<tok>` in the URL. The server sets the cookie and redirects to strip the token from the URL. All subsequent requests use the cookie.
 
-**Default-to-viewer**: Opening an existing session in a new tab starts as viewer. Refreshing preserves the role. Tracked via a single `sessionStorage` key per session:
+### Transport
 
-| Key | Values | Purpose |
+| Context | Protocol | Auth required |
 |---|---|---|
-| `wsh_role_{sessionId}` | `active` / `viewer` | `active` = connect as owner/writer; `viewer` = connect with `?yield=1` |
+| Localhost (127.0.0.1) | HTTP | No — loopback is always owner |
+| LAN | HTTPS (self-signed cert) | Yes — owner token or share link |
 
-Set to `viewer` on first load with a hash (joining existing), `active` on first load without (creating new). Persists across refresh.
+The TLS certificate fingerprint is printed at startup for manual verification.
 
-**Role switching**: Viewers with credentials see a clickable "View Only" badge; clicking it flips the key to `active` and reconnects. Writers see a clickable "Writer" badge to voluntarily demote.
+### Roles
 
-## Security Model
+Three roles with decreasing privilege: **owner > writer > viewer**.
 
-- **Localhost**: Plain HTTP, no auth (loopback = owner)
-- **LAN**: HTTPS with self-signed cert (generated on first run, stored in `~/.wsh/tls/`)
-  - Fingerprint printed at startup for manual verification
-- **Owner token**: 16-char hex from `SHA256(TLS private key)`, stored as `HttpOnly` cookie after first URL-based auth
-- **Writer token**: 16-char hex per-session from `SHA256(TLS key + salt + session ID)`
-  - Salt: random 32 bytes persisted in `~/.wsh/tls/writer-salt.txt`
-- **Viewer access**: Session ID only (6-char base-36); treat as semi-private
-- **Rate limiting**: Non-loopback IPs get at most 10 invalid session attempts per minute before WS close 4029
+| Action | Owner | Writer | Viewer |
+|---|---|---|---|
+| Create session | yes | — | — |
+| Input (type) | yes | yes | — |
+| Resize / Clear | yes | yes | — |
+| Close / Pin | yes | — | — |
 
-### `--trust-proxy` Mode
+### Role Assignment (Server-Side)
 
-When `--trust-proxy` is set, wsh disables the loopback auth bypass and instead reads the `X-WSH-User` header set by the reverse proxy to determine user identity. This is required when wsh runs behind a reverse proxy (e.g. the abox gateway), because the proxy connects to wsh via `127.0.0.1`, making all requests appear as loopback.
+Evaluated top-to-bottom; first match wins.
 
-The proxy is responsible for:
-1. Authenticating the user
-2. Setting `X-WSH-User` to the authenticated username (or `*` for admin)
-3. Stripping any client-supplied `X-WSH-User` header to prevent spoofing
+**Standard mode:**
 
-wsh compares the `X-WSH-User` value against the `ABOX_USER` environment variable (the box owner):
+| Condition | Role |
+|---|---|
+| Loopback (127.0.0.1, ::1) or no TLS configured | owner |
+| `wsh_token` cookie matches owner token | owner |
+| `?wtoken=` matches `writerToken(sessionId)` | writer |
+| `?wtoken=` present but invalid | **rejected** (401) |
+| No credentials | viewer |
 
-| `X-WSH-User` | TUI role | Private web app |
+**`--trust-proxy` mode** (for reverse-proxy deployments, e.g. abox gateway):
+
+| `X-WSH-User` header | `?wtoken=` | Role |
 |---|---|---|
-| Matches `ABOX_USER` or `*` | owner | allowed |
-| Other + valid `?wtoken=` | writer | blocked (401) |
-| Other | viewer | blocked (401) |
-| Missing | rejected (401) | rejected (401) |
+| Matches `ABOX_USER` env or `*` | *(ignored)* | owner |
+| Other value | valid | writer |
+| Other value | missing/invalid | viewer |
+| Missing | *(any)* | **rejected** (401) |
 
-The standard `wsh_token` cookie and loopback-based auth are bypassed entirely in this mode — all auth decisions are based on the header. Writer tokens (`?wtoken=`) still work for shared write access.
+In trust-proxy mode, cookie and loopback auth are disabled entirely — the proxy is responsible for authenticating users, setting `X-WSH-User`, and stripping any client-supplied `X-WSH-User` header.
 
-Rate limiting still uses raw loopback detection (not affected by `--trust-proxy`) to avoid rate-limiting the proxy itself.
+### Web App Access Control
 
-**Share URLs** (TUI apps only; generated via `GET /api/share?session=<id>`):
-- Writer: `{base}/{app}#{id}?wt={token}`
-- Viewer: `{base}/{app}#{id}`
+Web apps have an app-level `access` field (`private` by default, or `public`). This is checked on every HTTP request and WebSocket upgrade by the proxy handler, separate from the token middleware.
+
+| `access` | Loopback | LAN + owner token | LAN (no token) | trust-proxy (owner) | trust-proxy (other) |
+|---|---|---|---|---|---|
+| `private` | allowed | allowed | **401** | allowed | **401** |
+| `public` | allowed | allowed | allowed | allowed | allowed |
+
+### Writer Management
+
+- Only one active writer per session at a time.
+- A new writer demotes the current writer to viewer.
+- `?yield=1` lets an owner/writer rejoin as viewer without displacing the current writer. If no writer exists, they are promoted anyway.
+- On writer disconnect, the server promotes the first peer with `owner` credential, then `writer`. If none exist, the cleanup timer starts.
+
+### Client-Side Role State
+
+The client tracks each session's role intent in `sessionStorage`:
+
+| Key | Values | Set when |
+|---|---|---|
+| `wsh_role_{sessionId}` | `active` | First load without hash (creating new session) |
+| | `viewer` | First load with hash (joining existing session) |
+
+`active` connects as owner/writer; `viewer` connects with `?yield=1`. Persists across page refresh.
+
+**Role switching**: Viewers with credentials (owner cookie or writer token) see a clickable "View Only" badge to upgrade. Writers see a clickable "Writer" badge to voluntarily step down. Both toggle the `sessionStorage` key and reconnect.
+
+### Share URLs
+
+Generated via `GET /api/share?session=<id>` (TUI apps only; owner-authenticated):
+
+| Link type | URL format | Recipient role |
+|---|---|---|
+| Writer | `{base}/{app}#{id}?wt={token}` | writer |
+| Viewer | `{base}/{app}#{id}` | viewer |
+
+### Rate Limiting
+
+Non-loopback IPs are limited to 10 invalid session-creation attempts per 60-second window. Exceeding the limit closes the WebSocket with code 4029. In `--trust-proxy` mode, rate limiting uses raw IP detection (unaffected by the flag) to avoid throttling the proxy itself.
 
 ## App Catalog
 
@@ -220,17 +253,6 @@ The proxy also:
 - `WSH_PORT` — port the app must listen on
 - `WSH_SESSION` — session ID
 - `WSH_BASE_URL` — reverse proxy prefix path (e.g., `/_p/abc123/`)
-
-### Access Control
-
-Web apps use **app-level** access instead of per-session share links:
-
-| `access` | Loopback | LAN with token | LAN without token | `--trust-proxy` (owner) | `--trust-proxy` (other) |
-|---|---|---|---|---|---|
-| `private` (default) | allowed | allowed | **401** | allowed | **401** |
-| `public` | allowed | allowed | allowed | allowed | allowed |
-
-Checked on every HTTP request and WebSocket upgrade by the proxy handler itself (not the token middleware). In `--trust-proxy` mode, "owner" means `X-WSH-User` matches `ABOX_USER` or is `*`.
 
 ### Client Behavior
 
