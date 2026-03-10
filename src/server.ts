@@ -681,6 +681,7 @@ const { values } = parseArgs({
     'no-open':  { type: 'boolean',             default: false },
     'no-login': { type: 'boolean',             default: false },
     'trust-proxy': { type: 'boolean',          default: false },
+    'no-tls':   { type: 'boolean',             default: false },
     help:       { type: 'boolean', short: 'h', default: false },
     version:    { type: 'boolean', short: 'v', default: false },
     base:       { type: 'string', default: '/' },
@@ -717,6 +718,7 @@ if (values.help) {
   console.log('      --tagline <text>  Custom tagline below the title (default: Apps in the browser)');
   console.log('      --no-open      Do not open browser on start');
   console.log('      --no-login     Spawn non-login shells (default: login shell)');
+  console.log('      --no-tls       Serve plain HTTP instead of HTTPS (for use behind a TLS-terminating proxy)');
   console.log('      --trust-proxy  Disable loopback auth bypass (use behind a reverse proxy)');
   console.log('  -v, --version      Print version and exit');
   console.log('  -h, --help         Show this help message');
@@ -742,6 +744,7 @@ const PORT = parseInt(values.port!, 10);
 const CUSTOM_URL = values.url || null;
 const BIND_ADDR  = values.bind || null;
 const TRUST_PROXY = values['trust-proxy']!;
+const NO_TLS = values['no-tls']!;
 
 if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
   console.error(`Error: invalid port "${values.port}"`);
@@ -937,7 +940,7 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
 // --- Share URL base (used by API and startup output) ---
 
 const advertiseIP  = (BIND_ADDR && BIND_ADDR !== '0.0.0.0') ? BIND_ADDR : primaryLanIP;
-const networkBase  = CUSTOM_URL ?? (advertiseIP ? `https://${advertiseIP}:${PORT}` : null);
+const networkBase  = CUSTOM_URL ?? (advertiseIP ? `${NO_TLS ? 'http' : 'https'}://${advertiseIP}:${PORT}` : null);
 
 // --- Express app + server ---
 
@@ -1109,7 +1112,7 @@ router.use(express.static(path.join(__dirname, '..', 'public')));
 app.use(BASE, router);
 
 const localServer   = http.createServer(app);
-const networkServer = tls ? https.createServer({ key: tls.key, cert: tls.cert }, app) : null;
+const networkServer = (tls && !NO_TLS) ? https.createServer({ key: tls.key, cert: tls.cert }, app) : null;
 
 const wss = new WebSocketServer({ noServer: true });
 
@@ -1417,14 +1420,18 @@ function openBrowser(url: string): void {
 // port via protocol sniffing doesn't work because Node.js TLS reads from the native
 // libuv handle directly, bypassing any JS-layer unshift(). HTTPS-only is fine for the
 // Docker --network host use case where browsers access via the host's LAN IP over HTTPS.
-const httpsOnly   = BIND_ADDR === '0.0.0.0' && !!networkServer;
+// With --no-tls, always use plain HTTP (no networkServer), binding to 0.0.0.0 if requested.
+const httpsOnly   = !NO_TLS && BIND_ADDR === '0.0.0.0' && !!networkServer;
+const httpOnly    = NO_TLS && BIND_ADDR === '0.0.0.0';
 const networkBind = httpsOnly ? '0.0.0.0' : (BIND_ADDR ?? primaryLanIP);
 
-const localURL   = httpsOnly ? `https://localhost:${PORT}${BASE}` : `http://localhost:${PORT}${BASE}`;
-const networkURL = networkBase && token ? `${networkBase}${BASE}?token=${token}` : null;
+const localURL   = (httpsOnly ? `https` : `http`) + `://localhost:${PORT}${BASE}`;
+const networkURL = NO_TLS
+  ? (networkBase ? `${networkBase}${BASE}` : null)
+  : (networkBase && token ? `${networkBase}${BASE}?token=${token}` : null);
 
 let serversStarted = 0;
-const totalServers = httpsOnly ? 1 : (networkServer && networkBind ? 2 : 1);
+const totalServers = (httpsOnly || httpOnly) ? 1 : (networkServer && networkBind ? 2 : 1);
 
 function onListening(): void {
   if (++serversStarted < totalServers) return;
@@ -1432,7 +1439,7 @@ function onListening(): void {
   console.log('');
   console.log(`  Local:       ${localURL}`);
   if (networkURL) console.log(`  Network:     ${networkURL}`);
-  if (tls) console.log(`  Fingerprint: ${new crypto.X509Certificate(tls.cert).fingerprint256}`);
+  if (tls && !NO_TLS) console.log(`  Fingerprint: ${new crypto.X509Certificate(tls.cert).fingerprint256}`);
   console.log(`  Version:     v${version}`);
   console.log('');
 
@@ -1441,6 +1448,8 @@ function onListening(): void {
 
 if (httpsOnly) {
   networkServer!.listen(PORT, '0.0.0.0', onListening);
+} else if (httpOnly) {
+  localServer.listen(PORT, '0.0.0.0', onListening);
 } else {
   localServer.listen(PORT, '127.0.0.1', onListening);
   if (networkServer && networkBind) networkServer.listen(PORT, networkBind, onListening);

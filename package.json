@@ -1,6 +1,6 @@
 {
   "name": "xterm-web-terminal",
-  "version": "0.26.1",
+  "version": "0.27.0",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
