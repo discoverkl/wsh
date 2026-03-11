@@ -769,6 +769,7 @@ interface AppConfig {
   title?: string;
   icon?: string;
   description?: string;
+  hidden?: boolean;
   type?: 'pty' | 'web';
   timeout?: string;
   access?: 'public' | 'private';
@@ -804,8 +805,15 @@ function mergeApps(apps: Record<string, AppConfig>, parsed: Record<string, unkno
   // Support both wrapped { apps: { ... } } and bare { key: ... }
   const entries = (parsed.apps && typeof parsed.apps === 'object') ? parsed.apps : parsed;
   for (const [key, value] of Object.entries(entries as Record<string, unknown>)) {
-    const config = normalizeAppEntry(value);
-    if (config) apps[key] = config;
+    if (!value || typeof value !== 'object') continue;
+    if (apps[key]) {
+      // Field-level merge into existing app (enables partial overrides like hidden: true)
+      apps[key] = { ...apps[key], ...(value as Partial<AppConfig>) };
+    } else {
+      // New app — requires command
+      const config = normalizeAppEntry(value);
+      if (config) apps[key] = config;
+    }
   }
 }
 
@@ -979,15 +987,17 @@ router.get('/api/share', (req: express.Request, res: express.Response) => {
 
 router.get('/api/apps', (_req: express.Request, res: express.Response) => {
   const apps = loadApps();
-  const list = Object.entries(apps).map(([key, app]) => ({
-    key,
-    title: app.title ?? path.basename(app.command),
-    command: app.command,
-    icon: app.icon ?? null,
-    description: app.description ?? null,
-    type: app.type ?? 'pty',
-    access: app.access ?? null,
-  }));
+  const list = Object.entries(apps)
+    .filter(([, app]) => !app.hidden)
+    .map(([key, app]) => ({
+      key,
+      title: app.title ?? path.basename(app.command),
+      command: app.command,
+      icon: app.icon ?? null,
+      description: app.description ?? null,
+      type: app.type ?? 'pty',
+      access: app.access ?? null,
+    }));
   res.json({ apps: list });
 });
 
