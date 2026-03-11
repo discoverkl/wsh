@@ -65,63 +65,18 @@ if (process.argv[2] === 'version') {
     const template = `# wsh apps — each key becomes a launchable app.
 # Changes take effect on the next session (no restart needed).
 #
-# Config layers (each overrides the previous):
-#   1. bash (always available)
-#   2. /etc/wsh/apps.yaml
-#   3. ~/.wsh/apps.yaml (this file)
+# Layers (merged field-by-field for existing apps):
+#   1. bash (built-in)  2. /etc/wsh/apps.yaml  3. this file
 
-# ── TUI apps ─────────────────────────────────────────────
-# Terminal programs rendered via xterm.js.
-#
-# Fields:
-#   command       (required) executable name or path
-#   args          argument list
-#   title         display name shown in the UI
-#   description   short text shown on the catalog page
-#   icon          icon ID (see "Icons" section below)
-#   cwd           working directory
-#   env           extra environment variables
+# ── TUI app ──────────────────────────────────────────────
 
 python3:
   command: python3
 
-node:
-  command: node
-  args: [--inspect]
-  title: Node.js REPL
+# ── Web app (type: web) ──────────────────────────────────
+# wsh assigns $WSH_PORT, $WSH_SESSION, $WSH_BASE_URL and
+# reverse-proxies traffic to your app.
 
-htop:
-  command: htop
-  title: Process Viewer
-
-# ── Web apps ─────────────────────────────────────────────
-# HTTP servers displayed in an iframe. wsh assigns a port
-# via $WSH_PORT and reverse-proxies all traffic to your app.
-#
-# How it works:
-#   1. wsh starts your command with $WSH_PORT set
-#   2. Your app listens on that port
-#   3. wsh polls healthCheck until the app is ready
-#   4. The app appears in an iframe in the browser
-#
-# Extra fields for web apps:
-#   type: web     (required) marks this as a web app
-#   healthCheck   app-relative path to poll for readiness (default: /)
-#   startupTimeout  max wait for healthCheck (default: 30s)
-#   timeout       idle session lifetime after disconnect (default: 1h)
-#   access        private (default) or public — controls LAN visibility
-#   stripPrefix   true to strip the /_p/<id>/ URL prefix (default: false)
-#
-# Environment variables injected into web app processes:
-#   $WSH_PORT      port your app must listen on
-#   $WSH_SESSION   session ID
-#   $WSH_BASE_URL  reverse-proxy prefix (e.g. /_p/abc123/)
-#
-# Most apps need to know their base URL. Pass $WSH_BASE_URL
-# to the app's base-url/prefix option. For simple servers that
-# can't configure a base URL, set stripPrefix: true instead.
-
-# Jupyter — uses $WSH_BASE_URL for correct URL routing:
 # jupyter:
 #   type: web
 #   command: jupyter
@@ -130,46 +85,13 @@ htop:
 #   icon: python
 #   healthCheck: /api
 #   startupTimeout: 60s
-#   timeout: 2h
 
-# Simple file server — uses stripPrefix since it can't set a base URL:
-# file-browser:
-#   type: web
-#   command: python3
-#   args: [-m, http.server, $WSH_PORT]
-#   title: File Browser
-#   icon: network
-#   stripPrefix: true
-#   access: public
-
-# code-server (VS Code in browser):
-# code:
-#   type: web
-#   command: code-server
-#   args: [--port, $WSH_PORT, --auth, none]
-#   title: VS Code
-#   icon: terminal
-#   healthCheck: /healthz
-#   startupTimeout: 30s
-
-# ── Icons ────────────────────────────────────────────────
-# wsh auto-picks an icon based on the app key or command name.
-# To override, set the icon field to one of these built-in IDs:
+# ── Visibility ───────────────────────────────────────────
+# hidden: true keeps an app launchable by URL/CLI but hides
+# it from the catalog page. Useful as a partial override:
 #
-#   terminal   — shells (bash, zsh, sh, fish)
-#   python     — python, python3
-#   node       — node, nodejs
-#   vim        — vim, nvim
-#   monitor    — htop, btop, top
-#   docker     — docker
-#   git        — git
-#   ruby       — ruby, irb
-#   ai         — claude, ollama, aider
-#   database   — mysql, psql, redis-cli, sqlite3
-#   network    — ssh, curl, wget
-#   default    — fallback for unrecognized apps
-#
-# Example: icon: python
+# claude:
+#   hidden: false   # unhide a system app without redefining it
 `;
     fs.mkdirSync(path.dirname(appsPath), { recursive: true });
     fs.writeFileSync(appsPath, template);
