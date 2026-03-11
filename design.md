@@ -174,13 +174,15 @@ The HTML uses `{{title}}` and `{{tagline}}` placeholders, replaced server-side a
 
 ### Configuration
 
-Apps load from three layers (each overrides the previous):
+Apps load from three layers (each merges into the previous):
 
 1. **Default**: `bash` (always available)
 2. **System**: `/etc/wsh/apps.yaml`
 3. **User**: `~/.wsh/apps.yaml`
 
 Each layer falls back to `.json` if no `.yaml` is found.
+
+For existing apps, later layers do **field-level merging** — only the specified fields are overridden, unspecified fields are inherited. New apps require at least a `command` field.
 
 ```yaml
 python3:
@@ -195,9 +197,17 @@ node:
     NODE_ENV: development
 ```
 
-**Common fields**: `command` (required), `args`, `title`, `icon`, `description`, `env`, `cwd`.
+**Common fields**: `command` (required for new apps), `args`, `title`, `icon`, `description`, `env`, `cwd`, `hidden`.
 
 **Web app fields**: `type: web`, `access: public|private` (default `private`), `timeout: '1h'` (supports `ms`, `s`, `m`, `h`, `d`), `stripPrefix: true|false` (default `false`), `healthCheck: '/ready'` (default `/`), `startupTimeout: '60s'` (default `30s`).
+
+**Visibility**: `hidden: true` excludes an app from the catalog page (`GET {BASE}api/apps`) but it remains launchable via direct URL or CLI. Users can override system visibility in `~/.wsh/apps.yaml` with a partial entry:
+
+```yaml
+# unhide a system app without redefining its full config
+claude:
+  hidden: false
+```
 
 ### Session Creation
 
@@ -208,7 +218,7 @@ node:
 
 ### API
 
-- `GET {BASE}api/apps` — list all apps: `{ apps: [{ key, title, command, icon, description, type, access }] }`
+- `GET {BASE}api/apps` — list visible apps (excludes `hidden: true`): `{ apps: [{ key, title, command, icon, description, type, access }] }`
 - `GET {BASE}api/sessions` — list active sessions (includes `id`, `title`, `app`, `appType`, `pinned`, `peers`, `hasWriter`, `createdAt`, `lastInput`, `lastOutput`, `pid`, `scrollbackSize`, `process`, `port`, `ready`)
 - `DELETE {BASE}api/sessions/:id` — kill a session
 - `GET {BASE}api/share?session=<id>` — get writer token for sharing
