@@ -110,8 +110,8 @@ python3:
       try { parsed = JSON.parse(fs.readFileSync(path.join(dir, 'apps.json'), 'utf8')); } catch {}
     }
     if (parsed && typeof parsed === 'object') {
-      const entries = (parsed.apps && typeof parsed.apps === 'object') ? parsed.apps : parsed;
-      for (const [key, value] of Object.entries(entries as Record<string, unknown>)) {
+      for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+        if (key.startsWith('_')) continue;
         if (value && typeof value === 'object' && typeof (value as any).command === 'string')
           apps[key] = value as any;
       }
@@ -143,16 +143,20 @@ python3:
     subArgs.splice(portIdx, 2);
   }
 
-  const appKey = subArgs.find(a => !a.startsWith('-')) || 'bash';
+  const positionalArgs = subArgs.filter(a => !a.startsWith('-'));
+  const appKey = positionalArgs[0] || 'bash';
+  const input = positionalArgs.slice(1).join(' ');
   let basePath = process.env.WSH_BASE_PATH || '/';
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
   if (!basePath.endsWith('/')) basePath += '/';
   const aboxUser = process.env.ABOX_USER;
   const userHeader = aboxUser ? `-H 'X-WSH-User: ${aboxUser}'` : '';
   const url = `http://127.0.0.1:${port}${basePath}api/sessions`;
+  const payload: Record<string, string> = { app: appKey };
+  if (input) payload.input = input;
   try {
     const body = execSync(
-      `curl -sS ${userHeader} -X POST -H 'Content-Type: application/json' -d '${JSON.stringify({ app: appKey })}' -w '\\n%{http_code}' '${url}'`,
+      `curl -sS ${userHeader} -X POST -H 'Content-Type: application/json' -d '${JSON.stringify(payload)}' -w '\\n%{http_code}' '${url}'`,
       { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
     );
     const lines = body.trimEnd().split('\n');
@@ -398,7 +402,17 @@ function expandHome(p: string): string {
 }
 
 function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session {
-  const ptyProcess = pty.spawn(appConfig.command, appConfig.args ?? [], {
+  let cmd: string;
+  let args: string[];
+  if (appConfig.skill) {
+    const cmdLine = [appConfig.command, ...(appConfig.args ?? [])].join(' ');
+    cmd = process.env.SHELL || '/bin/sh';
+    args = ['-c', cmdLine];
+  } else {
+    cmd = appConfig.command;
+    args = appConfig.args ?? [];
+  }
+  const ptyProcess = pty.spawn(cmd, args, {
     name: 'xterm-256color',
     cols: 80,
     rows: 24,
@@ -692,6 +706,7 @@ interface AppConfig {
   icon?: string;
   description?: string;
   hidden?: boolean;
+  skill?: string;
   type?: 'pty' | 'web';
   timeout?: string;
   access?: 'public' | 'private';
@@ -724,10 +739,8 @@ function normalizeAppEntry(value: unknown): AppConfig | null {
 }
 
 function mergeApps(apps: Record<string, AppConfig>, parsed: Record<string, unknown>): void {
-  // Support both wrapped { apps: { ... } } and bare { key: ... }
-  const entries = (parsed.apps && typeof parsed.apps === 'object') ? parsed.apps : parsed;
-  for (const [key, value] of Object.entries(entries as Record<string, unknown>)) {
-    if (!value || typeof value !== 'object') continue;
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (key.startsWith('_') || !value || typeof value !== 'object') continue;
     if (apps[key]) {
       // Field-level merge into existing app (enables partial overrides like hidden: true)
       apps[key] = { ...apps[key], ...(value as Partial<AppConfig>) };
@@ -739,14 +752,35 @@ function mergeApps(apps: Record<string, AppConfig>, parsed: Record<string, unkno
   }
 }
 
+const SKILL_DEFAULTS: Partial<AppConfig> = {
+  command: 'claude "/$SKILL $INPUT"',
+};
+
+function extractSkillDefaults(...configs: (Record<string, unknown> | null)[]): Partial<AppConfig> {
+  let defaults: Partial<AppConfig> = { ...SKILL_DEFAULTS };
+  for (const config of configs) {
+    const raw = config?._skills;
+    if (raw && typeof raw === 'object') defaults = { ...defaults, ...(raw as Partial<AppConfig>) };
+  }
+  return defaults;
+}
+
 function loadApps(): Record<string, AppConfig> {
   const apps = { ...DEFAULT_APPS };
-  // Layer 1: system config (/etc/wsh/apps.yaml)
   const system = loadConfigFile(SYSTEM_CONFIG_DIR);
-  if (system && typeof system === 'object') mergeApps(apps, system);
-  // Layer 2: user config (~/.wsh/apps.yaml) — overrides system
   const user = loadConfigFile(path.join(os.homedir(), '.wsh'));
+  // Merge app entries (keys starting with _ are reserved and skipped)
+  if (system && typeof system === 'object') mergeApps(apps, system);
   if (user && typeof user === 'object') mergeApps(apps, user);
+  // Apply _skills defaults to skill apps
+  const skillDefaults = extractSkillDefaults(system, user);
+  for (const app of Object.values(apps)) {
+    if (app.skill) {
+      for (const [k, v] of Object.entries(skillDefaults)) {
+        if ((app as any)[k] === undefined) (app as any)[k] = v;
+      }
+    }
+  }
   return apps;
 }
 
@@ -917,6 +951,7 @@ router.get('/api/apps', (_req: express.Request, res: express.Response) => {
       command: app.command,
       icon: app.icon ?? null,
       description: app.description ?? null,
+      skill: app.skill ?? null,
       type: app.type ?? 'pty',
       access: app.access ?? null,
     }));
@@ -1011,22 +1046,31 @@ router.use(express.json());
 
 router.post('/api/sessions', async (req: express.Request, res: express.Response) => {
   const appKey = (req.body?.app as string) || 'bash';
+  const input = (req.body?.input as string) || '';
   const apps = loadApps();
   const appConfig = apps[appKey];
   if (!appConfig) { res.status(400).json({ error: `Unknown app: "${appKey}"` }); return; }
 
+  let effectiveConfig = appConfig;
+  if (appConfig.skill) {
+    effectiveConfig = {
+      ...appConfig,
+      env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input },
+    };
+  }
+
   const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
 
-  if (appConfig.type === 'web') {
+  if (effectiveConfig.type === 'web') {
     try {
-      await spawnWebSession(id, appKey, appConfig);
+      await spawnWebSession(id, appKey, effectiveConfig);
     } catch (err) {
       console.error('Failed to spawn web app:', err);
       res.status(500).json({ error: 'Failed to spawn session' }); return;
     }
   } else {
     try {
-      const session = spawnSession(id, appKey, appConfig);
+      const session = spawnSession(id, appKey, effectiveConfig);
       session.pinned = true;
     } catch (err) {
       console.error('Failed to spawn PTY:', err);
@@ -1222,10 +1266,18 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     const requestedApp = url.searchParams.get('app') || 'bash';
     const appKey = apps[requestedApp] ? requestedApp : 'bash';
     const appConfig = apps[appKey];
-    if (appConfig.type === 'web') {
+    let effectiveConfig = appConfig;
+    if (appConfig.skill) {
+      const input = url.searchParams.get('input') || '';
+      effectiveConfig = {
+        ...appConfig,
+        env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input },
+      };
+    }
+    if (effectiveConfig.type === 'web') {
       try {
         ws.send(JSON.stringify({ type: 'status', status: 'starting' }));
-        session = await spawnWebSession(id, appKey, appConfig);
+        session = await spawnWebSession(id, appKey, effectiveConfig);
       } catch (err) {
         console.error('Failed to spawn web app:', err);
         ws.close(1011, 'Failed to spawn web app');
@@ -1233,7 +1285,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       }
     } else {
       try {
-        session = spawnSession(id, appKey, appConfig);
+        session = spawnSession(id, appKey, effectiveConfig);
       } catch (err) {
         console.error('Failed to spawn PTY:', err);
         ws.close(1011, 'Failed to spawn PTY');
