@@ -182,7 +182,7 @@ Apps load from three layers (each merges into the previous):
 
 Each layer falls back to `.json` if no `.yaml` is found.
 
-For existing apps, later layers do **field-level merging** — only the specified fields are overridden, unspecified fields are inherited. New apps require at least a `command` field.
+For existing apps, later layers do **field-level merging** — only the specified fields are overridden, unspecified fields are inherited. New apps require at least a `command` field. Keys starting with `_` are reserved (e.g. `_skills`) and never treated as apps.
 
 ```yaml
 python3:
@@ -199,6 +199,8 @@ node:
 
 **Common fields**: `command` (required for new apps), `args`, `title`, `icon`, `description`, `env`, `cwd`, `hidden`.
 
+**Skill fields**: `skill: <name>` — marks the app as a skill (an AI agent automation task). See [Skills](#skills) below.
+
 **Web app fields**: `type: web`, `access: public|private` (default `private`), `timeout: '1h'` (supports `ms`, `s`, `m`, `h`, `d`), `stripPrefix: true|false` (default `false`), `healthCheck: '/ready'` (default `/`), `startupTimeout: '60s'` (default `30s`).
 
 **Visibility**: `hidden: true` excludes an app from the catalog page (`GET {BASE}api/apps`) but it remains launchable via direct URL or CLI. Users can override system visibility in `~/.wsh/apps.yaml` with a partial entry:
@@ -214,11 +216,11 @@ claude:
 | Method | Description |
 |---|---|
 | `GET {BASE}{appName}` | Serves `index.html`; client generates ID, connects via WS with `?app=appName` |
-| `POST {BASE}api/sessions` | Body `{ "app": "appName" }` — spawns a pinned session, returns `{ id, url }` |
+| `POST {BASE}api/sessions` | Body `{ "app": "appName", "input": "..." }` — spawns a pinned session, returns `{ id, url }`. The `input` field is optional; used by skill apps. |
 
 ### API
 
-- `GET {BASE}api/apps` — list visible apps (excludes `hidden: true`): `{ apps: [{ key, title, command, icon, description, type, access }] }`
+- `GET {BASE}api/apps` — list visible apps (excludes `hidden: true`): `{ apps: [{ key, title, command, icon, description, skill, type, access }] }`
 - `GET {BASE}api/sessions` — list active sessions (includes `id`, `title`, `app`, `appType`, `pinned`, `peers`, `hasWriter`, `createdAt`, `lastInput`, `lastOutput`, `pid`, `scrollbackSize`, `process`, `port`, `ready`)
 - `DELETE {BASE}api/sessions/:id` — kill a session
 - `GET {BASE}api/share?session=<id>` — get writer token for sharing
@@ -227,7 +229,7 @@ claude:
 
 - `wsh apps` — list available apps
 - `wsh apps init` — create starter `~/.wsh/apps.yaml`
-- `wsh new [app]` — create a session via API
+- `wsh new [app] [input...]` — create a session via API (remaining args become skill input)
 - `wsh ls [-l] [--json]` — list active sessions
 - `wsh kill <id>` — close a session
 
@@ -274,6 +276,60 @@ When the server sends `appType: 'web'` in the role message:
 ### Last-Session Cookie
 
 On web session creation, the server sends a `cookie` message. The client sets `wsh_last_{appKey}` so revisiting the same app URL reconnects to the existing session instead of creating a new one.
+
+## Skills
+
+Skills are AI agent automation tasks — folders with a `SKILL.md` file, executed by agent CLIs like Claude Code or Trae. In wsh, a skill is just an app with a `skill` field and a command template that references `$SKILL` and `$INPUT` env vars.
+
+### Configuration
+
+The `_skills` reserved key provides shared defaults for all skill apps. Per-skill fields override these defaults.
+
+```yaml
+_skills:
+  command: traecli "/$SKILL $INPUT"   # default: claude "/$SKILL $INPUT"
+  cwd: /data/workspace                # default: $HOME
+
+deploy:
+  skill: deploy
+  title: Deploy App
+  icon: rocket
+  description: AI-powered deployment
+```
+
+**`_skills` fields**:
+- `command` — agent CLI command template (default: `claude "/$SKILL $INPUT"`)
+- `cwd` — working directory for all skills; the agent CLI discovers skills by walking up from this directory (default: `$HOME`)
+- Any other `AppConfig` field — applied as fallback to skill apps
+
+Keys starting with `_` are reserved and never treated as apps.
+
+### How It Works
+
+1. When a skill app is launched, the server injects `SKILL` and `INPUT` as environment variables (from the app's `skill` field and the user-provided input text, respectively)
+2. For PTY apps, the command is wrapped in a shell (`$SHELL -c "command args..."`) so env var references in the command template get expanded
+3. For web apps, `shell: true` is already used, so env vars expand naturally
+
+### Catalog UI
+
+Skills get their own section at the top of the catalog, above regular apps. Each skill card has:
+- Purple/violet accent border (`#a78bfa`) to visually distinguish from regular apps
+- Integrated text input field with a "Run" button — no modal needed
+- Same session count badges as regular app cards
+
+Section visibility rules:
+- No skills → skills section hidden, no "Apps" label shown
+- Has skills → both sections shown with labels ("Skills" / "Apps")
+- No apps → apps section hidden
+
+### Launching
+
+| Method | Input source |
+|---|---|
+| Catalog UI | Text field in skill card, submitted via form |
+| `POST {BASE}api/sessions` | `{ "app": "deploy", "input": "update staging" }` |
+| WebSocket | `?app=deploy&input=update+staging` query params |
+| CLI | `wsh new deploy "update staging"` (remaining positional args joined) |
 
 ## Window Modes
 

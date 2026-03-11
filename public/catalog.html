@@ -65,6 +65,7 @@ header {
   gap: 16px;
   padding-bottom: 64px;
 }
+.grid[hidden] { display: none; }
 
 .card {
   display: block;
@@ -139,6 +140,7 @@ header {
   align-items: center;
   gap: 4px;
   font-size: 11px;
+  white-space: nowrap;
   color: var(--text-tertiary);
   font-weight: 500;
   opacity: 0;
@@ -235,6 +237,101 @@ header {
   100% { background-position: -200% 0; }
 }
 
+/* Section labels */
+.section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-tertiary);
+  margin-bottom: 16px;
+  padding-left: 4px;
+}
+
+/* Skills grid — wider cards than apps */
+.skills-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+  padding-bottom: 40px;
+}
+
+/* Skill card — purple-tinted border, no link behavior */
+.skill-card {
+  background: var(--bg-card);
+  border: 1px solid rgba(167, 139, 250, 0.15);
+  border-radius: 12px;
+  padding: 20px 24px;
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+  opacity: 0;
+  transform: translateY(8px);
+}
+.skill-card.visible {
+  opacity: 1;
+  transform: translateY(0);
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s,
+              opacity 0.35s ease-out, transform 0.35s ease-out;
+}
+.skill-card:hover {
+  border-color: rgba(167, 139, 250, 0.35);
+  box-shadow: 0 0 30px rgba(167, 139, 250, 0.06);
+}
+
+/* Skill card header — icon + title + desc */
+.skill-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.skill-info { min-width: 0; }
+.skill-info .card-title { font-size: 16px; }
+.skill-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* Inline input form */
+.skill-form {
+  display: flex;
+  gap: 8px;
+}
+.skill-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 14px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.skill-input:focus {
+  border-color: rgba(167, 139, 250, 0.5);
+}
+.skill-input::placeholder {
+  color: var(--text-tertiary);
+}
+.skill-submit {
+  background: rgba(167, 139, 250, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: 8px;
+  color: #a78bfa;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 9px 18px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+  white-space: nowrap;
+}
+.skill-submit:hover {
+  background: rgba(167, 139, 250, 0.22);
+  border-color: rgba(167, 139, 250, 0.45);
+}
+
 /* Error / Empty */
 .message {
   text-align: center;
@@ -248,6 +345,7 @@ header {
 @media (max-width: 640px) {
   header { padding: 48px 0 32px; }
   .grid { gap: 12px; }
+  .skills-grid { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -257,7 +355,15 @@ header {
     <div class="wordmark">{{title}}</div>
     <div class="tagline">{{tagline}}</div>
   </header>
-  <div id="content" class="grid">
+  <div id="skills-section" hidden>
+    <div class="section-label">Skills</div>
+    <div id="skills-content" class="skills-grid"></div>
+  </div>
+  <div id="apps-section" hidden>
+    <div class="section-label">Apps</div>
+    <div id="apps-content" class="grid"></div>
+  </div>
+  <div id="loading-content" class="grid">
     <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-line title"></div><div class="skeleton-line desc"></div><div class="skeleton-line desc2"></div></div>
     <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-line title"></div><div class="skeleton-line desc"></div><div class="skeleton-line desc2"></div></div>
     <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-line title"></div><div class="skeleton-line desc"></div><div class="skeleton-line desc2"></div></div>
@@ -361,13 +467,37 @@ header {
     return app.command;
   }
 
-  function renderCards(apps) {
-    var content = document.getElementById('content');
-    if (apps.length === 0) {
-      content.className = '';
-      content.innerHTML = '<div class="message">No apps configured</div>';
-      return;
-    }
+  function renderSkills(skills) {
+    var section = document.getElementById('skills-section');
+    var content = document.getElementById('skills-content');
+    content.innerHTML = '';
+    skills.forEach(function(app, i) {
+      var iconId = resolveIconId(app);
+      var color = iconColors[iconId] || iconColors.default;
+      var div = document.createElement('div');
+      div.className = 'skill-card';
+      div.dataset.app = app.key;
+      div.innerHTML =
+        '<div class="skill-header">' +
+          '<div class="card-icon" style="color:#a78bfa">' + icons[iconId] + '</div>' +
+          '<div class="skill-info">' +
+            '<span class="card-title">' + escapeHtml(app.title) + '</span>' +
+            '<div class="skill-desc">' + escapeHtml(resolveDescription(app)) + '</div>' +
+          '</div>' +
+          '<span class="card-sessions" data-app="' + escapeAttr(app.key) + '"></span>' +
+        '</div>' +
+        '<form class="skill-form" data-app="' + escapeAttr(app.key) + '">' +
+          '<input type="text" class="skill-input" placeholder="Describe your task..." />' +
+          '<button type="submit" class="skill-submit">Run</button>' +
+        '</form>';
+      content.appendChild(div);
+      setTimeout(function() { div.classList.add('visible'); }, 30 * i);
+    });
+    section.hidden = false;
+  }
+
+  function renderApps(apps) {
+    var content = document.getElementById('apps-content');
     content.innerHTML = '';
     apps.forEach(function(app, i) {
       var iconId = resolveIconId(app);
@@ -394,6 +524,27 @@ header {
       content.appendChild(a);
       setTimeout(function() { a.classList.add('visible'); }, 30 * i);
     });
+    document.getElementById('apps-section').hidden = false;
+  }
+
+  function renderCards(allApps) {
+    document.getElementById('loading-content').hidden = true;
+    if (allApps.length === 0) {
+      var appsSection = document.getElementById('apps-section');
+      appsSection.hidden = false;
+      document.getElementById('apps-content').innerHTML = '<div class="message">No apps configured</div>';
+      appsSection.querySelector('.section-label').style.display = 'none';
+      return;
+    }
+    var skills = allApps.filter(function(a) { return !!a.skill; });
+    var apps = allApps.filter(function(a) { return !a.skill; });
+    if (skills.length) renderSkills(skills);
+    if (apps.length) renderApps(apps);
+    // Hide section labels when only one type exists
+    if (!skills.length) {
+      var label = document.querySelector('#apps-section .section-label');
+      if (label) label.style.display = 'none';
+    }
 
     // Async: fetch active sessions and update badges
     fetchSessions();
@@ -436,9 +587,11 @@ header {
   }
 
   function showError(msg) {
-    var content = document.getElementById('content');
-    content.className = '';
-    content.innerHTML = '<div class="message error">' + escapeHtml(msg) + '</div>';
+    document.getElementById('loading-content').hidden = true;
+    var appsSection = document.getElementById('apps-section');
+    appsSection.hidden = false;
+    appsSection.querySelector('.section-label').style.display = 'none';
+    document.getElementById('apps-content').innerHTML = '<div class="message error">' + escapeHtml(msg) + '</div>';
   }
 
   fetch('./api/apps')
@@ -453,6 +606,39 @@ header {
     .catch(function(err) {
       showError(err.message);
     });
+
+  document.getElementById('skills-content').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var form = e.target;
+    if (!form.classList.contains('skill-form')) return;
+    var appKey = form.dataset.app;
+    var input = form.querySelector('.skill-input').value.trim();
+    var btn = form.querySelector('.skill-submit');
+    btn.textContent = 'Starting...';
+    btn.disabled = true;
+
+    fetch('./api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app: appKey, input: input })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      btn.textContent = 'Run';
+      btn.disabled = false;
+      form.querySelector('.skill-input').value = '';
+      if (data.url) {
+        try { var u = new URL(data.url); window.open(u.pathname + u.hash, '_blank'); }
+        catch(e) { window.open(data.url, '_blank'); }
+      }
+      else if (data.error) showError(data.error);
+    })
+    .catch(function(err) {
+      btn.textContent = 'Run';
+      btn.disabled = false;
+      showError('Failed to launch: ' + err.message);
+    });
+  });
 })();
 </script>
 </body>
