@@ -733,7 +733,7 @@ function loadConfigFile(dir: string): Record<string, unknown> | null {
 }
 
 function normalizeAppEntry(value: unknown): AppConfig | null {
-  if (value && typeof value === 'object' && typeof (value as any).command === 'string')
+  if (value && typeof value === 'object' && (typeof (value as any).command === 'string' || typeof (value as any).skill === 'string'))
     return value as AppConfig;
   return null;
 }
