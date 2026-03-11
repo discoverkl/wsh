@@ -225,10 +225,12 @@ htop:
   let basePath = process.env.WSH_BASE_PATH || '/';
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
   if (!basePath.endsWith('/')) basePath += '/';
+  const aboxUser = process.env.ABOX_USER;
+  const userHeader = aboxUser ? `-H 'X-WSH-User: ${aboxUser}'` : '';
   const url = `http://127.0.0.1:${port}${basePath}api/sessions`;
   try {
     const body = execSync(
-      `curl -sS -X POST -H 'Content-Type: application/json' -d '${JSON.stringify({ app: appKey })}' -w '\\n%{http_code}' '${url}'`,
+      `curl -sS ${userHeader} -X POST -H 'Content-Type: application/json' -d '${JSON.stringify({ app: appKey })}' -w '\\n%{http_code}' '${url}'`,
       { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
     );
     const lines = body.trimEnd().split('\n');
@@ -266,13 +268,19 @@ htop:
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
   if (!basePath.endsWith('/')) basePath += '/';
 
+  // When running inside an abox container with --trust-proxy, loopback auth is
+  // disabled.  The CLI must identify itself via X-WSH-User so the server grants
+  // owner access (anyone with shell access in the container IS the owner).
+  const aboxUser = process.env.ABOX_USER;
+  const userHeader = aboxUser ? `-H 'X-WSH-User: ${aboxUser}'` : '';
+
   function curlRequest(method: string, urlPath: string): { status: number; body: string } {
     // Try HTTP first; if it fails (e.g. httpsOnly mode), retry with HTTPS.
     for (const scheme of ['http', 'https'] as const) {
       const url = `${scheme}://127.0.0.1:${port}${urlPath}`;
       const flags = scheme === 'https' ? '-sSk' : '-sS';
       try {
-        const body = execSync(`curl ${flags} -X ${method} -w '\\n%{http_code}' '${url}'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+        const body = execSync(`curl ${flags} ${userHeader} -X ${method} -w '\\n%{http_code}' '${url}'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
         const lines = body.trimEnd().split('\n');
         const httpCode = parseInt(lines.pop()!, 10);
         return { status: httpCode, body: lines.join('\n') };
