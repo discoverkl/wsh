@@ -99,33 +99,49 @@ python3:
     process.exit(0);
   }
 
-  const apps: Record<string, { command: string; args?: string[]; title?: string }> = {
+  const apps: Record<string, any> = {
     bash: { command: '/bin/bash', title: 'bash' },
   };
   const systemDir = '/etc/wsh';
   const userDir = path.join(os.homedir(), '.wsh');
+  const configs: any[] = [];
   function loadAndMerge(dir: string) {
     let parsed: any = null;
     try { parsed = YAML.parse(fs.readFileSync(path.join(dir, 'apps.yaml'), 'utf8')); } catch {
       try { parsed = JSON.parse(fs.readFileSync(path.join(dir, 'apps.json'), 'utf8')); } catch {}
     }
     if (parsed && typeof parsed === 'object') {
+      configs.push(parsed);
       for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
         if (key.startsWith('_')) continue;
-        if (value && typeof value === 'object' && typeof (value as any).command === 'string')
-          apps[key] = value as any;
+        if (value && typeof value === 'object' && (typeof (value as any).command === 'string' || typeof (value as any).skill === 'string'))
+          apps[key] = apps[key] ? { ...apps[key], ...value as any } : value as any;
       }
     }
   }
   loadAndMerge(systemDir);
   loadAndMerge(userDir);
+  // Apply _skills defaults to skill apps (same logic as server)
+  let skillDefaults: any = { command: 'claude "/$SKILL $INPUT"' };
+  for (const config of configs) {
+    const raw = config?._skills;
+    if (raw && typeof raw === 'object') skillDefaults = { ...skillDefaults, ...raw };
+  }
+  for (const app of Object.values(apps)) {
+    if (app.skill) {
+      for (const [k, v] of Object.entries(skillDefaults)) {
+        if (app[k] === undefined) app[k] = v;
+      }
+    }
+  }
   console.log('Available apps:');
-  for (const [key, app] of Object.entries(apps)) {
+  for (const [key, app] of Object.entries(apps) as [string, any][]) {
     const title = app.title ?? path.basename(app.command);
     const args = app.args?.length ? ' ' + app.args.join(' ') : '';
     const tags = [];
-    if ((app as any).type === 'web') tags.push('web');
-    if ((app as any).access === 'public') tags.push('public');
+    if (app.type === 'web') tags.push('web');
+    if (app.access === 'public') tags.push('public');
+    if (app.skill) tags.push('skill');
     const tagStr = tags.length ? ' [' + tags.join(', ') + ']' : '';
     console.log(`  ${key}  ${title}  (${app.command}${args})${tagStr}`);
   }
