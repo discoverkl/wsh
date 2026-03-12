@@ -199,6 +199,61 @@ node:
 
 **Common fields**: `command` (required for new apps), `args`, `title`, `icon`, `description`, `env`, `cwd`, `hidden`.
 
+**Available icons** (50):
+
+| Icon | Description | Color |
+|---|---|---|
+| `terminal` | Command prompt with cursor | green |
+| `python` | Python logo (intertwined snakes) | yellow |
+| `node` | Node.js hexagon | green |
+| `vim` | Triangle with exclamation dot | green |
+| `monitor` | Desktop screen on stand | blue |
+| `docker` | Container whale with boxes | blue |
+| `git` | Branch graph with circles | orange |
+| `ruby` | Gem polygon facets | red |
+| `ai` | Robot face with dot eyes | purple |
+| `database` | Cylinder stack (three tiers) | cyan |
+| `network` | Globe with meridians | blue |
+| `rocket` | Rocket ship launching | orange |
+| `cloud` | Puffy cloud outline | sky blue |
+| `lock` | Closed padlock | amber |
+| `mail` | Envelope with flap | pink |
+| `calendar` | Calendar page with date pins | violet |
+| `music` | Pair of linked music notes | pink |
+| `camera` | Camera body with lens circle | teal |
+| `book` | Closed book with spine | purple |
+| `pen` | Pencil writing on a line | orange |
+| `chart` | Three-bar vertical bar chart | emerald |
+| `folder` | Folder with tab | yellow |
+| `clock` | Circle clock with hour hand | indigo |
+| `heart` | Heart shape outline | red |
+| `star` | Five-pointed star | yellow |
+| `lightning` | Zigzag lightning bolt | amber |
+| `fire` | Flame with inner tongue | red |
+| `compass` | Circle with diamond pointer | teal |
+| `map` | Folded tri-panel map | emerald |
+| `phone` | Telephone handset | green |
+| `gamepad` | Game controller with d-pad and buttons | violet |
+| `coffee` | Coffee mug with steam lines | brown |
+| `sun` | Sun circle with radiating rays | amber |
+| `moon` | Crescent moon | indigo |
+| `key` | Skeleton key with teeth | orange |
+| `shield` | Pointed shield crest | green |
+| `bug` | Beetle with antennae and legs | red |
+| `wrench` | Angled wrench tool | gray |
+| `paint` | Color palette with paint dots | pink |
+| `search` | Magnifying glass | blue |
+| `download` | Downward arrow into tray | blue |
+| `speaker` | Speaker cone with sound waves | violet |
+| `printer` | Printer with paper tray | gray |
+| `battery` | Battery cell with terminal | green |
+| `wifi` | Wireless signal arcs | blue |
+| `cpu` | Chip with pin grid | cyan |
+| `package` | 3D box with ribbon seam | orange |
+| `scissors` | Open scissors blades | red |
+| `anchor` | Ship anchor with crossbar | indigo |
+| `default` | Document with text lines | gray |
+
 **Skill fields**: `skill: <name>` — marks the app as a skill (an AI agent automation task). See [Skills](#skills) below.
 
 **Web app fields**: `type: web`, `access: public|private` (default `private`), `timeout: '1h'` (supports `ms`, `s`, `m`, `h`, `d`), `stripPrefix: true|false` (default `false`), `healthCheck: '/ready'` (default `/`), `startupTimeout: '60s'` (default `30s`).
