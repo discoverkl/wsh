@@ -116,8 +116,13 @@ document.getElementById('new-session')!.addEventListener('click', () => {
   }
 });
 
+let userRequestedClose = false;
 document.querySelector('.dot.close')!.addEventListener('click', () => {
-  if (sessionDead) return;
+  if (sessionDead) {
+    window.close();
+    return;
+  }
+  userRequestedClose = true;
   if (appType === 'web') {
     const iframe = document.getElementById('web-frame') as HTMLIFrameElement;
     iframe.src = 'about:blank';
@@ -255,10 +260,14 @@ function connect(): void {
       roleBadge.setAttribute('hidden', '');
       shareBtn.setAttribute('hidden', '');
       document.getElementById('clear-btn')!.setAttribute('hidden', '');
-      document.querySelector('.dot.close')!.classList.add('disabled');
+      // Keep close button active so user can close the tab
     }
 
     if (event.code === 1000 && (event.reason === 'PTY process exited' || event.reason === 'Process exited')) {
+      if (userRequestedClose) {
+        window.close();
+        // window.close() may be blocked if tab wasn't opened via script — fall through
+      }
       history.replaceState(null, '', location.pathname);
       if (appType === 'web') {
         document.getElementById('web-container')!.setAttribute('hidden', '');
