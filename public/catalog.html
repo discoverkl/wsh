@@ -11,23 +11,23 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg-page: #0a0a0f;
-  --bg-card: #141419;
-  --bg-card-hover: #1a1a22;
-  --border: #23232e;
-  --border-hover: #33334a;
-  --text-primary: #ececf1;
-  --text-secondary: #8e8ea0;
-  --text-tertiary: #565669;
+  --bg-page: #1a1a22;
+  --bg-card: #242430;
+  --bg-card-hover: #2c2c3a;
+  --border: #333342;
+  --border-hover: #44445a;
+  --text-primary: #ededf2;
+  --text-secondary: #9c9cb2;
+  --text-tertiary: #6a6a80;
   --accent: #6366f1;
-  --icon-bg: #1e1e2a;
-  --icon-color: #a5a5ba;
+  --icon-bg: #2e2e3e;
+  --icon-color: #a8a8be;
 }
 
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background: var(--bg-page);
-  background-image: radial-gradient(ellipse at 50% 0%, #14141f 0%, var(--bg-page) 70%);
+  background-image: radial-gradient(ellipse at 50% 0%, #22222e 0%, var(--bg-page) 70%);
   color: var(--text-primary);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
@@ -79,6 +79,7 @@ header {
   padding: 24px;
   text-decoration: none;
   color: inherit;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
   transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
   opacity: 0;
   transform: translateY(8px);
@@ -251,10 +252,10 @@ header {
   padding-left: 4px;
 }
 
-/* Skills grid — wider cards than apps */
+/* Skills grid — 2 columns on desktop, 1 on mobile */
 .skills-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(500px, 1fr));
   gap: 16px;
   padding-bottom: 40px;
 }
@@ -265,6 +266,7 @@ header {
   border: 1px solid rgba(167, 139, 250, 0.15);
   border-radius: 12px;
   padding: 20px 24px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
   transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
   opacity: 0;
   transform: translateY(8px);
@@ -298,41 +300,97 @@ header {
 /* Inline input form */
 .skill-form {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
 }
 .skill-input {
   flex: 1;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(0, 0, 0, 0.15);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 9px 14px;
+  padding: 10px 14px;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: 15px;
   font-family: inherit;
   outline: none;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  resize: none;
+  overflow: hidden;
+  min-height: 40px;
+  max-height: 320px;
+  line-height: 1.5;
+  field-sizing: content;
 }
 .skill-input:focus {
   border-color: rgba(167, 139, 250, 0.5);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.08);
 }
 .skill-input::placeholder {
   color: var(--text-tertiary);
 }
+.skill-input::-webkit-scrollbar {
+  width: 6px;
+}
+.skill-input::-webkit-scrollbar-track {
+  background: transparent;
+}
+.skill-input::-webkit-scrollbar-thumb {
+  background: var(--border-hover);
+  border-radius: 3px;
+}
+.skill-input::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+.skill-input {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-hover) transparent;
+}
+.skill-form-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+.skill-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  opacity: 0;
+  transition: opacity 0.2s;
+  user-select: none;
+}
+.skill-hint kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-family: inherit;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+}
+.skill-input:focus ~ .skill-form-footer .skill-hint,
+.skill-card:hover .skill-hint {
+  opacity: 1;
+}
+.skill-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .skill-submit {
-  background: rgba(167, 139, 250, 0.12);
-  border: 1px solid rgba(167, 139, 250, 0.25);
+  background: transparent;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #a78bfa;
+  color: var(--text-tertiary);
   font-size: 13px;
   font-weight: 600;
   padding: 9px 18px;
   cursor: pointer;
-  transition: background 0.2s, border-color 0.2s;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
   white-space: nowrap;
 }
-.skill-submit:hover {
-  background: rgba(167, 139, 250, 0.22);
-  border-color: rgba(167, 139, 250, 0.45);
+.skill-card:hover .skill-submit {
+  background: rgba(167, 139, 250, 0.12);
+  border-color: rgba(167, 139, 250, 0.3);
+  color: #a78bfa;
 }
 
 /* Error / Empty */
@@ -490,8 +548,11 @@ header {
           '<span class="card-sessions" data-app="' + escapeAttr(app.key) + '"></span>' +
         '</div>' +
         '<form class="skill-form" data-app="' + escapeAttr(app.key) + '">' +
-          '<input type="text" class="skill-input" placeholder="Describe your task..." />' +
-          '<button type="submit" class="skill-submit">Run</button>' +
+          '<textarea class="skill-input" rows="1" placeholder="Describe your task..."></textarea>' +
+          '<div class="skill-form-footer">' +
+            '<span class="skill-hint"><kbd>' + (navigator.platform.indexOf('Mac') > -1 ? '\u2318' : 'Ctrl') + '</kbd> + <kbd>Enter</kbd> to run</span>' +
+            '<button type="submit" class="skill-submit">Run</button>' +
+          '</div>' +
         '</form>';
       content.appendChild(div);
       setTimeout(function() { div.classList.add('visible'); }, 30 * i);
@@ -541,7 +602,7 @@ header {
     }
     var skills = allApps.filter(function(a) { return !!a.skill; });
     var apps = allApps.filter(function(a) { return !a.skill; });
-    if (skills.length) renderSkills(skills);
+    if (skills.length) { renderSkills(skills); restoreDrafts(); }
     if (apps.length) renderApps(apps);
     // Hide section labels when only one type exists
     if (!skills.length) {
@@ -610,15 +671,79 @@ header {
       showError(err.message);
     });
 
+  // Draft persistence helpers
+  var DRAFT_PREFIX = 'wsh-skill-draft:';
+  function saveDraft(appKey, value) {
+    try { if (value) localStorage.setItem(DRAFT_PREFIX + appKey, value); else localStorage.removeItem(DRAFT_PREFIX + appKey); } catch {}
+  }
+  function loadDraft(appKey) {
+    try { return localStorage.getItem(DRAFT_PREFIX + appKey) || ''; } catch { return ''; }
+  }
+
+  // Restore drafts after skills render
+  function restoreDrafts() {
+    var inputs = document.querySelectorAll('.skill-form[data-app] .skill-input');
+    for (var i = 0; i < inputs.length; i++) {
+      var appKey = inputs[i].closest('.skill-form').dataset.app;
+      var draft = loadDraft(appKey);
+      if (draft) {
+        inputs[i].value = draft;
+        inputs[i].style.height = 'auto';
+        inputs[i].style.height = Math.min(inputs[i].scrollHeight, 200) + 'px';
+        inputs[i].style.overflow = inputs[i].scrollHeight > 200 ? 'auto' : 'hidden';
+      }
+    }
+  }
+
+  // Auto-resize textareas, save drafts & Cmd/Ctrl+Enter to submit
+  document.getElementById('skills-content').addEventListener('input', function(e) {
+    var ta = e.target;
+    if (!ta.classList.contains('skill-input')) return;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 320) + 'px';
+    ta.style.overflow = ta.scrollHeight > 320 ? 'auto' : 'hidden';
+    var appKey = ta.closest('.skill-form').dataset.app;
+    saveDraft(appKey, ta.value);
+  });
+  document.getElementById('skills-content').addEventListener('click', function(e) {
+    if (e.target.closest('button') || e.target.classList.contains('skill-input')) return;
+    var card = e.target.closest('.skill-card');
+    if (!card) return;
+    var ta = card.querySelector('.skill-input');
+    if (ta && !ta.disabled) ta.focus();
+  });
+
+  var lastEscTime = 0;
+  document.getElementById('skills-content').addEventListener('keydown', function(e) {
+    if (!e.target.classList.contains('skill-input')) return;
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      var form = e.target.closest('form');
+      if (form) form.requestSubmit();
+    }
+    if (e.key === 'Escape') {
+      var now = Date.now();
+      if (now - lastEscTime < 500) {
+        e.target.value = '';
+        e.target.style.height = 'auto';
+        var appKey = e.target.closest('.skill-form').dataset.app;
+        saveDraft(appKey, '');
+      }
+      lastEscTime = now;
+    }
+  });
+
   document.getElementById('skills-content').addEventListener('submit', function(e) {
     e.preventDefault();
     var form = e.target;
     if (!form.classList.contains('skill-form')) return;
     var appKey = form.dataset.app;
-    var input = form.querySelector('.skill-input').value.trim();
+    var ta = form.querySelector('.skill-input');
+    var input = ta.value.trim();
     var btn = form.querySelector('.skill-submit');
     btn.textContent = 'Starting...';
     btn.disabled = true;
+    ta.disabled = true;
 
     fetch('./api/sessions', {
       method: 'POST',
@@ -629,7 +754,10 @@ header {
     .then(function(data) {
       btn.textContent = 'Run';
       btn.disabled = false;
-      form.querySelector('.skill-input').value = '';
+      ta.disabled = false;
+      ta.value = '';
+      ta.style.height = 'auto';
+      saveDraft(appKey, '');
       if (data.url) {
         try { var u = new URL(data.url); window.open(u.pathname + u.hash, '_blank'); }
         catch(e) { window.open(data.url, '_blank'); }
@@ -639,6 +767,7 @@ header {
     .catch(function(err) {
       btn.textContent = 'Run';
       btn.disabled = false;
+      ta.disabled = false;
       showError('Failed to launch: ' + err.message);
     });
   });
