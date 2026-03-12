@@ -422,7 +422,7 @@ function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session
   let args: string[];
   if (appConfig.skill) {
     const cmdLine = [appConfig.command, ...(appConfig.args ?? [])].join(' ');
-    cmd = process.env.SHELL || '/bin/sh';
+    cmd = '/bin/sh';
     args = ['-c', cmdLine];
   } else {
     cmd = appConfig.command;
@@ -1086,8 +1086,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     }
   } else {
     try {
-      const session = spawnSession(id, appKey, effectiveConfig);
-      session.pinned = true;
+      spawnSession(id, appKey, effectiveConfig);
     } catch (err) {
       console.error('Failed to spawn PTY:', err);
       res.status(500).json({ error: 'Failed to spawn session' }); return;
