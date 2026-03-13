@@ -1063,6 +1063,7 @@ router.use(express.json());
 router.post('/api/sessions', async (req: express.Request, res: express.Response) => {
   const appKey = (req.body?.app as string) || 'bash';
   const input = (req.body?.input as string) || '';
+  const mode = (req.body?.mode as string) || '';
   const apps = loadApps();
   const appConfig = apps[appKey];
   if (!appConfig) { res.status(400).json({ error: `Unknown app: "${appKey}"` }); return; }
@@ -1071,7 +1072,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   if (appConfig.skill) {
     effectiveConfig = {
       ...appConfig,
-      env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input },
+      env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input, ...(mode ? { WSH_MODE: mode } : {}) },
     };
   }
 
@@ -1284,9 +1285,10 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     let effectiveConfig = appConfig;
     if (appConfig.skill) {
       const input = url.searchParams.get('input') || '';
+      const wsMode = url.searchParams.get('mode') || '';
       effectiveConfig = {
         ...appConfig,
-        env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input },
+        env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input, ...(wsMode ? { WSH_MODE: wsMode } : {}) },
       };
     }
     if (effectiveConfig.type === 'web') {

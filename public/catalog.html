@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{title}}</title>
+<script src="mini-terminal.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -462,6 +463,8 @@ header {
   color: #a78bfa;
 }
 
+.skill-inline-wrap { margin-top: 12px; }
+
 /* Error / Empty */
 .message {
   text-align: center;
@@ -696,10 +699,11 @@ header {
         '<form class="skill-form" data-app="' + escapeAttr(app.key) + '">' +
           '<textarea class="skill-input" rows="1" placeholder="Describe your task..."></textarea>' +
           '<div class="skill-form-footer">' +
-            '<span class="skill-hint"><kbd>' + (navigator.platform.indexOf('Mac') > -1 ? '\u2318' : 'Ctrl') + '</kbd> + <kbd>Enter</kbd> to run</span>' +
+            '<span class="skill-hint"><kbd>Enter</kbd> to run · <kbd>' + (navigator.platform.indexOf('Mac') > -1 ? '\u2318' : 'Ctrl') + '</kbd><kbd>Enter</kbd> for new tab</span>' +
             '<button type="submit" class="skill-submit">Run</button>' +
           '</div>' +
-        '</form>';
+        '</form>' +
+        '<div class="skill-inline-wrap"></div>';
       content.appendChild(div);
       setTimeout(function() { div.classList.add('visible'); }, 30 * i);
     });
@@ -749,7 +753,7 @@ header {
     }
     var skills = allApps.filter(function(a) { return !!a.skill; });
     var apps = allApps.filter(function(a) { return !a.skill; });
-    if (skills.length) { renderSkills(skills); restoreDrafts(); }
+    if (skills.length) { renderSkills(skills); restoreDrafts(); reconnectInline(); }
     if (apps.length) renderApps(apps);
     // Hide section labels when only one type exists
     if (!skills.length) {
@@ -828,6 +832,26 @@ header {
     appsSection.querySelector('.section-label').style.display = 'none';
     document.getElementById('apps-content').innerHTML = '<div class="message error">' + escapeHtml(msg) + '</div>';
   }
+
+  // Reconnect inline terminals from localStorage on page reload
+  function reconnectInline() {
+    document.querySelectorAll('.skill-card[data-app]').forEach(function(card) {
+      var appKey = card.dataset.app;
+      var saved = localStorage.getItem('wsh-inline:' + appKey);
+      if (!saved) return;
+      try {
+        var info = JSON.parse(saved);
+        var wrap = card.querySelector('.skill-inline-wrap');
+        MiniTerminal.create(wrap, info.id, info.url);
+      } catch { localStorage.removeItem('wsh-inline:' + appKey); }
+    });
+  }
+
+  // Clean up localStorage when inline terminal closes
+  document.addEventListener('mt-close', function(e) {
+    var card = e.target.closest('.skill-card[data-app]');
+    if (card) localStorage.removeItem('wsh-inline:' + card.dataset.app);
+  });
 
   fetch('./api/apps')
     .then(function(res) {
@@ -908,10 +932,14 @@ header {
   var lastEscTime = 0;
   document.getElementById('skills-content').addEventListener('keydown', function(e) {
     if (!e.target.classList.contains('skill-input')) return;
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       var form = e.target.closest('form');
-      if (form) form.requestSubmit();
+      if (!form) return;
+      if (e.metaKey || e.ctrlKey) {
+        form.dataset.newTab = '1';
+      }
+      form.requestSubmit();
     }
     if (e.key === 'Escape') {
       var now = Date.now();
@@ -930,9 +958,12 @@ header {
     var form = e.target;
     if (!form.classList.contains('skill-form')) return;
     var appKey = form.dataset.app;
+    var newTabFlag = form.dataset.newTab === '1';
+    delete form.dataset.newTab;
     var ta = form.querySelector('.skill-input');
     var input = ta.value.trim();
     var btn = form.querySelector('.skill-submit');
+    var card = form.closest('.skill-card');
     btn.textContent = 'Starting...';
     btn.disabled = true;
     ta.disabled = true;
@@ -940,7 +971,7 @@ header {
     fetch('./api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app: appKey, input: input })
+      body: JSON.stringify({ app: appKey, input: input, mode: newTabFlag ? '' : 'inline' })
     })
     .then(function(res) { return res.json(); })
     .then(function(data) {
@@ -951,8 +982,16 @@ header {
       ta.style.height = 'auto';
       saveDraft(appKey, '');
       if (data.url) {
-        try { var u = new URL(data.url); window.open(u.pathname + u.hash, '_blank'); }
-        catch(e) { window.open(data.url, '_blank'); }
+        if (newTabFlag) {
+          try { var u = new URL(data.url); window.open(u.pathname + u.hash, '_blank'); }
+          catch(e2) { window.open(data.url, '_blank'); }
+        } else {
+          var wrap = card.querySelector('.skill-inline-wrap');
+          // Dispose existing inline terminal if any
+          wrap.innerHTML = '';
+          MiniTerminal.create(wrap, data.id, data.url);
+          localStorage.setItem('wsh-inline:' + appKey, JSON.stringify({ id: data.id, url: data.url }));
+        }
       }
       else if (data.error) showError(data.error);
     })
