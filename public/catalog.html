@@ -842,7 +842,7 @@ header {
       try {
         var info = JSON.parse(saved);
         var wrap = card.querySelector('.skill-inline-wrap');
-        MiniTerminal.create(wrap, info.id, info.url);
+        MiniTerminal.create(wrap, info.id, info.url, true);
       } catch { localStorage.removeItem('wsh-inline:' + appKey); }
     });
   }
