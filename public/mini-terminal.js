@@ -85,7 +85,7 @@ function injectStyles() {
   color: #cdd6f4;
 }
 .mt-term {
-  height: 200px;
+  height: 360px;
   border: 1px solid #333342;
   border-radius: 0 0 8px 8px;
   overflow: hidden;
@@ -93,6 +93,19 @@ function injectStyles() {
 .mt-term .xterm {
   padding: 4px;
 }
+.mt-term .xterm { background: #1e1e2e; }
+.mt-term .xterm-cursor-layer { display: none !important; }
+.mt-term .xterm-viewport {
+  overflow-y: auto !important;
+  background-color: #1e1e2e !important;
+  opacity: 1 !important;
+  scrollbar-width: thin;
+  scrollbar-color: #45475a transparent;
+}
+.mt-term .xterm-viewport::-webkit-scrollbar { width: 6px; height: 6px; }
+.mt-term .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+.mt-term .xterm-viewport::-webkit-scrollbar-thumb { background: #45475a; border-radius: 3px; }
+.mt-term .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #585b70; }
 `;
     document.head.appendChild(style);
 }
@@ -119,7 +132,7 @@ const THEME = {
     brightWhite: '#cdd6f4',
 };
 window.MiniTerminal = {
-    create(container, sessionId, sessionUrl) {
+    create(container, sessionId, sessionUrl, reconnect) {
         injectStyles();
         // Build DOM
         const bar = document.createElement('div');
@@ -176,7 +189,13 @@ window.MiniTerminal = {
             container.dispatchEvent(new CustomEvent('mt-close', { bubbles: true }));
         }
         popoutBtn.addEventListener('click', () => {
-            window.open(sessionUrl, '_blank');
+            try {
+                const u = new URL(sessionUrl);
+                window.open(u.pathname + u.hash, '_blank');
+            }
+            catch {
+                window.open(sessionUrl, '_blank');
+            }
             cleanup();
         });
         closeBtn.addEventListener('click', () => {
@@ -188,6 +207,10 @@ window.MiniTerminal = {
                 return;
             term = new Terminal({
                 disableStdin: true,
+                cursorStyle: 'bar',
+                cursorWidth: 0,
+                cursorBlink: false,
+                cursorInactiveStyle: 'none',
                 fontSize: 13,
                 scrollback: 5000,
                 fontFamily: '"JetBrains Mono", monospace',
@@ -202,7 +225,10 @@ window.MiniTerminal = {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = new URL('./terminal', location.href);
             wsUrl.protocol = proto;
-            wsUrl.search = new URLSearchParams({ session: sessionId }).toString();
+            const wsParams = { session: sessionId };
+            if (reconnect)
+                wsParams.reconnect = '1';
+            wsUrl.search = new URLSearchParams(wsParams).toString();
             ws = new WebSocket(wsUrl.href);
             ws.binaryType = 'arraybuffer';
             ws.addEventListener('open', () => {

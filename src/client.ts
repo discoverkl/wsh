@@ -46,6 +46,12 @@ const term = new Terminal({
 const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 term.open(document.getElementById('terminal-container') as HTMLElement);
+
+// Auto-compact on small viewports (phones) or restore saved preference
+if (localStorage.getItem('wsh_compact') === '1' || window.innerWidth < 768) {
+  document.documentElement.classList.add('compact');
+}
+
 fitAddon.fit();
 
 const windowTitle = document.getElementById('window-title')!;

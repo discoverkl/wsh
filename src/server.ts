@@ -123,9 +123,21 @@ python3:
   loadAndMerge(userDir);
   // Apply _skills defaults to skill apps (same logic as server)
   let skillDefaults: any = { command: 'claude "/$SKILL $INPUT"' };
+  let cliAgent: string | undefined;
+  let cliTools: any = undefined;
   for (const config of configs) {
     const raw = config?._skills;
-    if (raw && typeof raw === 'object') skillDefaults = { ...skillDefaults, ...raw };
+    if (raw && typeof raw === 'object') {
+      const { tools: t, agent: a, ...rest } = raw as any;
+      skillDefaults = { ...skillDefaults, ...rest };
+      if (typeof a === 'string') cliAgent = a;
+      if (t && typeof t === 'object') cliTools = { ...(cliTools ?? {}), ...t };
+    }
+  }
+  if (cliAgent && cliTools && cliTools[cliAgent]) {
+    const tool = cliTools[cliAgent];
+    if (typeof tool.command === 'string') skillDefaults.command = tool.command;
+    if (typeof tool.inline === 'string') skillDefaults.inlineCommand = tool.inline;
   }
   for (const app of Object.values(apps)) {
     if (app.skill) {
@@ -382,6 +394,7 @@ function killProcessGroup(child: ChildProcess): void {
   }
 }
 
+
 function appendScrollback(session: Session, data: Buffer): void {
   const limit = session.appType === 'web' ? MAX_SCROLLBACK_WEB : MAX_SCROLLBACK;
   session.scrollback = Buffer.concat([session.scrollback, data]);
@@ -428,7 +441,22 @@ function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session
     cmd = appConfig.command;
     args = appConfig.args ?? [];
   }
-  const ptyProcess = pty.spawn(cmd, args, {
+
+  // Disable ECHOCTL before exec'ing the real command.  The default PTY has
+  // ECHO+ECHOCTL on; if an xterm.js OSC colour response arrives before the
+  // shell turns ECHO off, ECHOCTL mangles ESC (0x1B) into the two-char caret
+  // notation ^[ (0x5E 0x5B), which xterm.js cannot parse → visible garbage.
+  // With ECHOCTL off the raw ESC byte is echoed instead, producing a valid
+  // escape sequence that xterm.js silently consumes.
+  //
+  // We wrap via `stty -echoctl && exec <cmd>` so the stty runs in the same PTY
+  // before the child process starts.  `exec` replaces the wrapper shell so there
+  // is no extra process and signals are delivered correctly.
+  const escaped = [cmd, ...args].map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
+  const wrappedCmd = '/bin/sh';
+  const wrappedArgs = ['-c', `stty -echoctl 2>/dev/null; exec ${escaped}`];
+
+  const ptyProcess = pty.spawn(wrappedCmd, wrappedArgs, {
     name: 'xterm-256color',
     cols: 80,
     rows: 24,
@@ -715,6 +743,7 @@ if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
 
 interface AppConfig {
   command: string;
+  inlineCommand?: string;
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
@@ -774,9 +803,22 @@ const SKILL_DEFAULTS: Partial<AppConfig> = {
 
 function extractSkillDefaults(...configs: (Record<string, unknown> | null)[]): Partial<AppConfig> {
   let defaults: Partial<AppConfig> = { ...SKILL_DEFAULTS };
+  let agent: string | undefined;
+  let tools: Record<string, any> | undefined;
   for (const config of configs) {
-    const raw = config?._skills;
-    if (raw && typeof raw === 'object') defaults = { ...defaults, ...(raw as Partial<AppConfig>) };
+    const raw = config?._skills as Record<string, unknown> | undefined;
+    if (!raw || typeof raw !== 'object') continue;
+    // Pick up top-level scalar defaults (cwd, env, etc.) but skip structured keys
+    const { tools: t, agent: a, ...rest } = raw;
+    defaults = { ...defaults, ...(rest as Partial<AppConfig>) };
+    if (typeof a === 'string') agent = a;
+    if (t && typeof t === 'object') tools = { ...(tools ?? {}), ...(t as Record<string, any>) };
+  }
+  // Resolve agent-specific command and inlineCommand from tools
+  if (agent && tools && tools[agent]) {
+    const tool = tools[agent];
+    if (typeof tool.command === 'string') defaults.command = tool.command;
+    if (typeof tool.inline === 'string') defaults.inlineCommand = tool.inline;
   }
   return defaults;
 }
@@ -1070,8 +1112,10 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
 
   let effectiveConfig = appConfig;
   if (appConfig.skill) {
+    const useInline = mode === 'inline' && appConfig.inlineCommand;
     effectiveConfig = {
       ...appConfig,
+      ...(useInline ? { command: appConfig.inlineCommand! } : {}),
       env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input, ...(mode ? { WSH_MODE: mode } : {}) },
     };
   }
@@ -1261,6 +1305,11 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     }
     if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
   } else {
+    // reconnect=1 means "only attach to existing session, don't create a new one"
+    if (url.searchParams.get('reconnect') === '1') {
+      ws.close(4003, 'session not found');
+      return;
+    }
     // New session — only owners may create one.
     if (credential !== 'owner') {
       // Rate-limit invalid session attempts per IP to prevent brute-force scanning.
@@ -1286,8 +1335,10 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     if (appConfig.skill) {
       const input = url.searchParams.get('input') || '';
       const wsMode = url.searchParams.get('mode') || '';
+      const useInline = wsMode === 'inline' && appConfig.inlineCommand;
       effectiveConfig = {
         ...appConfig,
+        ...(useInline ? { command: appConfig.inlineCommand! } : {}),
         env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input, ...(wsMode ? { WSH_MODE: wsMode } : {}) },
       };
     }
