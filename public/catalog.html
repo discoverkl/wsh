@@ -968,13 +968,16 @@ header {
     btn.disabled = true;
     ta.disabled = true;
 
+    var _t0 = performance.now();
+    console.log('[Catalog] POST /api/sessions starting');
     fetch('./api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ app: appKey, input: input, mode: newTabFlag ? '' : 'inline' })
     })
-    .then(function(res) { return res.json(); })
+    .then(function(res) { console.log('[Catalog] POST response: +' + (performance.now() - _t0).toFixed(0) + 'ms'); return res.json(); })
     .then(function(data) {
+      console.log('[Catalog] MiniTerminal.create(): +' + (performance.now() - _t0).toFixed(0) + 'ms');
       btn.textContent = 'Run';
       btn.disabled = false;
       ta.disabled = false;

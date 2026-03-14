@@ -13,13 +13,13 @@ function ensureXterm() {
         const link = document.createElement('link');
         link.id = 'mt-xterm-css';
         link.rel = 'stylesheet';
-        link.href = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css';
+        link.href = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css';
         document.head.appendChild(link);
         const script = document.createElement('script');
-        script.src = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js';
+        script.src = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js';
         script.onload = () => {
             const fitScript = document.createElement('script');
-            fitScript.src = 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js';
+            fitScript.src = 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js';
             fitScript.onload = () => resolve();
             fitScript.onerror = () => reject(new Error('Failed to load xterm fit addon'));
             document.head.appendChild(fitScript);
@@ -85,6 +85,7 @@ function injectStyles() {
   color: #cdd6f4;
 }
 .mt-term {
+  position: relative;
   height: 360px;
   border: 1px solid #333342;
   border-radius: 0 0 8px 8px;
@@ -95,6 +96,7 @@ function injectStyles() {
 }
 .mt-term .xterm { background: #1e1e2e; }
 .mt-term .xterm-cursor-layer { display: none !important; }
+.mt-term .xterm * { cursor: default !important; }
 .mt-term .xterm-viewport {
   overflow-y: auto !important;
   background-color: #1e1e2e !important;
@@ -106,6 +108,39 @@ function injectStyles() {
 .mt-term .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
 .mt-term .xterm-viewport::-webkit-scrollbar-thumb { background: #45475a; border-radius: 3px; }
 .mt-term .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #585b70; }
+.mt-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: #1e1e2e;
+  transition: opacity 0.3s ease;
+}
+.mt-loading.fade-out {
+  opacity: 0;
+  pointer-events: none;
+}
+.mt-spinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid #333342;
+  border-top-color: #89b4fa;
+  border-radius: 50%;
+  animation: mt-spin 0.8s linear infinite;
+}
+@keyframes mt-spin {
+  to { transform: rotate(360deg); }
+}
+.mt-loading-text {
+  color: #6c7086;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 12px;
+  letter-spacing: 0.3px;
+}
 `;
     document.head.appendChild(style);
 }
@@ -133,6 +168,9 @@ const THEME = {
 };
 window.MiniTerminal = {
     create(container, sessionId, sessionUrl, reconnect) {
+        const t0 = performance.now();
+        const _mt = (label) => console.log(`[MiniTerminal] ${label}: +${(performance.now() - t0).toFixed(0)}ms`);
+        _mt('create() called');
         injectStyles();
         // Build DOM
         const bar = document.createElement('div');
@@ -156,6 +194,17 @@ window.MiniTerminal = {
         bar.appendChild(closeBtn);
         const termDiv = document.createElement('div');
         termDiv.className = 'mt-term';
+        // Loading overlay — shown until first PTY data arrives
+        const loading = document.createElement('div');
+        loading.className = 'mt-loading';
+        const spinner = document.createElement('div');
+        spinner.className = 'mt-spinner';
+        const loadingText = document.createElement('div');
+        loadingText.className = 'mt-loading-text';
+        loadingText.textContent = 'Starting...';
+        loading.appendChild(spinner);
+        loading.appendChild(loadingText);
+        termDiv.appendChild(loading);
         container.appendChild(bar);
         container.appendChild(termDiv);
         let ws = null;
@@ -163,7 +212,8 @@ window.MiniTerminal = {
         let fitAddon = null;
         let ro = null;
         let disposed = false;
-        function cleanup() {
+        /** Disconnect the WebSocket and tear down the DOM without killing the PTY. */
+        function disconnect() {
             if (disposed)
                 return;
             disposed = true;
@@ -188,6 +238,19 @@ window.MiniTerminal = {
             container.innerHTML = '';
             container.dispatchEvent(new CustomEvent('mt-close', { bubbles: true }));
         }
+        /** Kill the PTY session, then disconnect. */
+        function cleanup() {
+            if (disposed)
+                return;
+            if (ws) {
+                try {
+                    if (ws.readyState === WebSocket.OPEN)
+                        ws.send(JSON.stringify({ type: 'close' }));
+                }
+                catch { }
+            }
+            disconnect();
+        }
         popoutBtn.addEventListener('click', () => {
             try {
                 const u = new URL(sessionUrl);
@@ -196,19 +259,21 @@ window.MiniTerminal = {
             catch {
                 window.open(sessionUrl, '_blank');
             }
-            cleanup();
+            disconnect(); // hand off session to the new tab, don't kill the PTY
         });
         closeBtn.addEventListener('click', () => {
-            cleanup();
+            cleanup(); // kill the PTY
         });
         // Load xterm and connect
+        _mt('ensureXterm() starting');
         ensureXterm().then(() => {
+            _mt('ensureXterm() resolved');
             if (disposed)
                 return;
             term = new Terminal({
-                disableStdin: true,
+                disableStdin: false,
                 cursorStyle: 'bar',
-                cursorWidth: 0,
+                cursorWidth: 1,
                 cursorBlink: false,
                 cursorInactiveStyle: 'none',
                 fontSize: 13,
@@ -217,10 +282,18 @@ window.MiniTerminal = {
                 theme: THEME,
                 convertEol: false,
             });
+            _mt('new Terminal() done');
             fitAddon = new FitAddon.FitAddon();
             term.loadAddon(fitAddon);
+            _mt('fitAddon loaded');
             term.open(termDiv);
+            // Block keyboard input while allowing xterm.js to respond to OSC queries.
+            // (disableStdin suppresses OSC responses, causing TUI apps to stall.)
+            term.attachCustomKeyEventHandler(() => false);
+            term.onSelectionChange(() => term.clearSelection());
+            _mt('term.open() done');
             fitAddon.fit();
+            _mt('fitAddon.fit() done');
             // WebSocket connection
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = new URL('./terminal', location.href);
@@ -231,18 +304,47 @@ window.MiniTerminal = {
             wsUrl.search = new URLSearchParams(wsParams).toString();
             ws = new WebSocket(wsUrl.href);
             ws.binaryType = 'arraybuffer';
+            _mt('WebSocket created');
+            // Forward xterm.js programmatic responses (e.g. OSC color query replies)
+            // back to the PTY as text (matching full terminal's term.onData handler).
+            // Without this, TUI apps that query terminal colors stall waiting for
+            // responses that never arrive.
+            term.onData((data) => {
+                _mt(`term.onData fired: ${data.length}B`);
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(data);
+                }
+            });
             ws.addEventListener('open', () => {
+                _mt('WebSocket open');
                 if (disposed)
                     return;
                 fitAddon.fit();
                 const msg = JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows });
                 ws.send(msg);
             });
+            let msgCount = 0;
+            let writeTotal = 0;
             ws.addEventListener('message', (event) => {
                 if (disposed)
                     return;
+                msgCount++;
+                if (msgCount <= 3) {
+                    _mt(`WS message #${msgCount} (${event.data instanceof ArrayBuffer ? event.data.byteLength + 'B' : 'json'})`);
+                }
                 if (event.data instanceof ArrayBuffer) {
+                    // Hide loading overlay on first PTY data
+                    if (loading.parentNode) {
+                        loading.classList.add('fade-out');
+                        setTimeout(() => loading.remove(), 300);
+                    }
+                    const w0 = performance.now();
                     term.write(new Uint8Array(event.data));
+                    const elapsed = performance.now() - w0;
+                    writeTotal += elapsed;
+                    if (msgCount <= 3) {
+                        _mt(`term.write() #${msgCount} took ${elapsed.toFixed(1)}ms (total write: ${writeTotal.toFixed(1)}ms)`);
+                    }
                 }
                 // Ignore JSON control messages (role, etc.)
             });
