@@ -169,7 +169,7 @@
     #pin-btn.pinned { color: #a6e3a1; }
     #pin-btn[hidden] { display: none; }
 
-    #clear-btn, #logs-btn, #share-btn, #new-session, #pin-btn {
+    #clear-btn, #logs-btn, #share-btn, #new-session, #pin-btn, #input-toggle {
       background: none;
       border: none;
       padding: 0;
@@ -183,7 +183,8 @@
       cursor: pointer;
       transition: color 0.15s, background 0.15s;
     }
-    #clear-btn:hover, #logs-btn:hover, #share-btn:hover, #new-session:hover, #pin-btn:hover {
+    #input-toggle.active { color: #a6e3a1; }
+    #clear-btn:hover, #logs-btn:hover, #share-btn:hover, #new-session:hover, #pin-btn:hover, #input-toggle:hover {
       color: #cdd6f4;
       background: rgba(205, 214, 244, 0.07);
     }
@@ -357,6 +358,194 @@
     }
     html.web #viewonly-toast .vo-icon { color: #e6a817; }
     html.web #viewonly-toast .vo-action { color: #2563eb; }
+
+    /* Mobile shortcut bar */
+    #shortcut-bar {
+      display: flex;
+      flex-shrink: 0;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px 10px;
+      padding-bottom: calc(8px + env(safe-area-inset-bottom));
+      background: rgba(24, 24, 37, 0.85);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-top: 1px solid rgba(205, 214, 244, 0.06);
+    }
+    #shortcut-bar.hidden { display: none !important; }
+    .shortcut-row {
+      display: none;
+      align-items: center;
+      gap: 6px;
+    }
+    .shortcut-row-landscape {
+      display: none;
+    }
+
+    .shortcut-btn {
+      flex: 1;
+      height: 40px;
+      min-width: 0;
+      padding: 0 6px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      border: none;
+      border-radius: 17px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: transform 0.1s;
+    }
+    .shortcut-btn:active {
+      transform: scale(0.92);
+      transition: none;
+    }
+    .shortcut-btn svg {
+      width: 14px;
+      height: 14px;
+      vertical-align: middle;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    /* Color-coded buttons */
+    .sc-green  { color: #a6e3a1; background: rgba(166, 227, 161, 0.12); }
+    .sc-peach  { color: #fab387; background: rgba(250, 179, 135, 0.12); }
+    .sc-blue   { color: #89b4fa; background: rgba(137, 180, 250, 0.12); }
+    .sc-sapph  { color: #74c7ec; background: rgba(116, 199, 236, 0.12); }
+    .sc-lav    { color: #b4befe; background: rgba(180, 190, 254, 0.12); }
+    .sc-mauve  { color: #cba6f7; background: rgba(203, 166, 247, 0.12); }
+    .sc-teal   { color: #94e2d5; background: rgba(148, 226, 213, 0.12); }
+    .sc-sky    { color: #89dcfe; background: rgba(137, 220, 254, 0.12); }
+    .sc-red    { color: #f38ba8; background: rgba(243, 139, 168, 0.12); }
+
+    .sc-green:active  { background: rgba(166, 227, 161, 0.25); }
+    .sc-peach:active  { background: rgba(250, 179, 135, 0.25); }
+    .sc-blue:active   { background: rgba(137, 180, 250, 0.25); }
+    .sc-sapph:active  { background: rgba(116, 199, 236, 0.25); }
+    .sc-lav:active    { background: rgba(180, 190, 254, 0.25); }
+    .sc-mauve:active  { background: rgba(203, 166, 247, 0.25); }
+    .sc-teal:active   { background: rgba(148, 226, 213, 0.25); }
+    .sc-sky:active    { background: rgba(137, 220, 254, 0.25); }
+    .sc-red:active    { background: rgba(243, 139, 168, 0.25); }
+
+    .sc-sep {
+      width: 1px;
+      height: 24px;
+      flex-shrink: 0;
+      background: rgba(205, 214, 244, 0.08);
+      margin: 0 2px;
+    }
+
+    .shortcut-input-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .shortcut-text-input {
+      flex: 1;
+      height: 40px;
+      min-width: 0;
+      padding: 0 12px;
+      border: none;
+      border-radius: 20px;
+      background: rgba(205, 214, 244, 0.08);
+      color: #cdd6f4;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 14px;
+      outline: none;
+    }
+    .shortcut-text-input::placeholder {
+      color: #585b70;
+    }
+    .shortcut-text-input:focus {
+      background: rgba(205, 214, 244, 0.12);
+    }
+    .shortcut-send-btn {
+      flex-shrink: 0;
+      width: 40px;
+      height: 40px;
+      border: none;
+      border-radius: 50%;
+      background: rgba(166, 227, 161, 0.12);
+      color: #a6e3a1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .shortcut-send-btn:active {
+      background: rgba(166, 227, 161, 0.25);
+      transition: none;
+    }
+    .shortcut-send-btn svg {
+      width: 16px;
+      height: 16px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    @media (max-width: 640px) {
+      .shortcut-row { display: flex; }
+    }
+    @media (pointer: coarse) {
+      .shortcut-row { display: flex; }
+    }
+    @media (pointer: coarse) {
+      #titlebar { height: 44px; }
+      #clear-btn, #logs-btn, #share-btn, #new-session, #pin-btn, #input-toggle {
+        width: 36px;
+        height: 36px;
+      }
+    }
+
+    #conn-banner {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 6px 14px;
+      background: rgba(243, 139, 168, 0.12);
+      border-bottom: 1px solid rgba(243, 139, 168, 0.2);
+      font-size: 12px;
+      color: #f38ba8;
+      flex-shrink: 0;
+    }
+    #conn-banner.visible { display: flex; }
+    #conn-banner .banner-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #f38ba8;
+      animation: pulse-banner 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse-banner {
+      0%, 100% { opacity: 0.5; }
+      50% { opacity: 1; }
+    }
+    @media (max-height: 500px) and (orientation: landscape) {
+      .shortcut-input-row { display: none; }
+      .shortcut-row { display: none; }
+      .shortcut-row-landscape {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+      .shortcut-row-landscape::-webkit-scrollbar { display: none; }
+      #shortcut-bar { padding: 5px 10px; gap: 0; }
+    }
 
     /* tighten xterm padding */
     .xterm-screen { padding: 0; }
@@ -549,6 +738,12 @@
               <path d="M9.828 1a.5.5 0 0 1 .354.147l4.671 4.671a.5.5 0 0 1-.069.706L11 9.243V13.5a.5.5 0 0 1-.854.354l-3-3L4.207 14.5a.5.5 0 0 1-.707-.707l3.646-3.639-3-3A.5.5 0 0 1 4.5 6h4.257l2.72-3.784A.5.5 0 0 1 9.828 1z"/>
             </svg>
           </button>
+          <button id="input-toggle" title="Toggle Input Bar">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="1" y="4" width="12" height="7" rx="1.5"/>
+              <line x1="4" y1="7.5" x2="10" y2="7.5"/>
+            </svg>
+          </button>
           <button id="new-session" title="New Session">
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
               <line x1="7" y1="2" x2="7" y2="12"/><line x1="2" y1="7" x2="12" y2="7"/>
@@ -556,6 +751,7 @@
           </button>
         </div>
       </div>
+      <div id="conn-banner"><span class="banner-dot"></span><span id="conn-banner-text">Disconnected</span></div>
       <div id="pinned-toast">
         <span id="pinned-toast-icon">
           <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
@@ -580,6 +776,46 @@
         <span class="vo-action" id="viewonly-upgrade" hidden>Take control</span>
       </div>
       <div id="terminal-container" hidden></div>
+      <div id="shortcut-bar">
+        <div class="shortcut-row-landscape">
+          <button class="shortcut-btn sc-green" data-send="y">y</button>
+          <button class="shortcut-btn sc-peach" data-send="n">n</button>
+          <button class="shortcut-btn sc-blue" data-send="1">1</button>
+          <button class="shortcut-btn sc-sapph" data-send="2">2</button>
+          <button class="shortcut-btn sc-lav" data-send="3">3</button>
+          <button class="shortcut-btn sc-mauve" data-send="4">4</button>
+          <button class="shortcut-btn sc-red" data-send="&#x03;">Stop</button>
+          <button class="shortcut-btn sc-peach" data-send="&#x1b;">Esc</button>
+          <button class="shortcut-btn sc-sky" data-send="&#x09;">Tab</button>
+          <button class="shortcut-btn sc-lav" data-send="/">/</button>
+          <button class="shortcut-btn sc-teal" data-send="&#x1b;[A"><svg viewBox="0 0 14 14"><polyline points="3,9 7,5 11,9"/></svg></button>
+          <button class="shortcut-btn sc-teal" data-send="&#x1b;[B"><svg viewBox="0 0 14 14"><polyline points="3,5 7,9 11,5"/></svg></button>
+          <button class="shortcut-btn sc-peach" data-send="&#x7f;"><svg viewBox="0 0 14 14"><polyline points="5,4 2,7 5,10"/><line x1="2" y1="7" x2="12" y2="7"/></svg></button>
+          <button class="shortcut-btn sc-green" data-send="&#x0d;"><svg viewBox="0 0 14 14"><path d="M11,3 L11,8 L3,8"/><polyline points="5,5.5 3,8 5,10.5"/></svg></button>
+        </div>
+        <div class="shortcut-input-row">
+          <input class="shortcut-text-input" id="shortcut-input" type="text" placeholder="Type or dictate..." autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
+          <button class="shortcut-send-btn" id="shortcut-send"><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+        </div>
+        <div class="shortcut-row">
+          <button class="shortcut-btn sc-green" data-send="y">y</button>
+          <button class="shortcut-btn sc-peach" data-send="n">n</button>
+          <button class="shortcut-btn sc-blue" data-send="1">1</button>
+          <button class="shortcut-btn sc-sapph" data-send="2">2</button>
+          <button class="shortcut-btn sc-lav" data-send="3">3</button>
+          <button class="shortcut-btn sc-mauve" data-send="4">4</button>
+          <button class="shortcut-btn sc-peach" data-send="&#x7f;"><svg viewBox="0 0 14 14"><polyline points="5,4 2,7 5,10"/><line x1="2" y1="7" x2="12" y2="7"/></svg></button>
+        </div>
+        <div class="shortcut-row">
+          <button class="shortcut-btn sc-red" data-send="&#x03;">Stop</button>
+          <button class="shortcut-btn sc-peach" data-send="&#x1b;">Esc</button>
+          <button class="shortcut-btn sc-sky" data-send="&#x09;">Tab</button>
+          <button class="shortcut-btn sc-lav" data-send="/">/</button>
+          <button class="shortcut-btn sc-teal" data-send="&#x1b;[A"><svg viewBox="0 0 14 14"><polyline points="3,9 7,5 11,9"/></svg></button>
+          <button class="shortcut-btn sc-teal" data-send="&#x1b;[B"><svg viewBox="0 0 14 14"><polyline points="3,5 7,9 11,5"/></svg></button>
+          <button class="shortcut-btn sc-green" data-send="&#x0d;"><svg viewBox="0 0 14 14"><path d="M11,3 L11,8 L3,8"/><polyline points="5,5.5 3,8 5,10.5"/></svg></button>
+        </div>
+      </div>
       <div id="web-container" hidden>
         <div id="web-loading">
           <svg width="40" height="10" viewBox="0 0 40 10">

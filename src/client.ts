@@ -128,7 +128,17 @@ document.querySelector('.dot.close')!.addEventListener('click', () => {
     window.close();
     return;
   }
+  const closeEl = document.querySelector('.dot.close') as HTMLElement;
+  if (closeEl?.classList.contains('disabled')) {
+    showViewonlyToast(false);
+    return;
+  }
   userRequestedClose = true;
+  // Immediate visual feedback: fade the window out while waiting for server cleanup.
+  const win = document.getElementById('window')!;
+  win.style.transition = 'opacity 0.25s ease, transform 0.25s ease';
+  win.style.opacity = '0';
+  win.style.transform = 'scale(0.97)';
   if (appType === 'web') {
     const iframe = document.getElementById('web-frame') as HTMLIFrameElement;
     iframe.src = 'about:blank';
@@ -318,9 +328,11 @@ function sendResize(cols: number, rows: number): void {
 }
 
 const connStatus = document.getElementById('conn-status')!;
+const connBanner = document.getElementById('conn-banner');
 function setConnStatus(state: 'connected' | 'disconnected'): void {
   connStatus.className = state;
   connStatus.title = state === 'connected' ? 'Connected' : 'Disconnected';
+  if (connBanner) connBanner.classList.toggle('visible', state === 'disconnected');
 }
 
 const roleBadge = document.getElementById('role-badge')!;
@@ -391,6 +403,18 @@ function applyRole(role: string, credential?: string): void {
   roleBadge.removeAttribute('hidden');
   term.options.disableStdin = role !== 'writer';
 
+  // Update shortcut bar for role
+  const bar = document.getElementById('shortcut-bar');
+  if (bar) {
+    bar.classList.toggle('viewonly', role === 'viewer');
+  }
+
+  // Disable close button for non-owner viewers
+  const closeBtn = document.querySelector('.dot.close') as HTMLElement;
+  if (closeBtn) {
+    closeBtn.classList.toggle('disabled', role === 'viewer' && !isOwner);
+  }
+
   if (role === 'viewer') {
     term.options.cursorStyle = 'underline';
     term.options.cursorBlink = false;
@@ -437,6 +461,79 @@ term.onData((data: string) => {
   if (appType === 'web') return;
   if (ws.readyState === WebSocket.OPEN) ws.send(data);
 });
+
+// Mobile shortcut bar
+document.getElementById('shortcut-bar')?.addEventListener('click', (e: Event) => {
+  const btn = (e.target as HTMLElement).closest('.shortcut-btn') as HTMLElement | null;
+  if (!btn) return;
+  const data = btn.dataset.send;
+  if (data && ws.readyState === WebSocket.OPEN) {
+    ws.send(data);
+    term.focus();
+  }
+});
+
+// Text input for typing/dictation
+const shortcutInput = document.getElementById('shortcut-input') as HTMLInputElement | null;
+const inputHistory: string[] = [];
+let historyIndex = -1;
+function sendShortcutInput(): void {
+  if (!shortcutInput || !shortcutInput.value) return;
+  if (ws.readyState === WebSocket.OPEN) {
+    const val = shortcutInput.value;
+    ws.send(val + '\r');
+    // Add to history (avoid duplicates at the end)
+    if (!inputHistory.length || inputHistory[inputHistory.length - 1] !== val) {
+      inputHistory.push(val);
+    }
+    historyIndex = -1;
+    shortcutInput.value = '';
+  }
+}
+shortcutInput?.addEventListener('keydown', (e: KeyboardEvent) => {
+  if (e.key === 'Enter') { e.preventDefault(); sendShortcutInput(); }
+  if (e.key === 'ArrowUp' && inputHistory.length) {
+    e.preventDefault();
+    if (historyIndex === -1) historyIndex = inputHistory.length;
+    if (historyIndex > 0) {
+      historyIndex--;
+      shortcutInput!.value = inputHistory[historyIndex];
+    }
+  }
+  if (e.key === 'ArrowDown' && inputHistory.length) {
+    e.preventDefault();
+    if (historyIndex >= 0 && historyIndex < inputHistory.length - 1) {
+      historyIndex++;
+      shortcutInput!.value = inputHistory[historyIndex];
+    } else {
+      historyIndex = -1;
+      shortcutInput!.value = '';
+    }
+  }
+});
+document.getElementById('shortcut-send')?.addEventListener('click', sendShortcutInput);
+
+// Toggle input bar visibility (desktop)
+const inputToggle = document.getElementById('input-toggle');
+const shortcutBar = document.getElementById('shortcut-bar');
+if (inputToggle && shortcutBar) {
+  const PREF_KEY = 'wsh-input-bar';
+  const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
+  const saved = localStorage.getItem(PREF_KEY);
+  const defaultVisible = isTouchDevice;
+  const shouldShow = saved ? saved === 'visible' : defaultVisible;
+  if (!shouldShow) {
+    shortcutBar.classList.add('hidden');
+  } else {
+    inputToggle.classList.add('active');
+  }
+  inputToggle.addEventListener('click', () => {
+    const isHidden = shortcutBar.classList.toggle('hidden');
+    inputToggle.classList.toggle('active', !isHidden);
+    localStorage.setItem(PREF_KEY, isHidden ? 'hidden' : 'visible');
+    scheduleResize();
+  });
+}
 
 term.onBinary((data: string) => {
   if (appType === 'web') return;

@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{title}}</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%231e1e2e'/><text x='4' y='24' font-family='monospace' font-size='18' font-weight='bold' fill='%23a6e3a1'>&#x3e;_</text></svg>" />
 <script src="mini-terminal.js"></script>
+<script src="swipe-cards.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -42,12 +44,18 @@ body {
 }
 
 header {
-  padding: 36px 0 28px;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 28px 0;
+}
+
+.header-left {
+  flex-shrink: 0;
 }
 
 .wordmark {
-  font-size: 28px;
+  font-size: 24px;
   font-weight: 600;
   letter-spacing: -0.5px;
   background: linear-gradient(135deg, #e2e8f0 0%, #a5b4fc 100%);
@@ -57,10 +65,128 @@ header {
 }
 
 .tagline {
-  margin-top: 6px;
-  font-size: 14px;
-  color: var(--text-secondary);
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-tertiary);
   font-weight: 400;
+}
+
+.header-right {
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.header-counts {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.header-counts:empty {
+  display: none;
+}
+
+.header-sessions {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-weight: 500;
+  margin-top: 2px;
+}
+
+.header-sessions:empty {
+  display: none;
+}
+
+.header-sessions .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #22c55e;
+  margin-right: 4px;
+  vertical-align: middle;
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.search-wrapper {
+  position: relative;
+  flex: 1;
+  max-width: 400px;
+}
+
+.search-wrapper svg {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+.search-input {
+  width: 100%;
+  padding: 9px 12px 9px 36px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.search-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+.card.hidden-app,
+.skill-card.hidden-app {
+  opacity: 0.55;
+  border-style: dashed;
+}
+
+.card.hidden-app:hover,
+.skill-card.hidden-app:hover {
+  opacity: 0.85;
+}
+
+.hidden-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--text-tertiary);
+  background: rgba(106, 106, 128, 0.12);
+  border: 1px solid rgba(106, 106, 128, 0.2);
+  vertical-align: middle;
+}
+
+.unhide-btn {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  vertical-align: middle;
+}
+
+.unhide-btn:hover {
+  background: rgba(99, 102, 241, 0.12);
 }
 
 .grid {
@@ -228,8 +354,7 @@ header {
   transition: opacity 0.2s, background 0.2s, color 0.2s;
   z-index: 2;
 }
-.card:hover .config-gear,
-.skill-card:hover .config-gear {
+.card:hover .config-gear {
   opacity: 1;
 }
 .config-gear:hover {
@@ -321,7 +446,7 @@ header {
 /* Skills grid — 2 columns on desktop, 1 on mobile */
 .skills-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(500px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(500px, 100%), 1fr));
   gap: 16px;
   padding-bottom: 40px;
 }
@@ -372,12 +497,17 @@ header {
   display: flex;
   flex-direction: column;
 }
+.skill-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+}
 .skill-input {
   flex: 1;
   background: rgba(0, 0, 0, 0.15);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 10px 14px;
+  padding: 10px 40px 10px 14px;
   color: var(--text-primary);
   font-size: 15px;
   font-family: inherit;
@@ -414,11 +544,39 @@ header {
   scrollbar-width: thin;
   scrollbar-color: var(--border-hover) transparent;
 }
+.skill-submit {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  padding: 0;
+}
+.skill-submit.has-input {
+  color: #a78bfa;
+}
+.skill-submit:hover,
+.skill-submit.has-input:hover {
+  background: rgba(167, 139, 250, 0.15);
+  color: #a78bfa;
+}
+.skill-submit svg {
+  width: 16px;
+  height: 16px;
+}
 .skill-form-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-top: 8px;
+  margin-top: 6px;
 }
 .skill-hint {
   font-size: 11px;
@@ -437,30 +595,16 @@ header {
   border-radius: 4px;
   color: var(--text-secondary);
 }
-.skill-input:focus ~ .skill-form-footer .skill-hint,
+.skill-hint kbd + kbd {
+  margin-left: 2px;
+}
+.skill-input:focus ~ .skill-submit ~ .skill-form-footer .skill-hint,
 .skill-card:hover .skill-hint {
   opacity: 1;
 }
 .skill-input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-.skill-submit {
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text-tertiary);
-  font-size: 13px;
-  font-weight: 600;
-  padding: 9px 18px;
-  cursor: pointer;
-  transition: background 0.2s, border-color 0.2s, color 0.2s;
-  white-space: nowrap;
-}
-.skill-card:hover .skill-submit {
-  background: rgba(167, 139, 250, 0.12);
-  border-color: rgba(167, 139, 250, 0.3);
-  color: #a78bfa;
 }
 
 .skill-inline-wrap { margin-top: 12px; }
@@ -476,17 +620,106 @@ header {
 .message.error { color: #ef4444; }
 
 @media (max-width: 640px) {
-  header { padding: 28px 0 20px; }
+  header { flex-wrap: wrap; padding: 20px 0; gap: 12px; }
+  .header-left { width: 100%; text-align: center; order: 1; }
+  .search-wrapper { max-width: none; order: 2; width: 100%; }
+  .header-right { width: 100%; text-align: center; order: 3; }
+  .container { padding: 0 16px; }
   .grid { gap: 12px; }
   .skills-grid { grid-template-columns: 1fr; }
+  .config-gear { opacity: 0.5; }
+  .wordmark { font-size: 20px; }
+  .tagline { font-size: 11px; }
+  .card { padding: 14px 16px; }
+  .card-title { font-size: 14px; }
+  .card-desc { font-size: 12px; -webkit-line-clamp: 1; margin-top: 2px; }
+  .card-footer { display: none; }
+  .card-icon { width: 36px; height: 36px; border-radius: 8px; }
+  .card-icon svg { width: 18px; height: 18px; }
+  .card-header { gap: 10px; margin-bottom: 4px; }
+  .skill-info .card-title { font-size: 14px; }
+  .skill-desc { font-size: 12px; }
+  .skill-card { padding: 16px 18px; }
+  .skill-input { font-size: 16px; padding: 8px 36px 8px 12px; }
+  .search-input { font-size: 16px; }
+  .section-label { font-size: 10px; }
+  .config-popover { min-width: 0; max-width: none; left: 12px; right: 12px; }
+  .config-gear { width: 44px; height: 44px; top: 6px; right: 6px; }
+  .card:active { transform: scale(0.98); background: var(--bg-card-hover); transition: none; }
+  .skill-card:active { transform: scale(0.99); background: var(--bg-card-hover); transition: none; }
+  .unhide-btn { font-size: 13px; padding: 6px 12px; }
+  .search-wrapper {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    order: unset;
+    width: auto;
+    max-width: none;
+    padding: 12px 16px;
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+    background: var(--bg-page);
+    border-top: 1px solid var(--border);
+    z-index: 100;
+  }
+  .grid { padding-bottom: 72px; }
+  .skills-grid { padding-bottom: 24px; }
+  .config-gear { display: none; }
+  .card { overflow: visible; }
+  .card-swipe-wrap {
+    position: relative;
+    overflow: hidden;
+    border-radius: 12px;
+  }
+  .card-swipe-wrap .card {
+    position: relative;
+    z-index: 1;
+    transition: transform 0.25s ease;
+    border-radius: 12px;
+  }
+  .card-actions {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: stretch;
+    z-index: 0;
+  }
+  .card-action-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 72px;
+    border: none;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    cursor: pointer;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .card-action-btn svg { width: 18px; height: 18px; }
+  .card-action-btn.action-info { background: #333342; color: var(--text-secondary); }
+  .card-action-btn.action-hide { background: #332b1a; color: #f59e0b; }
 }
 </style>
 </head>
 <body>
 <div class="container">
   <header>
-    <div class="wordmark">{{title}}</div>
-    <div class="tagline">{{tagline}}</div>
+    <div class="header-left">
+      <div class="wordmark">{{title}}</div>
+      <div class="tagline">{{tagline}}</div>
+    </div>
+    <div class="search-wrapper">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input class="search-input" id="catalog-search" type="text" placeholder="Search..." autocomplete="off" spellcheck="false">
+    </div>
+    <div class="header-right">
+      <div class="header-counts" id="header-counts"></div>
+      <div class="header-sessions" id="header-sessions"></div>
+    </div>
   </header>
   <div id="skills-section" hidden>
     <div class="section-label">Skills</div>
@@ -568,7 +801,7 @@ header {
     docker: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11c.6-.4 1-1.1.7-2-.4-1-1.7-1.5-2.7-1.2"/><rect x="2" y="10" width="4" height="4" rx="0.5"/><rect x="7" y="10" width="4" height="4" rx="0.5"/><rect x="12" y="10" width="4" height="4" rx="0.5"/><rect x="7" y="5.5" width="4" height="4" rx="0.5"/><rect x="12" y="5.5" width="4" height="4" rx="0.5"/><rect x="12" y="1" width="4" height="4" rx="0.5"/><path d="M1 14c1 4 4.5 7 9.5 7 6 0 10-4 11.5-8"/></svg>',
     git: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 009 9"/></svg>',
     ruby: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8 5 20 19 20 22 8"/><line x1="12" y1="2" x2="12" y2="20"/><line x1="2" y1="8" x2="22" y2="8"/></svg>',
-    ai: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 014 4v1h1a4 4 0 014 4v0a4 4 0 01-2.5 3.7L18 15l.5 5H5.5L6 15l-.5-.3A4 4 0 013 11v0a4 4 0 014-4h1V6a4 4 0 014-4z"/><circle cx="9" cy="11" r="1.5" fill="currentColor" stroke="none"/><circle cx="15" cy="11" r="1.5" fill="currentColor" stroke="none"/></svg>',
+    ai: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/><path d="M12 7l.9 2.1L15 10l-2.1.9L12 13l-.9-2.1L9 10l2.1-.9L12 7z"/></svg>',
     database: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
     network: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>',
     rocket: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 00-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 012-3.95A12.88 12.88 0 0122 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 01-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 3 0 3 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-3 0-3"/></svg>',
@@ -676,69 +909,110 @@ header {
     return app.command;
   }
 
-  function renderSkills(skills) {
+  function buildSkillCard(app, isHidden) {
+    var iconId = resolveIconId(app);
+    var color = iconColors[iconId] || iconColors.default;
+    var div = document.createElement('div');
+    div.className = 'skill-card' + (isHidden ? ' hidden-app' : '');
+    if (isHidden) div.style.display = 'none';
+    div.dataset.app = app.key;
+    div.dataset.title = app.title;
+    div.dataset.desc = resolveDescription(app);
+    if (isHidden) div.dataset.hidden = '1';
+    var badges = isHidden
+      ? '<span class="hidden-badge">Hidden</span> <button class="unhide-btn" data-unhide="' + escapeAttr(app.key) + '">Unhide</button>'
+      : '';
+    div.innerHTML =
+      '<div class="skill-header">' +
+        '<div class="card-icon" style="color:#a78bfa">' + icons[iconId] + '</div>' +
+        '<div class="skill-info">' +
+          '<span class="card-title">' + escapeHtml(app.title) + '</span> ' + badges +
+          '<div class="skill-desc" title="' + escapeAttr(resolveDescription(app)) + '">' + linkify(resolveDescription(app)) + '</div>' +
+        '</div>' +
+        '<span class="card-sessions" data-app="' + escapeAttr(app.key) + '"></span>' +
+      '</div>' +
+      '<form class="skill-form" data-app="' + escapeAttr(app.key) + '">' +
+        '<div class="skill-input-wrap">' +
+          '<textarea class="skill-input" rows="1" placeholder="Describe your task..."></textarea>' +
+          '<button type="submit" class="skill-submit" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>' +
+        '</div>' +
+        '<div class="skill-form-footer">' +
+          '<span class="skill-hint"><kbd>Enter</kbd> run · <kbd>' + (navigator.platform.indexOf('Mac') > -1 ? '\u2318' : 'Ctrl') + '</kbd><kbd>Enter</kbd> new tab · <kbd>Esc</kbd><kbd>Esc</kbd> clear</span>' +
+        '</div>' +
+      '</form>' +
+      '<div class="skill-inline-wrap"></div>';
+    return div;
+  }
+
+  function renderSkills(skills, hiddenSkills) {
     var section = document.getElementById('skills-section');
     var content = document.getElementById('skills-content');
     content.innerHTML = '';
     skills.forEach(function(app, i) {
-      var iconId = resolveIconId(app);
-      var color = iconColors[iconId] || iconColors.default;
-      var div = document.createElement('div');
-      div.className = 'skill-card';
-      div.dataset.app = app.key;
-      div.innerHTML =
-        buildConfigPopover(app) +
-        '<div class="skill-header">' +
-          '<div class="card-icon" style="color:#a78bfa">' + icons[iconId] + '</div>' +
-          '<div class="skill-info">' +
-            '<span class="card-title">' + escapeHtml(app.title) + '</span>' +
-            '<div class="skill-desc" title="' + escapeAttr(resolveDescription(app)) + '">' + linkify(resolveDescription(app)) + '</div>' +
-          '</div>' +
-          '<span class="card-sessions" data-app="' + escapeAttr(app.key) + '"></span>' +
-        '</div>' +
-        '<form class="skill-form" data-app="' + escapeAttr(app.key) + '">' +
-          '<textarea class="skill-input" rows="1" placeholder="Describe your task..."></textarea>' +
-          '<div class="skill-form-footer">' +
-            '<span class="skill-hint"><kbd>Enter</kbd> to run · <kbd>' + (navigator.platform.indexOf('Mac') > -1 ? '\u2318' : 'Ctrl') + '</kbd><kbd>Enter</kbd> for new tab</span>' +
-            '<button type="submit" class="skill-submit">Run</button>' +
-          '</div>' +
-        '</form>' +
-        '<div class="skill-inline-wrap"></div>';
+      var div = buildSkillCard(app, false);
       content.appendChild(div);
       setTimeout(function() { div.classList.add('visible'); }, 30 * i);
+    });
+    (hiddenSkills || []).forEach(function(app, i) {
+      var div = buildSkillCard(app, true);
+      content.appendChild(div);
+      setTimeout(function() { div.classList.add('visible'); }, 30 * (skills.length + i));
     });
     section.hidden = false;
   }
 
-  function renderApps(apps) {
+  function buildAppCard(app, isHidden) {
+    var iconId = resolveIconId(app);
+    var color = iconColors[iconId] || iconColors.default;
+    var a = document.createElement('a');
+    a.href = './' + app.key;
+    a.className = 'card' + (isHidden ? ' hidden-app' : '');
+    if (isHidden) a.style.display = 'none';
+    a.target = '_blank';
+    a.dataset.app = app.key;
+    a.dataset.title = app.title;
+    a.dataset.desc = resolveDescription(app);
+    if (isHidden) a.dataset.hidden = '1';
+    var r = parseInt(color.slice(1,3), 16), g = parseInt(color.slice(3,5), 16), b = parseInt(color.slice(5,7), 16);
+    a.style.setProperty('--card-glow', 'rgba(' + r + ',' + g + ',' + b + ',0.2)');
+    var badges = isHidden
+      ? '<span class="hidden-badge">Hidden</span> <button class="unhide-btn" data-unhide="' + escapeAttr(app.key) + '" onclick="event.preventDefault();event.stopPropagation()">Unhide</button>'
+      : '';
+    a.innerHTML =
+      buildConfigPopover(app) +
+      '<div class="card-header">' +
+        '<div class="card-icon" style="color:' + color + '">' + icons[iconId] + '</div>' +
+        '<div class="card-title-row">' +
+          '<span class="card-title">' + escapeHtml(app.title) + '</span>' +
+          (app.type === 'web' ? '<span class="card-type-badge">WEB</span>' : '') +
+          (app.access === 'public' ? '<span class="card-type-badge card-badge-public">PUBLIC</span>' : '') +
+          badges +
+          '<span class="card-sessions" data-app="' + escapeAttr(app.key) + '"></span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="card-desc" title="' + escapeAttr(resolveDescription(app)) + '">' + linkify(resolveDescription(app)) + '</div>' +
+      '<div class="card-footer">' + escapeHtml(app.key) + '</div>';
+    return a;
+  }
+
+  var isMobile = window.innerWidth <= 640;
+
+  function renderApps(apps, hiddenApps) {
     var content = document.getElementById('apps-content');
     content.innerHTML = '';
     apps.forEach(function(app, i) {
-      var iconId = resolveIconId(app);
-      var color = iconColors[iconId] || iconColors.default;
-      var a = document.createElement('a');
-      a.href = './' + app.key;
-      a.className = 'card';
-      a.target = '_blank';
-      a.dataset.app = app.key;
-      var r = parseInt(color.slice(1,3), 16), g = parseInt(color.slice(3,5), 16), b = parseInt(color.slice(5,7), 16);
-      a.style.setProperty('--card-glow', 'rgba(' + r + ',' + g + ',' + b + ',0.2)');
-      a.innerHTML =
-        buildConfigPopover(app) +
-        '<div class="card-header">' +
-          '<div class="card-icon" style="color:' + color + '">' + icons[iconId] + '</div>' +
-          '<div class="card-title-row">' +
-            '<span class="card-title">' + escapeHtml(app.title) + '</span>' +
-            (app.type === 'web' ? '<span class="card-type-badge">WEB</span>' : '') +
-            (app.access === 'public' ? '<span class="card-type-badge card-badge-public">PUBLIC</span>' : '') +
-            '<span class="card-sessions" data-app="' + escapeAttr(app.key) + '"></span>' +
-          '</div>' +
-        '</div>' +
-        '<div class="card-desc" title="' + escapeAttr(resolveDescription(app)) + '">' + linkify(resolveDescription(app)) + '</div>' +
-        '<div class="card-footer">' + escapeHtml(app.key) + '</div>';
-      content.appendChild(a);
+      var a = buildAppCard(app, false);
+      var el = isMobile ? SwipeCards.wrapCard(a, app, escapeAttr) : a;
+      content.appendChild(el);
       setTimeout(function() { a.classList.add('visible'); }, 30 * i);
     });
+    (hiddenApps || []).forEach(function(app, i) {
+      var a = buildAppCard(app, true);
+      var el = isMobile ? SwipeCards.wrapCard(a, app, escapeAttr) : a;
+      content.appendChild(el);
+      setTimeout(function() { a.classList.add('visible'); }, 30 * (apps.length + i));
+    });
+    if (isMobile) SwipeCards.init();
     document.getElementById('apps-section').hidden = false;
   }
 
@@ -751,18 +1025,103 @@ header {
       appsSection.querySelector('.section-label').style.display = 'none';
       return;
     }
-    var skills = allApps.filter(function(a) { return !!a.skill; });
-    var apps = allApps.filter(function(a) { return !a.skill; });
-    if (skills.length) { renderSkills(skills); restoreDrafts(); reconnectInline(); }
-    if (apps.length) renderApps(apps);
+    var visibleApps = allApps.filter(function(a) { return !a.hidden; });
+    var hiddenApps = allApps.filter(function(a) { return !!a.hidden; });
+    var skills = visibleApps.filter(function(a) { return !!a.skill; });
+    var apps = visibleApps.filter(function(a) { return !a.skill; });
+    var hiddenSkills = hiddenApps.filter(function(a) { return !!a.skill; });
+    var hiddenNonSkills = hiddenApps.filter(function(a) { return !a.skill; });
+    if (skills.length || hiddenSkills.length) {
+      renderSkills(skills, hiddenSkills); restoreDrafts(); reconnectInline();
+    }
+    if (apps.length || hiddenNonSkills.length) renderApps(apps, hiddenNonSkills);
+
+    // Update header counts
+    var countsEl = document.getElementById('header-counts');
+    if (countsEl) {
+      var parts = [];
+      if (apps.length) parts.push(apps.length + (apps.length === 1 ? ' app' : ' apps'));
+      if (skills.length) parts.push(skills.length + (skills.length === 1 ? ' skill' : ' skills'));
+      countsEl.textContent = parts.join(' \u00b7 ');
+    }
+
     // Hide section labels when only one type exists
     if (!skills.length) {
       var label = document.querySelector('#apps-section .section-label');
       if (label) label.style.display = 'none';
     }
 
+    // Focus search bar
+    var searchInput = document.getElementById('catalog-search');
+    if (searchInput && window.innerWidth > 640) searchInput.focus();
+
+    // Wire up search filtering
+    initSearch(allApps);
+
     // Async: fetch active sessions and update badges
     fetchSessions();
+  }
+
+  function initSearch(allApps) {
+    var input = document.getElementById('catalog-search');
+    if (!input) return;
+
+    function filterCards(selector) {
+      var q = input.value.toLowerCase().trim();
+      var cards = document.querySelectorAll(selector);
+      var visible = 0;
+      for (var i = 0; i < cards.length; i++) {
+        var card = cards[i];
+        // On mobile, app cards are wrapped — check the wrap for hidden/data attrs
+        var wrap = card.closest('.card-swipe-wrap');
+        var target = wrap || card;
+        var isHidden = target.dataset.hidden === '1';
+        var title = (target.getAttribute('data-title') || card.getAttribute('data-title') || '').toLowerCase();
+        var desc = (target.getAttribute('data-desc') || card.getAttribute('data-desc') || '').toLowerCase();
+        var matchesQuery = title.indexOf(q) !== -1 || desc.indexOf(q) !== -1;
+        var show = isHidden ? (q && matchesQuery) : (!q || matchesQuery);
+        target.style.display = show ? '' : 'none';
+        if (show) visible++;
+      }
+      return visible;
+    }
+
+    input.addEventListener('input', function() {
+      var skillsVisible = filterCards('.skill-card');
+      var appsVisible = filterCards('#apps-content .card');
+      var skillsSection = document.getElementById('skills-section');
+      var appsSection = document.getElementById('apps-section');
+      if (skillsSection && !skillsSection.hidden) {
+        skillsSection.style.display = skillsVisible ? '' : 'none';
+      }
+      if (appsSection && !appsSection.hidden) {
+        appsSection.style.display = appsVisible ? '' : 'none';
+      }
+    });
+
+    // Wire up unhide buttons
+    document.addEventListener('click', function(e) {
+      var btn = e.target.closest('.unhide-btn');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var appKey = btn.getAttribute('data-unhide');
+      btn.textContent = '...';
+      fetch('./api/apps/' + encodeURIComponent(appKey) + '/unhide', { method: 'POST' })
+        .then(function(res) { return res.json(); })
+        .then(function() {
+          var card = btn.closest('.card, .skill-card');
+          if (card) {
+            card.classList.remove('hidden-app');
+            delete card.dataset.hidden;
+            card.style.borderStyle = '';
+            var badge = card.querySelector('.hidden-badge');
+            if (badge) badge.remove();
+            btn.remove();
+          }
+        })
+        .catch(function() { btn.textContent = 'Unhide'; });
+    });
   }
 
   function fetchSessions() {
@@ -776,7 +1135,7 @@ header {
           var app = s.app || 'bash';
           counts[app] = (counts[app] || 0) + 1;
         });
-        // Update badges
+        // Update card badges
         var badges = document.querySelectorAll('.card-sessions[data-app]');
         for (var i = 0; i < badges.length; i++) {
           var badge = badges[i];
@@ -786,6 +1145,12 @@ header {
             badge.innerHTML = '<span class="dot"></span>' + count + ' active';
             badge.classList.add('active');
           }
+        }
+        // Update header session count
+        var total = data.sessions.length;
+        var headerSessions = document.getElementById('header-sessions');
+        if (headerSessions && total > 0) {
+          headerSessions.innerHTML = '<span class="dot"></span>' + total + ' active ' + (total === 1 ? 'session' : 'sessions');
         }
       })
       .catch(function() {}); // silently ignore — sessions are non-critical
@@ -804,7 +1169,7 @@ header {
   function linkify(text) {
     var safe = escapeHtml(text);
     return safe.replace(/https?:\/\/[^\s<&]+/g, function(url) {
-      return '<a href="' + url + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:var(--border-hover);text-underline-offset:2px" onclick="event.stopPropagation()">' + url + '</a>';
+      return '<a href="' + url + '" target="_blank" rel="noopener" tabindex="-1" style="color:inherit;text-decoration:underline;text-decoration-color:var(--border-hover);text-underline-offset:2px" onclick="event.stopPropagation()">' + url + '</a>';
     });
   }
 
@@ -821,7 +1186,7 @@ header {
     rows.forEach(function(r) {
       html += '<div class="config-row"><span class="config-label">' + escapeHtml(r.label) + '</span><span class="config-value">' + escapeHtml(r.value) + '</span></div>';
     });
-    return '<button class="config-gear" data-config-toggle>' + gearSvg + '</button>' +
+    return '<button class="config-gear" data-config-toggle tabindex="-1">' + gearSvg + '</button>' +
            '<div class="config-popover">' + html + '</div>';
   }
 
@@ -905,6 +1270,8 @@ header {
         inputs[i].style.height = 'auto';
         inputs[i].style.height = Math.min(inputs[i].scrollHeight, 200) + 'px';
         inputs[i].style.overflow = inputs[i].scrollHeight > 200 ? 'auto' : 'hidden';
+        var btn = inputs[i].closest('.skill-input-wrap').querySelector('.skill-submit');
+        if (btn) btn.classList.add('has-input');
       }
     }
   }
@@ -918,6 +1285,8 @@ header {
     ta.style.overflow = ta.scrollHeight > 320 ? 'auto' : 'hidden';
     var appKey = ta.closest('.skill-form').dataset.app;
     saveDraft(appKey, ta.value);
+    var btn = ta.closest('.skill-input-wrap').querySelector('.skill-submit');
+    if (btn) btn.classList.toggle('has-input', ta.value.trim().length > 0);
   });
   document.getElementById('skills-content').addEventListener('click', function(e) {
     if (e.target.closest('button') || e.target.closest('.config-popover') || e.target.classList.contains('skill-input') || e.target.closest('a')) return;
@@ -964,7 +1333,6 @@ header {
     var input = ta.value.trim();
     var btn = form.querySelector('.skill-submit');
     var card = form.closest('.skill-card');
-    btn.textContent = 'Starting...';
     btn.disabled = true;
     ta.disabled = true;
 
@@ -978,7 +1346,6 @@ header {
     .then(function(res) { console.log('[Catalog] POST response: +' + (performance.now() - _t0).toFixed(0) + 'ms'); return res.json(); })
     .then(function(data) {
       console.log('[Catalog] MiniTerminal.create(): +' + (performance.now() - _t0).toFixed(0) + 'ms');
-      btn.textContent = 'Run';
       btn.disabled = false;
       ta.disabled = false;
       ta.value = '';
@@ -994,12 +1361,13 @@ header {
           wrap.innerHTML = '';
           MiniTerminal.create(wrap, data.id, data.url);
           localStorage.setItem('wsh-inline:' + appKey, JSON.stringify({ id: data.id, url: data.url }));
+          // Keep focus on the skill input
+          ta.focus();
         }
       }
       else if (data.error) showError(data.error);
     })
     .catch(function(err) {
-      btn.textContent = 'Run';
       btn.disabled = false;
       ta.disabled = false;
       showError('Failed to launch: ' + err.message);
