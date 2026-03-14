@@ -48,12 +48,28 @@ function injectStyles(): void {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   font-size: 12px;
 }
+.mt-bar.collapsed {
+  border-bottom: 1px solid #333342;
+  border-radius: 8px;
+}
 .mt-status {
   display: flex;
   align-items: center;
   gap: 6px;
   color: #9c9cb2;
   flex: 1;
+  cursor: pointer;
+  user-select: none;
+}
+.mt-chevron {
+  width: 14px;
+  height: 14px;
+  color: #6c7086;
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+.mt-bar.collapsed .mt-chevron {
+  transform: rotate(-90deg);
 }
 .mt-dot {
   width: 7px;
@@ -92,12 +108,18 @@ function injectStyles(): void {
   border-radius: 0 0 8px 8px;
   overflow: hidden;
 }
+.mt-term.collapsed {
+  height: 0;
+  border-width: 0;
+  visibility: hidden;
+}
 .mt-term .xterm {
   padding: 4px;
 }
 .mt-term .xterm { background: #1e1e2e; }
 .mt-term .xterm-cursor-layer { display: none !important; }
 .mt-term .xterm * { cursor: default !important; }
+.mt-term .xterm-helper-textarea { pointer-events: none !important; }
 .mt-term .xterm-viewport {
   overflow-y: auto !important;
   background-color: #1e1e2e !important;
@@ -188,6 +210,10 @@ interface MiniTerminalHandle {
     status.className = 'mt-status';
     const dot = document.createElement('span');
     dot.className = 'mt-dot';
+    const chevron = document.createElement('span');
+    chevron.className = 'mt-chevron';
+    chevron.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+    status.appendChild(chevron);
     status.appendChild(dot);
     status.appendChild(document.createTextNode('Running...'));
 
@@ -195,11 +221,13 @@ interface MiniTerminalHandle {
     popoutBtn.className = 'mt-btn';
     popoutBtn.textContent = 'Open in Tab';
     popoutBtn.setAttribute('data-action', 'popout');
+    popoutBtn.tabIndex = -1;
 
     const closeBtn = document.createElement('button');
     closeBtn.className = 'mt-btn';
     closeBtn.textContent = 'Close';
     closeBtn.setAttribute('data-action', 'close');
+    closeBtn.tabIndex = -1;
 
     bar.appendChild(status);
     bar.appendChild(popoutBtn);
@@ -222,6 +250,12 @@ interface MiniTerminalHandle {
 
     container.appendChild(bar);
     container.appendChild(termDiv);
+
+    // Toggle collapse on status bar click
+    status.addEventListener('click', () => {
+      const collapsed = bar.classList.toggle('collapsed');
+      termDiv.classList.toggle('collapsed', collapsed);
+    });
 
     let ws: WebSocket | null = null;
     let term: any = null;
@@ -259,7 +293,11 @@ interface MiniTerminalHandle {
     });
 
     closeBtn.addEventListener('click', () => {
-      cleanup(); // kill the PTY
+      // Immediate visual feedback: fade out, then cleanup after transition.
+      bar.style.transition = termDiv.style.transition = 'opacity 0.2s ease';
+      bar.style.opacity = termDiv.style.opacity = '0';
+      bar.style.pointerEvents = termDiv.style.pointerEvents = 'none';
+      setTimeout(() => cleanup(), 200);
     });
 
     // Load xterm and connect
@@ -286,6 +324,10 @@ interface MiniTerminalHandle {
       term.loadAddon(fitAddon);
       _mt('fitAddon loaded');
       term.open(termDiv);
+      // Make xterm non-focusable so focus stays on the skill input box.
+      const xtermTextarea = termDiv.querySelector('.xterm-helper-textarea') as HTMLElement | null;
+      if (xtermTextarea) xtermTextarea.tabIndex = -1;
+      term.textarea?.blur();
       // Block keyboard input while allowing xterm.js to respond to OSC queries.
       // (disableStdin suppresses OSC responses, causing TUI apps to stall.)
       term.attachCustomKeyEventHandler(() => false);
@@ -361,12 +403,17 @@ interface MiniTerminalHandle {
         status.lastChild!.textContent = 'Error';
       });
 
-      // ResizeObserver for fit
+      // ResizeObserver for fit — skip when collapsed
+      let lastCols = term.cols, lastRows = term.rows;
       ro = new ResizeObserver(() => {
-        if (disposed || !fitAddon) return;
+        if (disposed || !fitAddon || termDiv.classList.contains('collapsed')) return;
         fitAddon.fit();
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        if (term.cols !== lastCols || term.rows !== lastRows) {
+          lastCols = term.cols;
+          lastRows = term.rows;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+          }
         }
       });
       ro.observe(termDiv);

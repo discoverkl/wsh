@@ -444,6 +444,12 @@ function expandHome(p: string): string {
   return p;
 }
 
+function resolveCwd(appConfig: AppConfig): string {
+  const dir = appConfig.cwd ? expandHome(appConfig.cwd) : (process.env.HOME ?? process.cwd());
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 /** Build the shell command line for PTY spawn. */
 function buildPtyCommand(appConfig: AppConfig): string {
   // For skill apps the command is a shell expression (e.g. `claude "/$SKILL $INPUT"`)
@@ -458,19 +464,9 @@ function buildPtyCommand(appConfig: AppConfig): string {
       .map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
   }
 
-  // Disable ECHOCTL before exec'ing the real command.  The default PTY has
-  // ECHO+ECHOCTL on; if an xterm.js OSC colour response arrives before the
-  // shell turns ECHO off, ECHOCTL mangles ESC (0x1B) into the two-char caret
-  // notation ^[ (0x5E 0x5B), which xterm.js cannot parse → visible garbage.
-  // With ECHOCTL off the raw ESC byte is echoed instead, producing a valid
-  // escape sequence that xterm.js silently consumes.
-  // For inline skill sessions, also disable ECHO to prevent OSC colour query
-  // responses from being echoed back as visible garbage.  The mini-terminal is
-  // read-only so ECHO is not needed for user input.
-  const sttyFlags = appConfig.skill ? '-echo -echoctl' : '-echoctl';
   return appConfig.skill
-    ? `stty ${sttyFlags} 2>/dev/null; ${cmdLine}`
-    : `stty ${sttyFlags} 2>/dev/null; exec ${cmdLine}`;
+    ? cmdLine
+    : `exec ${cmdLine}`;
 }
 
 /** Spawn a PTY and wire it into an existing session. */
@@ -480,7 +476,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
     name: 'xterm-256color',
     cols,
     rows,
-    cwd: appConfig.cwd ? expandHome(appConfig.cwd) : (process.env.HOME ?? process.cwd()),
+    cwd: resolveCwd(appConfig),
     env: {
       ...process.env,
       TERM: 'xterm-256color',
@@ -506,15 +502,16 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
     for (const ws of session.peers.keys()) send(ws);
   });
 
-  ptyProcess.onExit(() => {
-    console.log(`[session ${id}] PTY exited`);
+  ptyProcess.onExit(({ exitCode, signal }) => {
+    console.log(`[session ${id}] PTY exited (code=${exitCode} signal=${signal})`);
+    session.pty = null;
     const closeWs = (ws: WebSocket) => { if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'PTY process exited'); };
     for (const ws of session.peers.keys()) closeWs(ws);
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
     sessions.delete(id);
   });
 
-  console.log(`[session ${id}] spawned (${cols}x${rows})`);
+  console.log(`[session ${id}] spawned (${cols}x${rows}) cmd: ${wrapped}`);
 }
 
 function spawnSession(id: string, appKey: string, appConfig: AppConfig, cols = 80, rows = 24): Session {
@@ -589,7 +586,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
     shell: process.env.SHELL || '/bin/sh',
     detached: true,
     env: env as Record<string, string>,
-    cwd: appConfig.cwd ? expandHome(appConfig.cwd) : (process.env.HOME ?? process.cwd()),
+    cwd: resolveCwd(appConfig),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -603,7 +600,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
     .replace(/\$WSH_PORT\b/g, String(port))
     .replace(/\$WSH_SESSION\b/g, id)
     .replace(/\$WSH_BASE_URL\b/g, BASE + '_p/' + id + '/');
-  const cwd = appConfig.cwd ? expandHome(appConfig.cwd) : (process.env.HOME ?? process.cwd());
+  const cwd = resolveCwd(appConfig);
   const banner = `\x1b[90m$ cd ${cwd} && ${resolvedCmd}\x1b[0m\r\n`;
   const bannerBuf = Buffer.from(banner);
   appendScrollback(session, bannerBuf);
@@ -1039,7 +1036,6 @@ router.get('/api/share', (req: express.Request, res: express.Response) => {
 router.get('/api/apps', (_req: express.Request, res: express.Response) => {
   const apps = loadApps();
   const list = Object.entries(apps)
-    .filter(([, app]) => !app.hidden)
     .map(([key, app]) => ({
       key,
       title: app.title ?? path.basename(app.command),
@@ -1049,8 +1045,49 @@ router.get('/api/apps', (_req: express.Request, res: express.Response) => {
       skill: app.skill ?? null,
       type: app.type ?? 'pty',
       access: app.access ?? null,
+      hidden: app.hidden ? true : undefined,
     }));
   res.json({ apps: list });
+});
+
+router.post('/api/apps/:key/unhide', (req: express.Request, res: express.Response) => {
+  const appKey = req.params.key;
+  const apps = loadApps();
+  if (!apps[appKey]) { res.status(404).json({ error: 'App not found' }); return; }
+  if (!apps[appKey].hidden) { res.json({ ok: true }); return; }
+
+  const userDir = path.join(os.homedir(), '.wsh');
+  const userFile = path.join(userDir, 'apps.yaml');
+  let userConfig: Record<string, unknown> = {};
+  try { userConfig = YAML.parse(fs.readFileSync(userFile, 'utf8')) ?? {}; } catch {}
+  if (!userConfig[appKey] || typeof userConfig[appKey] !== 'object') {
+    userConfig[appKey] = { hidden: false };
+  } else {
+    (userConfig[appKey] as any).hidden = false;
+  }
+  fs.mkdirSync(userDir, { recursive: true });
+  fs.writeFileSync(userFile, YAML.stringify(userConfig), 'utf8');
+  res.json({ ok: true });
+});
+
+router.post('/api/apps/:key/hide', (req: express.Request, res: express.Response) => {
+  const appKey = req.params.key;
+  const apps = loadApps();
+  if (!apps[appKey]) { res.status(404).json({ error: 'App not found' }); return; }
+  if (apps[appKey].hidden) { res.json({ ok: true }); return; }
+
+  const userDir = path.join(os.homedir(), '.wsh');
+  const userFile = path.join(userDir, 'apps.yaml');
+  let userConfig: Record<string, unknown> = {};
+  try { userConfig = YAML.parse(fs.readFileSync(userFile, 'utf8')) ?? {}; } catch {}
+  if (!userConfig[appKey] || typeof userConfig[appKey] !== 'object') {
+    userConfig[appKey] = { hidden: true };
+  } else {
+    (userConfig[appKey] as any).hidden = true;
+  }
+  fs.mkdirSync(userDir, { recursive: true });
+  fs.writeFileSync(userFile, YAML.stringify(userConfig), 'utf8');
+  res.json({ ok: true });
 });
 
 router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
@@ -1140,6 +1177,7 @@ router.all('/_p/:sessionId/*', proxyHandler as any);
 router.use(express.json());
 
 router.post('/api/sessions', async (req: express.Request, res: express.Response) => {
+  console.log(`[api] POST /api/sessions body=${JSON.stringify(req.body)}`);
   const appKey = (req.body?.app as string) || 'bash';
   const input = (req.body?.input as string) || '';
   const mode = (req.body?.mode as string) || '';
@@ -1311,7 +1349,8 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const id  = url.searchParams.get('session');
 
-  if (!id) { ws.close(4000, 'session ID required'); return; }
+  if (!id) { console.log('[ws] rejected: no session ID'); ws.close(4000, 'session ID required'); return; }
+  console.log(`[ws] connect session=${id} url=${req.url}`);
 
   const credential = getRoleForSession(req, id) ?? 'viewer';
   // ?yield=1 lets a writer/owner rejoin as viewer without displacing the current writer.
@@ -1424,6 +1463,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     const text = (data as Buffer).toString();
     const msg  = parseClientMessage(text);
     if (msg) {
+      console.log(`[session ${id}] msg: ${msg.type}`, msg.type === 'resize' ? `${msg.cols}x${msg.rows}` : '');
       // Only owner can close or pin; writers can resize and clear.
       if ((msg.type === 'close' || msg.type === 'pin') && credential !== 'owner') return;
       switch (msg.type) {
@@ -1470,7 +1510,8 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code: number, reason: Buffer) => {
+    console.log(`[session ${id}] ws closed (code=${code} reason=${reason?.toString() || ''})`);
     clearInterval(pingTimer);
     currentSession.peers.delete(ws);
     if (currentSession.writer === ws) {
