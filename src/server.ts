@@ -334,6 +334,8 @@ interface Session {
   timeoutMs?: number;
   access?: 'public' | 'private';
   stripPrefix?: boolean;
+  /** When set, PTY spawn is deferred until the first resize message. */
+  pendingConfig?: AppConfig;
 }
 
 const sessions = new Map<string, Session>();
@@ -395,6 +397,18 @@ function killProcessGroup(child: ChildProcess): void {
 }
 
 
+// Strip OSC color/cursor queries (e.g. \e]10;?\a, \e]11;?\e\\) from data.
+// These are ephemeral requests that should not be replayed — replaying them
+// causes xterm.js to generate fresh responses that appear as garbage in TUI
+// input fields on reconnect.
+const oscQueryStripRe = /\x1b\]\d+;\?(?:\x07|\x1b\\)/g;
+function stripOscQueries(buf: Buffer): Buffer {
+  const str = buf.toString('utf8');
+  if (!str.includes('\x1b]')) return buf;
+  const stripped = str.replace(oscQueryStripRe, '');
+  return stripped.length === str.length ? buf : Buffer.from(stripped, 'utf8');
+}
+
 function appendScrollback(session: Session, data: Buffer): void {
   const limit = session.appType === 'web' ? MAX_SCROLLBACK_WEB : MAX_SCROLLBACK;
   session.scrollback = Buffer.concat([session.scrollback, data]);
@@ -430,16 +444,18 @@ function expandHome(p: string): string {
   return p;
 }
 
-function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session {
-  let cmd: string;
-  let args: string[];
+/** Build the shell command line for PTY spawn. */
+function buildPtyCommand(appConfig: AppConfig): string {
+  // For skill apps the command is a shell expression (e.g. `claude "/$SKILL $INPUT"`)
+  // that must run via `sh -c`.  We fold it into the stty wrapper so there is only
+  // ONE intermediate shell.  For non-skill apps `exec` replaces the wrapper shell
+  // so there is no extra process and signals are delivered correctly.
+  let cmdLine: string;
   if (appConfig.skill) {
-    const cmdLine = [appConfig.command, ...(appConfig.args ?? [])].join(' ');
-    cmd = '/bin/sh';
-    args = ['-c', cmdLine];
+    cmdLine = [appConfig.command, ...(appConfig.args ?? [])].join(' ');
   } else {
-    cmd = appConfig.command;
-    args = appConfig.args ?? [];
+    cmdLine = [appConfig.command, ...(appConfig.args ?? [])]
+      .map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
   }
 
   // Disable ECHOCTL before exec'ing the real command.  The default PTY has
@@ -448,18 +464,22 @@ function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session
   // notation ^[ (0x5E 0x5B), which xterm.js cannot parse → visible garbage.
   // With ECHOCTL off the raw ESC byte is echoed instead, producing a valid
   // escape sequence that xterm.js silently consumes.
-  //
-  // We wrap via `stty -echoctl && exec <cmd>` so the stty runs in the same PTY
-  // before the child process starts.  `exec` replaces the wrapper shell so there
-  // is no extra process and signals are delivered correctly.
-  const escaped = [cmd, ...args].map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-  const wrappedCmd = '/bin/sh';
-  const wrappedArgs = ['-c', `stty -echoctl 2>/dev/null; exec ${escaped}`];
+  // For inline skill sessions, also disable ECHO to prevent OSC colour query
+  // responses from being echoed back as visible garbage.  The mini-terminal is
+  // read-only so ECHO is not needed for user input.
+  const sttyFlags = appConfig.skill ? '-echo -echoctl' : '-echoctl';
+  return appConfig.skill
+    ? `stty ${sttyFlags} 2>/dev/null; ${cmdLine}`
+    : `stty ${sttyFlags} 2>/dev/null; exec ${cmdLine}`;
+}
 
-  const ptyProcess = pty.spawn(wrappedCmd, wrappedArgs, {
+/** Spawn a PTY and wire it into an existing session. */
+function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: number, rows: number): void {
+  const wrapped = buildPtyCommand(appConfig);
+  const ptyProcess = pty.spawn('/bin/sh', ['-c', wrapped], {
     name: 'xterm-256color',
-    cols: 80,
-    rows: 24,
+    cols,
+    rows,
     cwd: appConfig.cwd ? expandHome(appConfig.cwd) : (process.env.HOME ?? process.cwd()),
     env: {
       ...process.env,
@@ -469,12 +489,14 @@ function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session
     } as Record<string, string>,
   });
 
-  const session: Session = { ...baseSession(appKey, appConfig), pty: ptyProcess };
-
-  sessions.set(id, session);
+  session.pty = ptyProcess;
 
   const oscTitleRe = /\x1b\](?:0|2);([^\x07]*)\x07/;
+  const spawnTime = Date.now();
+  let ptyMsgCount = 0;
   ptyProcess.onData((data: string) => {
+    ptyMsgCount++;
+    if (ptyMsgCount <= 10) console.log(`[session ${id}] PTY data #${ptyMsgCount}: ${Buffer.byteLength(data)}B +${Date.now() - spawnTime}ms peers=${session.peers.size}`);
     const m = data.match(oscTitleRe);
     if (m) session.title = m[1];
     session.lastOutput = Date.now();
@@ -492,7 +514,22 @@ function spawnSession(id: string, appKey: string, appConfig: AppConfig): Session
     sessions.delete(id);
   });
 
-  console.log(`[session ${id}] spawned`);
+  console.log(`[session ${id}] spawned (${cols}x${rows})`);
+}
+
+function spawnSession(id: string, appKey: string, appConfig: AppConfig, cols = 80, rows = 24): Session {
+  const session: Session = { ...baseSession(appKey, appConfig) };
+  sessions.set(id, session);
+  spawnPty(id, session, appConfig, cols, rows);
+  return session;
+}
+
+/** Create a pending session that defers PTY spawn until the first resize. */
+function createPendingSession(id: string, appKey: string, appConfig: AppConfig): Session {
+  const session: Session = { ...baseSession(appKey, appConfig) };
+  session.pendingConfig = appConfig;
+  sessions.set(id, session);
+  console.log(`[session ${id}] created (pending — waiting for resize to spawn PTY)`);
   return session;
 }
 
@@ -1129,6 +1166,10 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
       console.error('Failed to spawn web app:', err);
       res.status(500).json({ error: 'Failed to spawn session' }); return;
     }
+  } else if (mode === 'inline') {
+    // Defer PTY spawn until the first resize message so the PTY starts with
+    // the correct terminal dimensions (avoids expensive SIGWINCH re-render).
+    createPendingSession(id, appKey, effectiveConfig);
   } else {
     try {
       spawnSession(id, appKey, effectiveConfig);
@@ -1303,7 +1344,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     if (session.appType === 'web' && session.ready) {
       ws.send(JSON.stringify({ type: 'ready' }));
     }
-    if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
+    if (session.scrollback.length > 0) ws.send(stripOscQueries(session.scrollback), { binary: true });
   } else {
     // reconnect=1 means "only attach to existing session, don't create a new one"
     if (url.searchParams.get('reconnect') === '1') {
@@ -1363,7 +1404,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     session.writer = ws;
     session.peers.set(ws, credential);
     sendRoleMessage(ws, id, session, credential, credential);
-    if (session.scrollback.length > 0) ws.send(session.scrollback, { binary: true });
+    if (session.scrollback.length > 0) ws.send(stripOscQueries(session.scrollback), { binary: true });
     if (session.appType === 'web') {
       ws.send(JSON.stringify({ type: 'cookie', name: `wsh_last_${appKey}`, value: id }));
     }
@@ -1386,14 +1427,24 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       // Only owner can close or pin; writers can resize and clear.
       if ((msg.type === 'close' || msg.type === 'pin') && credential !== 'owner') return;
       switch (msg.type) {
-        case 'resize':
-          if (currentSession.pty) {
-            currentSession.pty.resize(
-              Math.max(1, Math.min(msg.cols, 65535)),
-              Math.max(1, Math.min(msg.rows, 65535)),
-            );
+        case 'resize': {
+          const cols = Math.max(1, Math.min(msg.cols, 65535));
+          const rows = Math.max(1, Math.min(msg.rows, 65535));
+          if (currentSession.pendingConfig) {
+            // Deferred spawn: first resize triggers PTY creation with correct size.
+            const cfg = currentSession.pendingConfig;
+            delete currentSession.pendingConfig;
+            try {
+              spawnPty(id, currentSession, cfg, cols, rows);
+            } catch (err) {
+              console.error(`[session ${id}] deferred spawn failed:`, err);
+              ws.close(1011, 'Failed to spawn PTY');
+            }
+          } else if (currentSession.pty) {
+            currentSession.pty.resize(cols, rows);
           }
           break;
+        }
         case 'close':
           if (currentSession.child) killProcessGroup(currentSession.child);
           else if (currentSession.pty) currentSession.pty.kill('SIGHUP');
