@@ -468,7 +468,8 @@ term.onData((data: string) => {
 document.getElementById('shortcut-bar')?.addEventListener('pointerdown', (e: PointerEvent) => {
   const ta = document.getElementById('shortcut-input') as HTMLTextAreaElement | null;
   const taFocused = ta && document.activeElement === ta;
-  if (taFocused) e.preventDefault(); // keep textarea focused, but allow stealing focus from terminal
+  const isSendBtn = !!(e.target as HTMLElement).closest('.shortcut-send-btn');
+  if (taFocused && !isSendBtn) e.preventDefault(); // keep textarea focused, but let Send button blur it
 
   const btn = (e.target as HTMLElement).closest('.shortcut-btn') as HTMLElement | null;
   if (!btn) return;
