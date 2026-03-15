@@ -147,11 +147,13 @@ document.querySelector('.dot.close')!.addEventListener('click', () => {
   sendAction({ type: 'close' });
 });
 
+const isTouchDevice = document.documentElement.classList.contains('touch');
+
 document.getElementById('clear-btn')!.addEventListener('click', () => {
   if (sessionDead) return;
   term.clear();
   sendAction({ type: 'clear' });
-  term.focus();
+  if (!isTouchDevice) term.focus();
 });
 
 document.querySelector('.dot.minimize')!.addEventListener('click', () => {
@@ -203,7 +205,7 @@ function connect(): void {
       requestAnimationFrame(() => {
         fitAddon.fit();
         sendResize(term.cols, term.rows);
-        term.focus();
+        if (!isTouchDevice) term.focus();
       });
     }
   });
@@ -237,7 +239,7 @@ function connect(): void {
             }
             desktop.removeAttribute('hidden');
             if (appType !== 'web') {
-              requestAnimationFrame(() => { fitAddon.fit(); sendResize(term.cols, term.rows); term.focus(); });
+              requestAnimationFrame(() => { fitAddon.fit(); sendResize(term.cols, term.rows); if (!isTouchDevice) term.focus(); });
             }
           }
           if (typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
@@ -462,54 +464,108 @@ term.onData((data: string) => {
   if (ws.readyState === WebSocket.OPEN) ws.send(data);
 });
 
-// Mobile shortcut bar
-document.getElementById('shortcut-bar')?.addEventListener('click', (e: Event) => {
+// Mobile shortcut bar — use pointerdown to both prevent focus steal and handle action
+document.getElementById('shortcut-bar')?.addEventListener('pointerdown', (e: PointerEvent) => {
   const btn = (e.target as HTMLElement).closest('.shortcut-btn') as HTMLElement | null;
   if (!btn) return;
+  e.preventDefault(); // prevent focus steal from textarea
   const data = btn.dataset.send;
-  if (data && ws.readyState === WebSocket.OPEN) {
-    ws.send(data);
-    term.focus();
+  if (!data) return;
+
+  const ta = document.getElementById('shortcut-input') as HTMLTextAreaElement | null;
+  const taFocused = ta && document.activeElement === ta;
+
+  // Ctrl+C (\x03) and Esc (\x1b) always bypass textarea and go to terminal
+  if (data === '\x03' || data === '\x1b') {
+    if (ws.readyState === WebSocket.OPEN) ws.send(data);
+    return;
   }
+
+  // When textarea is focused, redirect to textarea
+  if (taFocused && ta) {
+    if (data === '\r') {
+      // Enter → submit
+      sendShortcutInput();
+    } else if (data === '\x7f') {
+      // Backspace → delete before cursor
+      const start = ta.selectionStart;
+      const end = ta.selectionEnd;
+      if (start !== end) {
+        document.execCommand('delete');
+      } else if (start > 0) {
+        ta.setSelectionRange(start - 1, start);
+        document.execCommand('delete');
+      }
+    } else if (data === '\x1b[A') {
+      // Arrow up → history navigation
+      if (inputHistory.length) {
+        if (historyIndex === -1) historyIndex = inputHistory.length;
+        if (historyIndex > 0) {
+          historyIndex--;
+          ta.value = inputHistory[historyIndex];
+        }
+      }
+    } else if (data === '\x1b[B') {
+      // Arrow down → history navigation
+      if (inputHistory.length && historyIndex >= 0) {
+        if (historyIndex < inputHistory.length - 1) {
+          historyIndex++;
+          ta.value = inputHistory[historyIndex];
+        } else {
+          historyIndex = -1;
+          ta.value = '';
+        }
+      }
+    } else if (data === '\x09') {
+      // Tab → insert tab
+      document.execCommand('insertText', false, '\t');
+    } else {
+      // Printable characters → insert at cursor
+      document.execCommand('insertText', false, data);
+    }
+    autoResizeInput();
+    return;
+  }
+
+  // Default: send to terminal
+  if (ws.readyState === WebSocket.OPEN) ws.send(data);
 });
 
 // Text input for typing/dictation
-const shortcutInput = document.getElementById('shortcut-input') as HTMLInputElement | null;
+const shortcutInput = document.getElementById('shortcut-input') as HTMLTextAreaElement | null;
 const inputHistory: string[] = [];
 let historyIndex = -1;
+function autoResizeInput(): void {
+  if (!shortcutInput) return;
+  const maxH = window.innerHeight * 0.5;
+  shortcutInput.style.overflow = shortcutInput.scrollHeight > maxH ? 'auto' : 'hidden';
+}
+function resetInputSize(): void {
+  if (!shortcutInput) return;
+  shortcutInput.style.overflow = 'hidden';
+}
 function sendShortcutInput(): void {
-  if (!shortcutInput || !shortcutInput.value) return;
+  if (!shortcutInput) return;
   if (ws.readyState === WebSocket.OPEN) {
+    if (!shortcutInput.value) { ws.send('\r'); return; }
     const val = shortcutInput.value;
     ws.send(val + '\r');
-    // Add to history (avoid duplicates at the end)
     if (!inputHistory.length || inputHistory[inputHistory.length - 1] !== val) {
       inputHistory.push(val);
     }
     historyIndex = -1;
     shortcutInput.value = '';
+    resetInputSize();
   }
 }
+shortcutInput?.addEventListener('input', autoResizeInput);
 shortcutInput?.addEventListener('keydown', (e: KeyboardEvent) => {
-  if (e.key === 'Enter') { e.preventDefault(); sendShortcutInput(); }
-  if (e.key === 'ArrowUp' && inputHistory.length) {
+  // Desktop: Enter submits, Shift+Enter newline. Touch: Enter is newline (use Send button to submit).
+  if (e.key === 'Enter' && !e.shiftKey && !isTouchDevice) {
     e.preventDefault();
-    if (historyIndex === -1) historyIndex = inputHistory.length;
-    if (historyIndex > 0) {
-      historyIndex--;
-      shortcutInput!.value = inputHistory[historyIndex];
-    }
+    sendShortcutInput();
   }
-  if (e.key === 'ArrowDown' && inputHistory.length) {
-    e.preventDefault();
-    if (historyIndex >= 0 && historyIndex < inputHistory.length - 1) {
-      historyIndex++;
-      shortcutInput!.value = inputHistory[historyIndex];
-    } else {
-      historyIndex = -1;
-      shortcutInput!.value = '';
-    }
-  }
+  // Arrow keys: let browser handle cursor movement natively in textarea
 });
 document.getElementById('shortcut-send')?.addEventListener('click', sendShortcutInput);
 
@@ -518,7 +574,7 @@ const inputToggle = document.getElementById('input-toggle');
 const shortcutBar = document.getElementById('shortcut-bar');
 if (inputToggle && shortcutBar) {
   const PREF_KEY = 'wsh-input-bar';
-  const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
+  const isTouchDevice = document.documentElement.classList.contains('touch');
   const saved = localStorage.getItem(PREF_KEY);
   const defaultVisible = isTouchDevice;
   const shouldShow = saved ? saved === 'visible' : defaultVisible;
@@ -533,6 +589,142 @@ if (inputToggle && shortcutBar) {
     localStorage.setItem(PREF_KEY, isHidden ? 'hidden' : 'visible');
     scheduleResize();
   });
+}
+
+
+// Touch scrolling with inertia for mobile (xterm.js v6 custom scrollbar doesn't support touch)
+{
+  const container = document.getElementById('terminal-container');
+  if (container) {
+    const lineH = Math.ceil(14 * 1.2); // fontSize * lineHeight
+    const SWIPE_GAIN = 1.8;   // amplify finger movement
+    const FRICTION = 0.975;    // per-frame decay (higher = longer coast)
+    const STOP_THRESHOLD = 0.03; // px/ms below which we stop
+    const BOUNCE_RESISTANCE = 0.35; // how much movement is dampened past edges
+    const BOUNCE_BACK_SPEED = 0.15; // spring-back interpolation factor
+    let touchY: number | null = null;
+    let accum = 0;
+    let velocity = 0;        // px/ms, smoothed
+    let lastTime = 0;
+    let inertiaId = 0;
+    let overscroll = 0;      // px past edge (positive = past bottom, negative = past top)
+    let xtermEl: HTMLElement | null = null;
+
+    function getXtermEl(): HTMLElement | null {
+      if (!xtermEl) xtermEl = container!.querySelector('.xterm');
+      return xtermEl;
+    }
+
+    function isAtTop(): boolean { return term.buffer.active.viewportY === 0; }
+    function isAtBottom(): boolean { return term.buffer.active.viewportY >= term.buffer.active.baseY; }
+
+    function stopInertia(): void {
+      if (inertiaId) { cancelAnimationFrame(inertiaId); inertiaId = 0; }
+      velocity = 0;
+    }
+
+    function applyOverscrollTransform(): void {
+      const el = getXtermEl();
+      if (!el) return;
+      if (Math.abs(overscroll) < 0.5) {
+        el.style.transform = '';
+      } else {
+        el.style.transform = `translateY(${-overscroll}px)`;
+      }
+    }
+
+    function bounceBack(): void {
+      if (Math.abs(overscroll) < 0.5) {
+        overscroll = 0;
+        applyOverscrollTransform();
+        inertiaId = 0;
+        return;
+      }
+      overscroll *= (1 - BOUNCE_BACK_SPEED);
+      applyOverscrollTransform();
+      inertiaId = requestAnimationFrame(bounceBack);
+    }
+
+    function inertiaLoop(): void {
+      velocity *= FRICTION;
+
+      if (Math.abs(velocity) < STOP_THRESHOLD) {
+        if (Math.abs(overscroll) > 0.5) {
+          inertiaId = requestAnimationFrame(bounceBack);
+        } else {
+          overscroll = 0;
+          applyOverscrollTransform();
+          inertiaId = 0;
+        }
+        return;
+      }
+
+      const scrollingDown = velocity > 0;
+      const scrollingUp = velocity < 0;
+      if ((scrollingDown && isAtBottom()) || (scrollingUp && isAtTop())) {
+        overscroll += velocity * 16 * BOUNCE_RESISTANCE;
+        const maxOverscroll = 60;
+        overscroll = Math.max(-maxOverscroll, Math.min(maxOverscroll, overscroll));
+        applyOverscrollTransform();
+        velocity *= 0.9;
+      } else {
+        accum += velocity * 16;
+        const lines = Math.trunc(accum / lineH);
+        if (lines !== 0) { term.scrollLines(lines); accum -= lines * lineH; }
+      }
+      inertiaId = requestAnimationFrame(inertiaLoop);
+    }
+
+    container.addEventListener('touchstart', (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        stopInertia();
+        if (Math.abs(overscroll) > 0.5) {
+          overscroll = 0;
+          applyOverscrollTransform();
+        }
+        touchY = e.touches[0].clientY;
+        lastTime = e.timeStamp;
+        accum = 0;
+      }
+    }, { passive: true });
+
+    container.addEventListener('touchmove', (e: TouchEvent) => {
+      if (touchY === null || e.touches.length !== 1) return;
+      const y = e.touches[0].clientY;
+      const dt = Math.max(1, e.timeStamp - lastTime);
+      const dy = (touchY - y) * SWIPE_GAIN;
+      const instantV = dy / dt;
+      velocity = velocity * 0.3 + instantV * 0.7;
+      lastTime = e.timeStamp;
+      touchY = y;
+
+      const scrollingDown = dy > 0;
+      const scrollingUp = dy < 0;
+      if ((scrollingDown && isAtBottom()) || (scrollingUp && isAtTop())) {
+        overscroll += dy * BOUNCE_RESISTANCE;
+        const maxOverscroll = 80;
+        overscroll = Math.max(-maxOverscroll, Math.min(maxOverscroll, overscroll));
+        applyOverscrollTransform();
+      } else {
+        accum += dy;
+        const lines = Math.trunc(accum / lineH);
+        if (lines !== 0) { term.scrollLines(lines); accum -= lines * lineH; }
+      }
+      e.preventDefault();
+    }, { passive: false });
+
+    const endTouch = () => {
+      touchY = null;
+      if (Math.abs(overscroll) > 0.5) {
+        velocity = 0;
+        inertiaId = requestAnimationFrame(bounceBack);
+      } else if (Math.abs(velocity) > STOP_THRESHOLD) {
+        inertiaId = requestAnimationFrame(inertiaLoop);
+      }
+    };
+    container.addEventListener('touchend', endTouch, { passive: true });
+    container.addEventListener('touchcancel', endTouch, { passive: true });
+  }
 }
 
 term.onBinary((data: string) => {
