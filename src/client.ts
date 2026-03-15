@@ -470,7 +470,8 @@ document.getElementById('shortcut-bar')?.addEventListener('pointerdown', (e: Poi
   const ta = document.getElementById('shortcut-input') as HTMLTextAreaElement | null;
   const taFocused = ta && document.activeElement === ta;
   const isSendBtn = !!(e.target as HTMLElement).closest('.shortcut-send-btn');
-  if (taFocused && !isSendBtn) e.preventDefault(); // keep textarea focused, but let Send button blur it
+  const isTextarea = !!(e.target as HTMLElement).closest('.shortcut-text-input');
+  if (taFocused && !isSendBtn && !isTextarea) e.preventDefault(); // keep textarea focused, but let Send button and textarea itself handle normally
 
   const btn = (e.target as HTMLElement).closest('.shortcut-btn') as HTMLElement | null;
   if (!btn) return;
