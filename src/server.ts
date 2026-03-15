@@ -767,6 +767,12 @@ const CUSTOM_URL = values.url || null;
 const BIND_ADDR  = values.bind || null;
 const TRUST_PROXY = values['trust-proxy']!;
 const NO_TLS = values['no-tls']!;
+const PROXY_SECRET = process.env.WSH_PROXY_SECRET || '';
+
+if (TRUST_PROXY && !PROXY_SECRET) {
+  console.error('Error: --trust-proxy requires WSH_PROXY_SECRET environment variable');
+  process.exit(1);
+}
 
 if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
   console.error(`Error: invalid port "${values.port}"`);
@@ -955,6 +961,10 @@ function parseCookies(header: string): Record<string, string> {
   return out;
 }
 
+function verifyProxySecret(req: http.IncomingMessage): boolean {
+  return req.headers['x-wsh-proxy-secret'] === PROXY_SECRET;
+}
+
 function makeTokenMiddleware(tok: string): express.RequestHandler {
   return (req, res, next) => {
     const url = new URL(req.url ?? '/', `https://${req.headers.host}`);
@@ -969,6 +979,7 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
 
     // Trust-proxy mode: gateway sets X-WSH-User header
     if (TRUST_PROXY) {
+      if (!verifyProxySecret(req)) { res.status(401).send('Unauthorized'); return; }
       if (req.headers['x-wsh-user']) return proceed();
       if (url.pathname.startsWith(BASE + 'api/')) {
         res.status(401).send('Unauthorized');
@@ -1130,6 +1141,7 @@ function proxyHandler(req: express.Request, res: express.Response): void {
   // Access control: non-public web apps require owner auth
   if (session.access !== 'public') {
     if (TRUST_PROXY) {
+      if (!verifyProxySecret(req)) { res.status(401).send('Unauthorized'); return; }
       const xUser = req.headers['x-wsh-user'] as string | undefined;
       if (xUser !== process.env.ABOX_USER && xUser !== '*') {
         res.status(401).send('Unauthorized');
@@ -1285,6 +1297,7 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
     // Access control: non-public web apps require owner auth
     if (wsSession.access !== 'public') {
       if (TRUST_PROXY) {
+        if (!verifyProxySecret(req)) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
         const xUser = req.headers['x-wsh-user'] as string | undefined;
         if (xUser !== process.env.ABOX_USER && xUser !== '*') {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -1326,7 +1339,7 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
 
   const sessionId = url.searchParams.get('session') ?? '';
   if (TRUST_PROXY) {
-    if (!req.headers['x-wsh-user'] || getRoleForSession(req, sessionId) === null) {
+    if (!verifyProxySecret(req) || !req.headers['x-wsh-user'] || getRoleForSession(req, sessionId) === null) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
