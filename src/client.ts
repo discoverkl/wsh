@@ -466,14 +466,14 @@ term.onData((data: string) => {
 
 // Mobile shortcut bar — use pointerdown to both prevent focus steal and handle action
 document.getElementById('shortcut-bar')?.addEventListener('pointerdown', (e: PointerEvent) => {
-  const btn = (e.target as HTMLElement).closest('.shortcut-btn') as HTMLElement | null;
-  if (!btn) return;
-  e.preventDefault(); // prevent focus steal from textarea
-  const data = btn.dataset.send;
-  if (!data) return;
-
   const ta = document.getElementById('shortcut-input') as HTMLTextAreaElement | null;
   const taFocused = ta && document.activeElement === ta;
+  if (taFocused) e.preventDefault(); // keep textarea focused, but allow stealing focus from terminal
+
+  const btn = (e.target as HTMLElement).closest('.shortcut-btn') as HTMLElement | null;
+  if (!btn) return;
+  const data = btn.dataset.send;
+  if (!data) return;
 
   // Ctrl+C (\x03) and Esc (\x1b) always bypass textarea and go to terminal
   if (data === '\x03' || data === '\x1b') {
