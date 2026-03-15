@@ -130,6 +130,7 @@ function injectStyles() {
 .mt-term .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
 .mt-term .xterm-viewport::-webkit-scrollbar-thumb { background: #45475a; border-radius: 3px; }
 .mt-term .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #585b70; }
+html.touch .mt-term .xterm-scrollable-element { pointer-events: none; }
 .mt-loading {
   position: absolute;
   inset: 0;
@@ -217,7 +218,13 @@ window.MiniTerminal = {
         closeBtn.textContent = 'Close';
         closeBtn.setAttribute('data-action', 'close');
         closeBtn.tabIndex = -1;
+        const escBtn = document.createElement('button');
+        escBtn.className = 'mt-btn';
+        escBtn.textContent = 'Esc';
+        escBtn.setAttribute('data-action', 'esc');
+        escBtn.tabIndex = -1;
         bar.appendChild(status);
+        bar.appendChild(escBtn);
         bar.appendChild(popoutBtn);
         bar.appendChild(closeBtn);
         const termDiv = document.createElement('div');
@@ -284,6 +291,10 @@ window.MiniTerminal = {
             }
             disconnect();
         }
+        escBtn.addEventListener('click', () => {
+            if (ws && ws.readyState === WebSocket.OPEN)
+                ws.send('\x1b');
+        });
         popoutBtn.addEventListener('click', () => {
             try {
                 const u = new URL(sessionUrl);
@@ -333,6 +344,78 @@ window.MiniTerminal = {
             // (disableStdin suppresses OSC responses, causing TUI apps to stall.)
             term.attachCustomKeyEventHandler(() => false);
             term.onSelectionChange(() => term.clearSelection());
+            // Touch scrolling with inertia (same xterm.js v6 workaround as full terminal)
+            {
+                const lineH = Math.ceil(13 * 1.2); // fontSize * lineHeight
+                const SWIPE_GAIN = 1.8;
+                const FRICTION = 0.975;
+                const STOP_THRESHOLD = 0.03;
+                let tY = null;
+                let tAccum = 0;
+                let tVel = 0;
+                let tLastTime = 0;
+                let tInertiaId = 0;
+                function stopTInertia() {
+                    if (tInertiaId) {
+                        cancelAnimationFrame(tInertiaId);
+                        tInertiaId = 0;
+                    }
+                    tVel = 0;
+                }
+                function tInertiaLoop() {
+                    tVel *= FRICTION;
+                    if (Math.abs(tVel) < STOP_THRESHOLD) {
+                        tInertiaId = 0;
+                        return;
+                    }
+                    tAccum += tVel * 16;
+                    const lines = Math.trunc(tAccum / lineH);
+                    if (lines !== 0) {
+                        term.scrollLines(lines);
+                        tAccum -= lines * lineH;
+                    }
+                    tInertiaId = requestAnimationFrame(tInertiaLoop);
+                }
+                termDiv.addEventListener('touchstart', (e) => {
+                    if (e.touches.length === 1) {
+                        stopTInertia();
+                        tY = e.touches[0].clientY;
+                        tLastTime = e.timeStamp;
+                        tAccum = 0;
+                    }
+                }, { passive: true });
+                termDiv.addEventListener('touchmove', (e) => {
+                    if (tY === null || e.touches.length !== 1)
+                        return;
+                    const y = e.touches[0].clientY;
+                    const dt = Math.max(1, e.timeStamp - tLastTime);
+                    const dy = (tY - y) * SWIPE_GAIN;
+                    const instantV = dy / dt;
+                    tVel = tVel * 0.3 + instantV * 0.7;
+                    tLastTime = e.timeStamp;
+                    tY = y;
+                    // Let page scroll when terminal is at edge
+                    const atTop = term.buffer.active.viewportY === 0;
+                    const atBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
+                    if ((dy < 0 && atTop) || (dy > 0 && atBottom))
+                        return;
+                    tAccum += dy;
+                    const lines = Math.trunc(tAccum / lineH);
+                    if (lines !== 0) {
+                        term.scrollLines(lines);
+                        tAccum -= lines * lineH;
+                    }
+                    e.preventDefault();
+                }, { passive: false });
+                const endTTouch = () => {
+                    tY = null;
+                    if (Math.abs(tVel) > STOP_THRESHOLD) {
+                        tInertiaId = requestAnimationFrame(tInertiaLoop);
+                    }
+                };
+                termDiv.addEventListener('touchend', endTTouch, { passive: true });
+                termDiv.addEventListener('touchcancel', endTTouch, { passive: true });
+            }
             _mt('term.open() done');
             fitAddon.fit();
             _mt('fitAddon.fit() done');
@@ -425,6 +508,15 @@ window.MiniTerminal = {
             status.lastChild.textContent = 'Failed to load terminal';
             dot.classList.add('exited');
         });
-        return { dispose: cleanup };
+        return {
+            dispose: cleanup,
+            send(data) {
+                if (ws && ws.readyState === WebSocket.OPEN)
+                    ws.send(data);
+            },
+            isAlive() {
+                return !disposed && !!ws && ws.readyState === WebSocket.OPEN;
+            },
+        };
     }
 };

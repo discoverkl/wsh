@@ -607,7 +607,23 @@ header {
   cursor: not-allowed;
 }
 
-.skill-inline-wrap { margin-top: 12px; }
+.skill-inline-wrap {
+  margin: 12px -24px -20px;
+}
+.skill-inline-wrap .mt-bar {
+  border-left: none;
+  border-right: none;
+  border-radius: 0;
+}
+.skill-inline-wrap .mt-bar.collapsed {
+  border-radius: 0 0 12px 12px;
+}
+.skill-inline-wrap .mt-term {
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+  border-radius: 0 0 12px 12px;
+}
 
 /* Error / Empty */
 .message {
@@ -619,93 +635,93 @@ header {
 
 .message.error { color: #ef4444; }
 
-@media (max-width: 640px) {
-  header { flex-wrap: wrap; padding: 20px 0; gap: 12px; }
-  .header-left { width: 100%; text-align: center; order: 1; }
-  .search-wrapper { max-width: none; order: 2; width: 100%; }
-  .header-right { width: 100%; text-align: center; order: 3; }
-  .container { padding: 0 16px; }
-  .grid { gap: 12px; }
-  .skills-grid { grid-template-columns: 1fr; }
-  .config-gear { opacity: 0.5; }
-  .wordmark { font-size: 20px; }
-  .tagline { font-size: 11px; }
-  .card { padding: 14px 16px; }
-  .card-title { font-size: 14px; }
-  .card-desc { font-size: 12px; -webkit-line-clamp: 1; margin-top: 2px; }
-  .card-footer { display: none; }
-  .card-icon { width: 36px; height: 36px; border-radius: 8px; }
-  .card-icon svg { width: 18px; height: 18px; }
-  .card-header { gap: 10px; margin-bottom: 4px; }
-  .skill-info .card-title { font-size: 14px; }
-  .skill-desc { font-size: 12px; }
-  .skill-card { padding: 16px 18px; }
-  .skill-input { font-size: 16px; padding: 8px 36px 8px 12px; }
-  .search-input { font-size: 16px; }
-  .section-label { font-size: 10px; }
-  .config-popover { min-width: 0; max-width: none; left: 12px; right: 12px; }
-  .config-gear { width: 44px; height: 44px; top: 6px; right: 6px; }
-  .card:active { transform: scale(0.98); background: var(--bg-card-hover); transition: none; }
-  .skill-card:active { transform: scale(0.99); background: var(--bg-card-hover); transition: none; }
-  .unhide-btn { font-size: 13px; padding: 6px 12px; }
-  .search-wrapper {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    order: unset;
-    width: auto;
-    max-width: none;
-    padding: 12px 16px;
-    padding-bottom: calc(12px + env(safe-area-inset-bottom));
-    background: var(--bg-page);
-    border-top: 1px solid var(--border);
-    z-index: 100;
-  }
-  .grid { padding-bottom: 72px; }
-  .skills-grid { padding-bottom: 24px; }
-  .config-gear { display: none; }
-  .card { overflow: visible; }
-  .card-swipe-wrap {
-    position: relative;
-    overflow: hidden;
-    border-radius: 12px;
-  }
-  .card-swipe-wrap .card {
-    position: relative;
-    z-index: 1;
-    transition: transform 0.25s ease;
-    border-radius: 12px;
-  }
-  .card-actions {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    display: flex;
-    align-items: stretch;
-    z-index: 0;
-  }
-  .card-action-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 72px;
-    border: none;
-    font-size: 11px;
-    font-weight: 600;
-    color: #fff;
-    cursor: pointer;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .card-action-btn svg { width: 18px; height: 18px; }
-  .card-action-btn.action-info { background: #333342; color: var(--text-secondary); }
-  .card-action-btn.action-hide { background: #332b1a; color: #f59e0b; }
+/* ── Narrow layout (≤640px) ── */
+html.narrow header { padding: 14px 0; gap: 0; flex-wrap: wrap; }
+html.narrow .header-left { flex: 1; }
+html.narrow .tagline { display: none; }
+html.narrow .header-right { flex-shrink: 0; }
+html.narrow .container { padding: 0 16px; }
+html.narrow .grid { gap: 12px; }
+html.narrow .skills-grid { grid-template-columns: 1fr; margin: 0 -16px; padding: 0 0 24px; gap: 10px; }
+html.narrow .skill-card { border-radius: 0; }
+html.narrow .skill-inline-wrap .mt-bar { border-radius: 0; }
+html.narrow .skill-inline-wrap .mt-bar.collapsed { border-radius: 0; }
+html.narrow .skill-inline-wrap .mt-term { border-radius: 0; }
+html.narrow .skill-hint { display: none !important; }
+html.narrow .wordmark { font-size: 20px; }
+html.narrow .card { padding: 14px 16px; overflow: visible; }
+html.narrow .card-title { font-size: 14px; }
+html.narrow .card-desc { font-size: 12px; -webkit-line-clamp: 1; margin-top: 2px; }
+html.narrow .card-footer { display: none; }
+html.narrow .card-icon { width: 36px; height: 36px; border-radius: 8px; }
+html.narrow .card-icon svg { width: 18px; height: 18px; }
+html.narrow .card-header { gap: 10px; margin-bottom: 4px; }
+html.narrow .skill-info .card-title { font-size: 14px; }
+html.narrow .skill-desc { font-size: 12px; }
+html.narrow .skill-input { font-size: 16px; padding: 10px 44px 10px 14px; }
+html.narrow .skill-submit { width: 36px; height: 36px; right: 4px; bottom: 4px; }
+html.narrow .skill-submit svg { width: 18px; height: 18px; }
+html.narrow .search-input { font-size: 16px; }
+html.narrow .section-label { font-size: 10px; }
+html.narrow .config-popover { min-width: 0; max-width: none; left: 12px; right: 12px; }
+html.narrow .config-gear { display: none; }
+html.narrow .unhide-btn { font-size: 13px; padding: 6px 12px; }
+html.narrow .search-wrapper {
+  order: 3;
+  flex-basis: 100%;
+  max-width: none;
+  margin-top: 10px;
 }
+html.narrow .search-wrapper svg { left: 12px; }
+
+/* ── Touch interaction ── */
+html.touch .config-gear { opacity: 0.5; width: 44px; height: 44px; top: 6px; right: 6px; }
+html.touch .card:active { transform: scale(0.98); background: var(--bg-card-hover); transition: none; }
+html.touch .skill-card:active { transform: scale(0.99); background: var(--bg-card-hover); transition: none; }
+
+/* ── Narrow + Touch: swipe cards ── */
+html.narrow.touch .card-swipe-wrap {
+  position: relative;
+  overflow: hidden;
+  border-radius: 12px;
+}
+html.narrow.touch .card-swipe-wrap .card {
+  position: relative;
+  z-index: 1;
+  transition: transform 0.25s ease;
+  border-radius: 12px;
+}
+html.narrow.touch .card-actions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: stretch;
+  z-index: 0;
+}
+html.narrow.touch .card-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  border: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  cursor: pointer;
+  flex-direction: column;
+  gap: 4px;
+}
+html.narrow.touch .card-action-btn svg { width: 18px; height: 18px; }
+html.narrow.touch .card-action-btn.action-info { background: #333342; color: var(--text-secondary); }
+html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f59e0b; }
 </style>
 </head>
 <body>
+<script>
+(function(){var d=document.documentElement;if(matchMedia('(pointer:coarse)').matches)d.classList.add('touch');if(matchMedia('(max-width:640px)').matches)d.classList.add('narrow');matchMedia('(max-width:640px)').addEventListener('change',function(e){d.classList.toggle('narrow',e.matches)})})();
+</script>
 <div class="container">
   <header>
     <div class="header-left">
@@ -737,6 +753,9 @@ header {
 </div>
 <script>
 (function() {
+  // Track active inline terminals per app key
+  var inlineTerminals = {};
+
   // Accent colors per icon category
   var iconColors = {
     terminal: '#22c55e',
@@ -995,7 +1014,8 @@ header {
     return a;
   }
 
-  var isMobile = window.innerWidth <= 640;
+  var d = document.documentElement;
+  var isMobile = d.classList.contains('narrow') && d.classList.contains('touch');
 
   function renderApps(apps, hiddenApps) {
     var content = document.getElementById('apps-content');
@@ -1053,7 +1073,7 @@ header {
 
     // Focus search bar
     var searchInput = document.getElementById('catalog-search');
-    if (searchInput && window.innerWidth > 640) searchInput.focus();
+    if (searchInput && !document.documentElement.classList.contains('narrow') && !document.documentElement.classList.contains('touch')) searchInput.focus();
 
     // Wire up search filtering
     initSearch(allApps);
@@ -1207,16 +1227,11 @@ header {
       try {
         var info = JSON.parse(saved);
         var wrap = card.querySelector('.skill-inline-wrap');
-        MiniTerminal.create(wrap, info.id, info.url, true);
+        var handle = MiniTerminal.create(wrap, info.id, info.url, true);
+        inlineTerminals[appKey] = handle;
       } catch { localStorage.removeItem('wsh-inline:' + appKey); }
     });
   }
-
-  // Clean up localStorage when inline terminal closes
-  document.addEventListener('mt-close', function(e) {
-    var card = e.target.closest('.skill-card[data-app]');
-    if (card) localStorage.removeItem('wsh-inline:' + card.dataset.app);
-  });
 
   fetch('./api/apps')
     .then(function(res) {
@@ -1301,7 +1316,7 @@ header {
   var lastEscTime = 0;
   document.getElementById('skills-content').addEventListener('keydown', function(e) {
     if (!e.target.classList.contains('skill-input')) return;
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !d.classList.contains('touch')) {
       e.preventDefault();
       var form = e.target.closest('form');
       if (!form) return;
@@ -1322,6 +1337,17 @@ header {
     }
   });
 
+  // Track active inline terminals per app key
+  var inlineTerminals = {};
+
+  document.addEventListener('mt-close', function(e) {
+    var card = e.target.closest('.skill-card[data-app]');
+    if (card) {
+      delete inlineTerminals[card.dataset.app];
+      localStorage.removeItem('wsh-inline:' + card.dataset.app);
+    }
+  });
+
   document.getElementById('skills-content').addEventListener('submit', function(e) {
     e.preventDefault();
     var form = e.target;
@@ -1333,6 +1359,21 @@ header {
     var input = ta.value.trim();
     var btn = form.querySelector('.skill-submit');
     var card = form.closest('.skill-card');
+
+    // If there's a live inline session, send input to it instead of creating a new one
+    var existing = inlineTerminals[appKey];
+    if (existing && existing.isAlive() && !newTabFlag) {
+      if (input) {
+        existing.send(input + '\r');
+      } else {
+        existing.send('\r');
+      }
+      ta.value = '';
+      ta.style.height = 'auto';
+      saveDraft(appKey, '');
+      return;
+    }
+
     btn.disabled = true;
     ta.disabled = true;
 
@@ -1359,10 +1400,11 @@ header {
           var wrap = card.querySelector('.skill-inline-wrap');
           // Dispose existing inline terminal if any
           wrap.innerHTML = '';
-          MiniTerminal.create(wrap, data.id, data.url);
+          var handle = MiniTerminal.create(wrap, data.id, data.url);
+          inlineTerminals[appKey] = handle;
           localStorage.setItem('wsh-inline:' + appKey, JSON.stringify({ id: data.id, url: data.url }));
-          // Keep focus on the skill input
-          ta.focus();
+          // Keep focus on the skill input (desktop only — avoid keyboard popup on touch)
+          if (!document.documentElement.classList.contains('touch')) ta.focus();
         }
       }
       else if (data.error) showError(data.error);

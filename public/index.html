@@ -165,7 +165,7 @@
       filter: brightness(1.4);
     }
 
-    #pin-btn { color: #45475a; }
+    #pin-btn { color: #6c7086; }
     #pin-btn.pinned { color: #a6e3a1; }
     #pin-btn[hidden] { display: none; }
 
@@ -179,7 +179,7 @@
       align-items: center;
       justify-content: center;
       border-radius: 6px;
-      color: #45475a;
+      color: #6c7086;
       cursor: pointer;
       transition: color 0.15s, background 0.15s;
     }
@@ -445,21 +445,26 @@
 
     .shortcut-input-row {
       display: flex;
-      align-items: center;
+      align-items: flex-end;
       gap: 6px;
     }
     .shortcut-text-input {
       flex: 1;
-      height: 40px;
+      min-height: 40px;
+      max-height: 50dvh;
       min-width: 0;
-      padding: 0 12px;
+      padding: 9px 12px;
       border: none;
       border-radius: 20px;
       background: rgba(205, 214, 244, 0.08);
       color: #cdd6f4;
       font-family: 'JetBrains Mono', monospace;
       font-size: 14px;
+      line-height: 1.5;
       outline: none;
+      resize: none;
+      overflow: hidden;
+      field-sizing: content;
     }
     .shortcut-text-input::placeholder {
       color: #585b70;
@@ -467,6 +472,10 @@
     .shortcut-text-input:focus {
       background: rgba(205, 214, 244, 0.12);
     }
+    .shortcut-text-input::-webkit-scrollbar { width: 4px; }
+    .shortcut-text-input::-webkit-scrollbar-track { background: transparent; }
+    .shortcut-text-input::-webkit-scrollbar-thumb { background: #45475a; border-radius: 2px; }
+    .shortcut-text-input { scrollbar-width: thin; scrollbar-color: #45475a transparent; }
     .shortcut-send-btn {
       flex-shrink: 0;
       width: 40px;
@@ -495,19 +504,36 @@
       stroke-linejoin: round;
     }
 
-    @media (max-width: 640px) {
-      .shortcut-row { display: flex; }
+    /* Narrow: show shortcut rows on small screens */
+    html.narrow .shortcut-row { display: flex; }
+
+    /* Touch: show shortcut rows, enlarge touch targets */
+    html.touch .shortcut-row { display: flex; }
+    html.touch #titlebar { height: 44px; }
+    html.touch #clear-btn, html.touch #logs-btn, html.touch #share-btn,
+    html.touch #new-session, html.touch #pin-btn, html.touch #input-toggle {
+      width: 36px;
+      height: 36px;
     }
-    @media (pointer: coarse) {
-      .shortcut-row { display: flex; }
+    html.touch .dot { width: 28px; height: 28px; }
+    html.touch .dot svg { width: 12px; height: 12px; opacity: 1; }
+    html.touch #controls { gap: 10px; }
+    html.touch #share-popover { width: auto; left: 14px; right: 14px; }
+    html.touch .copy-btn { padding: 8px 16px; font-size: 13px; }
+    html.touch .share-url { font-size: 12px; padding: 8px 10px; }
+    html.touch #clear-btn, html.touch #logs-btn, html.touch #share-btn,
+    html.touch #new-session, html.touch #pin-btn, html.touch #input-toggle {
+      color: #9399b2;
     }
-    @media (pointer: coarse) {
-      #titlebar { height: 44px; }
-      #clear-btn, #logs-btn, #share-btn, #new-session, #pin-btn, #input-toggle {
-        width: 36px;
-        height: 36px;
-      }
+    html.touch #input-toggle.active { color: #a6e3a1; }
+    html.touch #pin-btn.pinned { color: #a6e3a1; }
+    html.touch #clear-btn:hover, html.touch #logs-btn:hover, html.touch #share-btn:hover,
+    html.touch #new-session:hover, html.touch #pin-btn:hover, html.touch #input-toggle:hover {
+      background: none;
     }
+
+    /* Narrow: hide title to avoid overlap with enlarged controls */
+    html.narrow #title-group { display: none; }
 
     #conn-banner {
       display: none;
@@ -549,6 +575,9 @@
 
     /* tighten xterm padding */
     .xterm-screen { padding: 0; }
+
+    /* Touch: disable scrollbar interaction — touch scroll handles it */
+    html.touch .xterm .xterm-scrollable-element { pointer-events: none; }
 
     /* themed scrollbar */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -698,6 +727,9 @@
   </style>
 </head>
 <body>
+<script>
+(function(){var d=document.documentElement;if(matchMedia('(pointer:coarse)').matches)d.classList.add('touch');if(matchMedia('(max-width:640px)').matches)d.classList.add('narrow');matchMedia('(max-width:640px)').addEventListener('change',function(e){d.classList.toggle('narrow',e.matches)})})();
+</script>
   <div id="desktop" hidden>
     <div id="window">
       <div id="titlebar">
@@ -793,10 +825,6 @@
           <button class="shortcut-btn sc-peach" data-send="&#x7f;"><svg viewBox="0 0 14 14"><polyline points="5,4 2,7 5,10"/><line x1="2" y1="7" x2="12" y2="7"/></svg></button>
           <button class="shortcut-btn sc-green" data-send="&#x0d;"><svg viewBox="0 0 14 14"><path d="M11,3 L11,8 L3,8"/><polyline points="5,5.5 3,8 5,10.5"/></svg></button>
         </div>
-        <div class="shortcut-input-row">
-          <input class="shortcut-text-input" id="shortcut-input" type="text" placeholder="Type or dictate..." autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
-          <button class="shortcut-send-btn" id="shortcut-send"><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
-        </div>
         <div class="shortcut-row">
           <button class="shortcut-btn sc-green" data-send="y">y</button>
           <button class="shortcut-btn sc-peach" data-send="n">n</button>
@@ -814,6 +842,10 @@
           <button class="shortcut-btn sc-teal" data-send="&#x1b;[A"><svg viewBox="0 0 14 14"><polyline points="3,9 7,5 11,9"/></svg></button>
           <button class="shortcut-btn sc-teal" data-send="&#x1b;[B"><svg viewBox="0 0 14 14"><polyline points="3,5 7,9 11,5"/></svg></button>
           <button class="shortcut-btn sc-green" data-send="&#x0d;"><svg viewBox="0 0 14 14"><path d="M11,3 L11,8 L3,8"/><polyline points="5,5.5 3,8 5,10.5"/></svg></button>
+        </div>
+        <div class="shortcut-input-row">
+          <textarea class="shortcut-text-input" id="shortcut-input" rows="1" placeholder="Type or dictate..." autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="send"></textarea>
+          <button class="shortcut-send-btn" id="shortcut-send"><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
         </div>
       </div>
       <div id="web-container" hidden>

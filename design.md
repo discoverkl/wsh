@@ -426,6 +426,17 @@ When an owner connects, the server reports other pinned sessions. The client sho
 - `convertEol: false` for TUI — PTY already emits `\r\n`
 - `overflow: hidden` on body — prevents scrollbars that trigger FitAddon resize loops
 
+## Mobile Touch Workarounds (xterm.js v6)
+
+xterm.js v6 has several gaps in mobile/touch support. The following workarounds are applied and should be re-tested when upgrading xterm.js.
+
+| Issue | Root cause | Workaround | Files |
+|---|---|---|---|
+| **No touch scrolling** | `Gesture.addTarget()` is never called internally, so the built-in touch gesture system is wired up but inactive | Manual `touchstart`/`touchmove`/`touchend` handlers on `#terminal-container` (full terminal) and `.mt-term` (mini-terminal) that call `term.scrollLines()` with inertia/momentum and rubber-band bounce at edges | `src/client.ts`, `src/mini-terminal.ts` |
+| **Scrollbar blocks touch & keyboard** | xterm's custom scrollbar (`xterm-scrollable-element`) intercepts touch events, causing keyboard popup and stuck scrollbar state | CSS `pointer-events: none` on `.xterm-scrollable-element` for `(pointer: coarse)` devices; scrollbar remains visible as position indicator | `public/index.html`, `src/mini-terminal.ts` |
+| **Keyboard pops up on shortcut button tap** | `term.focus()` was called after sending shortcut key data | Removed the `term.focus()` call in the shortcut bar click handler | `src/client.ts` |
+| **Empty send button sends Enter** | Tapping the send button with no text should send Enter to the terminal | When input is empty, `sendShortcutInput()` sends `\r` instead of no-op | `src/client.ts` |
+
 ## Distribution
 
 Single Go binary, no prerequisites:
