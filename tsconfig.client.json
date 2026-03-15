@@ -9,5 +9,5 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["src/client.ts", "src/mini-terminal.ts"]
+  "include": ["src/client.ts", "src/mini-terminal.ts", "src/touch-scroll.ts"]
 }

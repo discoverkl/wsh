@@ -1,6 +1,6 @@
-"use strict";
 // MiniTerminal — lightweight inline terminal component for skill cards.
 // Lazy-loads xterm.js + fit addon from CDN, streams PTY output read-only.
+import { bindTouchScroll } from './touch-scroll.js';
 let xtermPromise = null;
 function ensureXterm() {
     if (xtermPromise)
@@ -345,77 +345,13 @@ window.MiniTerminal = {
             term.attachCustomKeyEventHandler(() => false);
             term.onSelectionChange(() => term.clearSelection());
             // Touch scrolling with inertia (same xterm.js v6 workaround as full terminal)
-            {
-                const lineH = Math.ceil(13 * 1.2); // fontSize * lineHeight
-                const SWIPE_GAIN = 1.8;
-                const FRICTION = 0.975;
-                const STOP_THRESHOLD = 0.03;
-                let tY = null;
-                let tAccum = 0;
-                let tVel = 0;
-                let tLastTime = 0;
-                let tInertiaId = 0;
-                function stopTInertia() {
-                    if (tInertiaId) {
-                        cancelAnimationFrame(tInertiaId);
-                        tInertiaId = 0;
-                    }
-                    tVel = 0;
-                }
-                function tInertiaLoop() {
-                    tVel *= FRICTION;
-                    if (Math.abs(tVel) < STOP_THRESHOLD) {
-                        tInertiaId = 0;
-                        return;
-                    }
-                    tAccum += tVel * 16;
-                    const lines = Math.trunc(tAccum / lineH);
-                    if (lines !== 0) {
-                        term.scrollLines(lines);
-                        tAccum -= lines * lineH;
-                    }
-                    tInertiaId = requestAnimationFrame(tInertiaLoop);
-                }
-                termDiv.addEventListener('touchstart', (e) => {
-                    if (e.touches.length === 1) {
-                        stopTInertia();
-                        tY = e.touches[0].clientY;
-                        tLastTime = e.timeStamp;
-                        tAccum = 0;
-                    }
-                }, { passive: true });
-                termDiv.addEventListener('touchmove', (e) => {
-                    if (tY === null || e.touches.length !== 1)
-                        return;
-                    const y = e.touches[0].clientY;
-                    const dt = Math.max(1, e.timeStamp - tLastTime);
-                    const dy = (tY - y) * SWIPE_GAIN;
-                    const instantV = dy / dt;
-                    tVel = tVel * 0.3 + instantV * 0.7;
-                    tLastTime = e.timeStamp;
-                    tY = y;
-                    // Let page scroll when terminal is at edge
-                    const atTop = term.buffer.active.viewportY === 0;
-                    const atBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
-                    if ((dy < 0 && atTop) || (dy > 0 && atBottom))
-                        return;
-                    tAccum += dy;
-                    const lines = Math.trunc(tAccum / lineH);
-                    if (lines !== 0) {
-                        term.scrollLines(lines);
-                        tAccum -= lines * lineH;
-                    }
-                    e.preventDefault();
-                }, { passive: false });
-                const endTTouch = () => {
-                    tY = null;
-                    if (Math.abs(tVel) > STOP_THRESHOLD) {
-                        tInertiaId = requestAnimationFrame(tInertiaLoop);
-                    }
-                };
-                termDiv.addEventListener('touchend', endTTouch, { passive: true });
-                termDiv.addEventListener('touchcancel', endTTouch, { passive: true });
-            }
+            bindTouchScroll({
+                el: termDiv,
+                lineHeight: Math.ceil((term.options.fontSize || 13) * (term.options.lineHeight || 1.2)),
+                scrollLines: (n) => term.scrollLines(n),
+                isAtTop: () => term.buffer.active.viewportY === 0,
+                isAtBottom: () => term.buffer.active.viewportY >= term.buffer.active.baseY,
+            });
             _mt('term.open() done');
             fitAddon.fit();
             _mt('fitAddon.fit() done');
