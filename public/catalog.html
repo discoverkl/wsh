@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{title}}</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%231e1e2e'/><text x='4' y='24' font-family='monospace' font-size='18' font-weight='bold' fill='%23a6e3a1'>&#x3e;_</text></svg>" />
-<script src="mini-terminal.js"></script>
+<script type="module" src="mini-terminal.js"></script>
 <script src="swipe-cards.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -956,7 +956,7 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
           '<button type="submit" class="skill-submit" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>' +
         '</div>' +
         '<div class="skill-form-footer">' +
-          '<span class="skill-hint"><kbd>Enter</kbd> run · <kbd>' + (navigator.platform.indexOf('Mac') > -1 ? '\u2318' : 'Ctrl') + '</kbd><kbd>Enter</kbd> new tab · <kbd>Esc</kbd><kbd>Esc</kbd> clear</span>' +
+          '<span class="skill-hint"><kbd>Enter</kbd> run · <kbd>' + (navigator.platform.indexOf('Mac') > -1 ? '\u2318' : 'Ctrl') + '</kbd><kbd>Enter</kbd> new tab · <kbd>Esc</kbd> send Esc</span>' +
         '</div>' +
       '</form>' +
       '<div class="skill-inline-wrap"></div>';
@@ -1313,7 +1313,6 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
     if (ta && !ta.disabled) ta.focus();
   });
 
-  var lastEscTime = 0;
   document.getElementById('skills-content').addEventListener('keydown', function(e) {
     if (!e.target.classList.contains('skill-input')) return;
     if (e.key === 'Enter' && !e.shiftKey && !d.classList.contains('touch')) {
@@ -1326,14 +1325,11 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
       form.requestSubmit();
     }
     if (e.key === 'Escape') {
-      var now = Date.now();
-      if (now - lastEscTime < 500) {
-        e.target.value = '';
-        e.target.style.height = 'auto';
-        var appKey = e.target.closest('.skill-form').dataset.app;
-        saveDraft(appKey, '');
+      var appKey = e.target.closest('.skill-form').dataset.app;
+      var existing = inlineTerminals[appKey];
+      if (existing && existing.isAlive()) {
+        existing.send('\x1b');
       }
-      lastEscTime = now;
     }
   });
 
@@ -1363,11 +1359,8 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
     // If there's a live inline session, send input to it instead of creating a new one
     var existing = inlineTerminals[appKey];
     if (existing && existing.isAlive() && !newTabFlag) {
-      if (input) {
-        existing.send(input + '\r');
-      } else {
-        existing.send('\r');
-      }
+      var raw = input && (input[0] === '/' || input[0] === '?');
+      existing.send(raw ? input + '\r' : '/' + appKey + (input ? ' ' + input : '') + '\r');
       ta.value = '';
       ta.style.height = 'auto';
       saveDraft(appKey, '');

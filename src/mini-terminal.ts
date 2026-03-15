@@ -240,8 +240,15 @@ interface MiniTerminalHandle {
     escBtn.setAttribute('data-action', 'esc');
     escBtn.tabIndex = -1;
 
+    const bottomBtn = document.createElement('button');
+    bottomBtn.className = 'mt-btn';
+    bottomBtn.textContent = '\u2193 Bottom';
+    bottomBtn.setAttribute('data-action', 'bottom');
+    bottomBtn.tabIndex = -1;
+
     bar.appendChild(status);
     bar.appendChild(escBtn);
+    bar.appendChild(bottomBtn);
     bar.appendChild(popoutBtn);
     bar.appendChild(closeBtn);
 
@@ -300,6 +307,10 @@ interface MiniTerminalHandle {
 
     escBtn.addEventListener('click', () => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send('\x1b');
+    });
+
+    bottomBtn.addEventListener('click', () => {
+      if (term) term.scrollToBottom();
     });
 
     popoutBtn.addEventListener('click', () => {

@@ -1242,7 +1242,7 @@ router.get('/:appName', (req: express.Request, res: express.Response, next: expr
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
-router.use(express.static(path.join(__dirname, '..', 'public')));
+router.use(express.static(path.join(__dirname, '..', 'public'), { etag: true, lastModified: true, maxAge: 0 }));
 
 app.use(BASE, router);
 

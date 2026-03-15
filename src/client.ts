@@ -234,6 +234,8 @@ function connect(): void {
               document.getElementById('clear-btn')!.setAttribute('hidden', '');
               document.getElementById('logs-btn')!.removeAttribute('hidden');
               document.getElementById('share-btn')!.setAttribute('hidden', '');
+              document.getElementById('shortcut-bar')!.classList.add('hidden');
+              document.getElementById('input-toggle')!.setAttribute('hidden', '');
               term.options.convertEol = true;
             } else {
               document.getElementById('terminal-container')!.removeAttribute('hidden');
