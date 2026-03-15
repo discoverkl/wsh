@@ -728,7 +728,7 @@
 </head>
 <body>
 <script>
-(function(){var d=document.documentElement;if(matchMedia('(pointer:coarse)').matches)d.classList.add('touch');if(matchMedia('(max-width:640px)').matches)d.classList.add('narrow');matchMedia('(max-width:640px)').addEventListener('change',function(e){d.classList.toggle('narrow',e.matches)})})();
+(function(){var d=document.documentElement;var tq=matchMedia('(any-pointer:coarse)');if(tq.matches)d.classList.add('touch');tq.addEventListener('change',function(e){d.classList.toggle('touch',e.matches)});if(matchMedia('(max-width:640px)').matches)d.classList.add('narrow');matchMedia('(max-width:640px)').addEventListener('change',function(e){d.classList.toggle('narrow',e.matches)})})();
 </script>
   <div id="desktop" hidden>
     <div id="window">
@@ -810,12 +810,12 @@
       <div id="terminal-container" hidden></div>
       <div id="shortcut-bar">
         <div class="shortcut-row-landscape">
-          <button class="shortcut-btn sc-green" data-send="y">y</button>
-          <button class="shortcut-btn sc-peach" data-send="n">n</button>
-          <button class="shortcut-btn sc-blue" data-send="1">1</button>
-          <button class="shortcut-btn sc-sapph" data-send="2">2</button>
-          <button class="shortcut-btn sc-lav" data-send="3">3</button>
-          <button class="shortcut-btn sc-mauve" data-send="4">4</button>
+          <button class="shortcut-btn sc-green" data-send="y&#x0d;">y</button>
+          <button class="shortcut-btn sc-peach" data-send="n&#x0d;">n</button>
+          <button class="shortcut-btn sc-blue" data-send="1&#x0d;">1</button>
+          <button class="shortcut-btn sc-sapph" data-send="2&#x0d;">2</button>
+          <button class="shortcut-btn sc-lav" data-send="3&#x0d;">3</button>
+          <button class="shortcut-btn sc-sky" id="scroll-bottom-btn" title="Scroll to bottom"><svg viewBox="0 0 14 14"><polyline points="3,4 7,8 11,4"/><polyline points="3,7 7,11 11,7"/></svg></button>
           <button class="shortcut-btn sc-red" data-send="&#x03;">Stop</button>
           <button class="shortcut-btn sc-peach" data-send="&#x1b;">Esc</button>
           <button class="shortcut-btn sc-sky" data-send="&#x09;">Tab</button>
@@ -826,12 +826,12 @@
           <button class="shortcut-btn sc-green" data-send="&#x0d;"><svg viewBox="0 0 14 14"><path d="M11,3 L11,8 L3,8"/><polyline points="5,5.5 3,8 5,10.5"/></svg></button>
         </div>
         <div class="shortcut-row">
-          <button class="shortcut-btn sc-green" data-send="y">y</button>
-          <button class="shortcut-btn sc-peach" data-send="n">n</button>
-          <button class="shortcut-btn sc-blue" data-send="1">1</button>
-          <button class="shortcut-btn sc-sapph" data-send="2">2</button>
-          <button class="shortcut-btn sc-lav" data-send="3">3</button>
-          <button class="shortcut-btn sc-mauve" data-send="4">4</button>
+          <button class="shortcut-btn sc-green" data-send="y&#x0d;">y</button>
+          <button class="shortcut-btn sc-peach" data-send="n&#x0d;">n</button>
+          <button class="shortcut-btn sc-blue" data-send="1&#x0d;">1</button>
+          <button class="shortcut-btn sc-sapph" data-send="2&#x0d;">2</button>
+          <button class="shortcut-btn sc-lav" data-send="3&#x0d;">3</button>
+          <button class="shortcut-btn sc-sky" id="scroll-bottom-btn" title="Scroll to bottom"><svg viewBox="0 0 14 14"><polyline points="3,4 7,8 11,4"/><polyline points="3,7 7,11 11,7"/></svg></button>
           <button class="shortcut-btn sc-peach" data-send="&#x7f;"><svg viewBox="0 0 14 14"><polyline points="5,4 2,7 5,10"/><line x1="2" y1="7" x2="12" y2="7"/></svg></button>
         </div>
         <div class="shortcut-row">

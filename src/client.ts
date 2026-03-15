@@ -1,5 +1,6 @@
 import type { Terminal as TerminalType } from '@xterm/xterm';
 import type { FitAddon as FitAddonType } from '@xterm/addon-fit';
+import { bindTouchScroll } from './touch-scroll.js';
 
 // These globals are injected by the CDN <script> tags in index.html.
 declare const Terminal: typeof TerminalType;
@@ -482,8 +483,15 @@ document.getElementById('shortcut-bar')?.addEventListener('pointerdown', (e: Poi
     return;
   }
 
-  // When textarea is focused, redirect to textarea
+  // When textarea is focused, redirect to textarea (strip trailing \r from auto-enter buttons)
   if (taFocused && ta) {
+    const bare = data.endsWith('\r') && data.length > 1 ? data.slice(0, -1) : data;
+    if (bare !== data && bare.length === 1) {
+      // Auto-enter shortcut (e.g. "y\r") — just insert the character in textarea
+      document.execCommand('insertText', false, bare);
+      autoResizeInput();
+      return;
+    }
     if (data === '\r') {
       // Enter → submit
       sendShortcutInput();
@@ -530,6 +538,12 @@ document.getElementById('shortcut-bar')?.addEventListener('pointerdown', (e: Poi
 
   // Default: send to terminal
   if (ws.readyState === WebSocket.OPEN) ws.send(data);
+});
+
+// Scroll-to-bottom shortcut button
+document.getElementById('scroll-bottom-btn')?.addEventListener('pointerdown', (e: PointerEvent) => {
+  e.preventDefault();
+  term.scrollToBottom();
 });
 
 // Text input for typing/dictation
@@ -597,134 +611,14 @@ if (inputToggle && shortcutBar) {
 {
   const container = document.getElementById('terminal-container');
   if (container) {
-    const lineH = Math.ceil(14 * 1.2); // fontSize * lineHeight
-    const SWIPE_GAIN = 1.8;   // amplify finger movement
-    const FRICTION = 0.975;    // per-frame decay (higher = longer coast)
-    const STOP_THRESHOLD = 0.03; // px/ms below which we stop
-    const BOUNCE_RESISTANCE = 0.35; // how much movement is dampened past edges
-    const BOUNCE_BACK_SPEED = 0.15; // spring-back interpolation factor
-    let touchY: number | null = null;
-    let accum = 0;
-    let velocity = 0;        // px/ms, smoothed
-    let lastTime = 0;
-    let inertiaId = 0;
-    let overscroll = 0;      // px past edge (positive = past bottom, negative = past top)
-    let xtermEl: HTMLElement | null = null;
-
-    function getXtermEl(): HTMLElement | null {
-      if (!xtermEl) xtermEl = container!.querySelector('.xterm');
-      return xtermEl;
-    }
-
-    function isAtTop(): boolean { return term.buffer.active.viewportY === 0; }
-    function isAtBottom(): boolean { return term.buffer.active.viewportY >= term.buffer.active.baseY; }
-
-    function stopInertia(): void {
-      if (inertiaId) { cancelAnimationFrame(inertiaId); inertiaId = 0; }
-      velocity = 0;
-    }
-
-    function applyOverscrollTransform(): void {
-      const el = getXtermEl();
-      if (!el) return;
-      if (Math.abs(overscroll) < 0.5) {
-        el.style.transform = '';
-      } else {
-        el.style.transform = `translateY(${-overscroll}px)`;
-      }
-    }
-
-    function bounceBack(): void {
-      if (Math.abs(overscroll) < 0.5) {
-        overscroll = 0;
-        applyOverscrollTransform();
-        inertiaId = 0;
-        return;
-      }
-      overscroll *= (1 - BOUNCE_BACK_SPEED);
-      applyOverscrollTransform();
-      inertiaId = requestAnimationFrame(bounceBack);
-    }
-
-    function inertiaLoop(): void {
-      velocity *= FRICTION;
-
-      if (Math.abs(velocity) < STOP_THRESHOLD) {
-        if (Math.abs(overscroll) > 0.5) {
-          inertiaId = requestAnimationFrame(bounceBack);
-        } else {
-          overscroll = 0;
-          applyOverscrollTransform();
-          inertiaId = 0;
-        }
-        return;
-      }
-
-      const scrollingDown = velocity > 0;
-      const scrollingUp = velocity < 0;
-      if ((scrollingDown && isAtBottom()) || (scrollingUp && isAtTop())) {
-        overscroll += velocity * 16 * BOUNCE_RESISTANCE;
-        const maxOverscroll = 60;
-        overscroll = Math.max(-maxOverscroll, Math.min(maxOverscroll, overscroll));
-        applyOverscrollTransform();
-        velocity *= 0.9;
-      } else {
-        accum += velocity * 16;
-        const lines = Math.trunc(accum / lineH);
-        if (lines !== 0) { term.scrollLines(lines); accum -= lines * lineH; }
-      }
-      inertiaId = requestAnimationFrame(inertiaLoop);
-    }
-
-    container.addEventListener('touchstart', (e: TouchEvent) => {
-      if (e.touches.length === 1) {
-        stopInertia();
-        if (Math.abs(overscroll) > 0.5) {
-          overscroll = 0;
-          applyOverscrollTransform();
-        }
-        touchY = e.touches[0].clientY;
-        lastTime = e.timeStamp;
-        accum = 0;
-      }
-    }, { passive: true });
-
-    container.addEventListener('touchmove', (e: TouchEvent) => {
-      if (touchY === null || e.touches.length !== 1) return;
-      const y = e.touches[0].clientY;
-      const dt = Math.max(1, e.timeStamp - lastTime);
-      const dy = (touchY - y) * SWIPE_GAIN;
-      const instantV = dy / dt;
-      velocity = velocity * 0.3 + instantV * 0.7;
-      lastTime = e.timeStamp;
-      touchY = y;
-
-      const scrollingDown = dy > 0;
-      const scrollingUp = dy < 0;
-      if ((scrollingDown && isAtBottom()) || (scrollingUp && isAtTop())) {
-        overscroll += dy * BOUNCE_RESISTANCE;
-        const maxOverscroll = 80;
-        overscroll = Math.max(-maxOverscroll, Math.min(maxOverscroll, overscroll));
-        applyOverscrollTransform();
-      } else {
-        accum += dy;
-        const lines = Math.trunc(accum / lineH);
-        if (lines !== 0) { term.scrollLines(lines); accum -= lines * lineH; }
-      }
-      e.preventDefault();
-    }, { passive: false });
-
-    const endTouch = () => {
-      touchY = null;
-      if (Math.abs(overscroll) > 0.5) {
-        velocity = 0;
-        inertiaId = requestAnimationFrame(bounceBack);
-      } else if (Math.abs(velocity) > STOP_THRESHOLD) {
-        inertiaId = requestAnimationFrame(inertiaLoop);
-      }
-    };
-    container.addEventListener('touchend', endTouch, { passive: true });
-    container.addEventListener('touchcancel', endTouch, { passive: true });
+    bindTouchScroll({
+      el: container,
+      lineHeight: Math.ceil((term.options.fontSize || 14) * (term.options.lineHeight || 1.2)),
+      scrollLines: (n) => term.scrollLines(n),
+      isAtTop: () => term.buffer.active.viewportY === 0,
+      isAtBottom: () => term.buffer.active.viewportY >= term.buffer.active.baseY,
+      bounceEl: container.querySelector('.xterm') as HTMLElement | null,
+    });
   }
 }
 

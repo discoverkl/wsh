@@ -720,7 +720,7 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
 </head>
 <body>
 <script>
-(function(){var d=document.documentElement;if(matchMedia('(pointer:coarse)').matches)d.classList.add('touch');if(matchMedia('(max-width:640px)').matches)d.classList.add('narrow');matchMedia('(max-width:640px)').addEventListener('change',function(e){d.classList.toggle('narrow',e.matches)})})();
+(function(){var d=document.documentElement;var tq=matchMedia('(any-pointer:coarse)');if(tq.matches)d.classList.add('touch');tq.addEventListener('change',function(e){d.classList.toggle('touch',e.matches)});if(matchMedia('(max-width:640px)').matches)d.classList.add('narrow');matchMedia('(max-width:640px)').addEventListener('change',function(e){d.classList.toggle('narrow',e.matches)})})();
 </script>
 <div class="container">
   <header>
