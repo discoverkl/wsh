@@ -20,7 +20,7 @@ Web:  Browser (iframe)     <--HTTP/WS-->  server.ts (reverse proxy)  <--HTTP/WS-
 
 **Server -> Client:**
 - **Binary**: Raw PTY output (TUI) or stdout/stderr log stream (web)
-- **Text/JSON**: `role` (with `app`, `appType`, `credential`, `pinned`, `pinnedOther`), `pin`, `ready`, `status`, `cookie`
+- **Text/JSON**: `role` (with `app`, `appType`, `credential`, `pinned`, `pinnedOther`), `pin`, `ready`, `status`, `cookie`, `rpc`
 
 ## Session Lifecycle
 
@@ -137,6 +137,19 @@ Apps must be proxy-aware and configure their own base URL using `$WSH_BASE_URL`.
 `stripPrefix: true` is available for simple apps that use relative paths (SPAs, static file servers).
 
 Environment injected into web app processes: `WSH_PORT`, `WSH_SESSION`, `WSH_BASE_URL`.
+
+## RPC (PTY-to-Client / Server-to-Client)
+
+A running PTY process can trigger client-side actions by writing an OSC 777 escape sequence to stdout. The server intercepts and strips these from the terminal stream, forwarding them as JSON `{ type: 'rpc', action, args }` messages over WebSocket. Server code can also send RPCs directly via `sessionRpc()` or `broadcastRpc()`.
+
+**OSC protocol**: `\x1b]777;wsh:<action>[;<arg1>;<arg2>...]\x07` — parts are percent-encoded (control chars, `%`, `;`).
+
+**Three entry points:**
+- **PTY process**: `wsh rpc <action> [args...]` (or raw `printf`)
+- **Server code**: `sessionRpc(id, action, ...args)` / `broadcastRpc(action, ...args)`
+- **Control WebSocket**: Pages without a terminal can connect with `session=_rpc` to receive broadcasts
+
+**Client handling** (`src/wsh-rpc.ts`): RPC messages are dispatched as `wsh-rpc` CustomEvents on the DOM. Pages register handlers via `onRpc(action, handler)`.
 
 ## Skills
 

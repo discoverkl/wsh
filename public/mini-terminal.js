@@ -1,6 +1,7 @@
 // MiniTerminal — lightweight inline terminal component for skill cards.
 // Lazy-loads xterm.js + fit addon from CDN, streams PTY output read-only.
 import { bindTouchScroll } from './touch-scroll.js';
+import { handleWshRpc } from './wsh-rpc.js';
 let xtermPromise = null;
 function ensureXterm() {
     if (xtermPromise)
@@ -191,9 +192,6 @@ const THEME = {
 };
 window.MiniTerminal = {
     create(container, sessionId, sessionUrl, reconnect) {
-        const t0 = performance.now();
-        const _mt = (label) => console.log(`[MiniTerminal] ${label}: +${(performance.now() - t0).toFixed(0)}ms`);
-        _mt('create() called');
         injectStyles();
         // Build DOM
         const bar = document.createElement('div');
@@ -323,9 +321,7 @@ window.MiniTerminal = {
             setTimeout(() => cleanup(), 200);
         });
         // Load xterm and connect
-        _mt('ensureXterm() starting');
         ensureXterm().then(() => {
-            _mt('ensureXterm() resolved');
             if (disposed)
                 return;
             term = new Terminal({
@@ -340,10 +336,8 @@ window.MiniTerminal = {
                 theme: THEME,
                 convertEol: false,
             });
-            _mt('new Terminal() done');
             fitAddon = new FitAddon.FitAddon();
             term.loadAddon(fitAddon);
-            _mt('fitAddon loaded');
             term.open(termDiv);
             // Make xterm non-focusable so focus stays on the skill input box.
             const xtermTextarea = termDiv.querySelector('.xterm-helper-textarea');
@@ -362,9 +356,7 @@ window.MiniTerminal = {
                 isAtTop: () => term.buffer.active.viewportY === 0,
                 isAtBottom: () => term.buffer.active.viewportY >= term.buffer.active.baseY,
             });
-            _mt('term.open() done');
             fitAddon.fit();
-            _mt('fitAddon.fit() done');
             // WebSocket connection
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = new URL('./terminal', location.href);
@@ -375,49 +367,36 @@ window.MiniTerminal = {
             wsUrl.search = new URLSearchParams(wsParams).toString();
             ws = new WebSocket(wsUrl.href);
             ws.binaryType = 'arraybuffer';
-            _mt('WebSocket created');
             // Forward xterm.js programmatic responses (e.g. OSC color query replies)
             // back to the PTY as text (matching full terminal's term.onData handler).
             // Without this, TUI apps that query terminal colors stall waiting for
             // responses that never arrive.
             term.onData((data) => {
-                _mt(`term.onData fired: ${data.length}B`);
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(data);
                 }
             });
             ws.addEventListener('open', () => {
-                _mt('WebSocket open');
                 if (disposed)
                     return;
                 fitAddon.fit();
                 const msg = JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows });
                 ws.send(msg);
             });
-            let msgCount = 0;
-            let writeTotal = 0;
             ws.addEventListener('message', (event) => {
                 if (disposed)
                     return;
-                msgCount++;
-                if (msgCount <= 3) {
-                    _mt(`WS message #${msgCount} (${event.data instanceof ArrayBuffer ? event.data.byteLength + 'B' : 'json'})`);
-                }
                 if (event.data instanceof ArrayBuffer) {
                     // Hide loading overlay on first PTY data
                     if (loading.parentNode) {
                         loading.classList.add('fade-out');
                         setTimeout(() => loading.remove(), 300);
                     }
-                    const w0 = performance.now();
                     term.write(new Uint8Array(event.data));
-                    const elapsed = performance.now() - w0;
-                    writeTotal += elapsed;
-                    if (msgCount <= 3) {
-                        _mt(`term.write() #${msgCount} took ${elapsed.toFixed(1)}ms (total write: ${writeTotal.toFixed(1)}ms)`);
-                    }
                 }
-                // Ignore JSON control messages (role, etc.)
+                else {
+                    handleWshRpc(event, container);
+                }
             });
             ws.addEventListener('close', (event) => {
                 if (disposed)

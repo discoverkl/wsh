@@ -1,6 +1,7 @@
 import type { Terminal as TerminalType } from '@xterm/xterm';
 import type { FitAddon as FitAddonType } from '@xterm/addon-fit';
 import { bindTouchScroll } from './touch-scroll.js';
+import { handleWshRpc } from './wsh-rpc.js';
 
 // These globals are injected by the CDN <script> tags in index.html.
 declare const Terminal: typeof TerminalType;
@@ -215,6 +216,7 @@ function connect(): void {
     if (event.data instanceof ArrayBuffer) {
       term.write(new Uint8Array(event.data));
     } else if (typeof event.data === 'string') {
+      if (handleWshRpc(event, document)) return;
       try {
         const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string };
         if (msg.type === 'role' && msg.role) {

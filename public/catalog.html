@@ -380,6 +380,7 @@ header {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 .config-popover.open { display: block; }
+.card:has(.config-popover.open) { z-index: 10; }
 .config-row {
   display: flex;
   gap: 8px;
@@ -751,7 +752,9 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
     <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-line title"></div><div class="skeleton-line desc"></div><div class="skeleton-line desc2"></div></div>
   </div>
 </div>
-<script>
+<script type="module">
+import { onRpc, connectRpc } from './wsh-rpc.js';
+
 (function() {
   // Track active inline terminals per app key
   var inlineTerminals = {};
@@ -1196,15 +1199,13 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
   var gearSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>';
 
   function buildConfigPopover(app) {
-    var rows = [];
-    if (app.command) rows.push({ label: 'command', value: app.command });
-    if (app.skill) rows.push({ label: 'skill', value: app.skill });
-    rows.push({ label: 'type', value: app.type || 'pty' });
-    if (app.access) rows.push({ label: 'access', value: app.access });
-    if (app.icon) rows.push({ label: 'icon', value: app.icon });
     var html = '';
-    rows.forEach(function(r) {
-      html += '<div class="config-row"><span class="config-label">' + escapeHtml(r.label) + '</span><span class="config-value">' + escapeHtml(r.value) + '</span></div>';
+    var config = app._raw || app;
+    Object.keys(config).forEach(function(k) {
+      if (k === '_raw' || k === 'description' || k === 'title') return;
+      var v = config[k];
+      var display = (typeof v === 'object' && v !== null) ? JSON.stringify(v) : String(v);
+      html += '<div class="config-row"><span class="config-label">' + escapeHtml(k) + '</span><span class="config-value">' + escapeHtml(display) + '</span></div>';
     });
     return '<button class="config-gear" data-config-toggle tabindex="-1">' + gearSvg + '</button>' +
            '<div class="config-popover">' + html + '</div>';
@@ -1233,18 +1234,29 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
     });
   }
 
-  fetch('./api/apps')
-    .then(function(res) {
-      if (res.status === 401) throw new Error('Authentication required');
-      if (!res.ok) throw new Error('Failed to load apps (HTTP ' + res.status + ')');
-      return res.json();
-    })
-    .then(function(data) {
-      renderCards(data.apps || []);
-    })
-    .catch(function(err) {
-      showError(err.message);
-    });
+  window.refreshCatalog = function refreshCatalog() {
+    return fetch('./api/apps')
+      .then(function(res) {
+        if (res.status === 401) throw new Error('Authentication required');
+        if (!res.ok) throw new Error('Failed to load apps (HTTP ' + res.status + ')');
+        return res.json();
+      })
+      .then(function(data) {
+        renderCards(data.apps || []);
+      })
+      .catch(function(err) {
+        showError(err.message);
+      });
+  };
+  window.refreshCatalog();
+
+  // Handle RPC events (from inline terminals or server broadcasts)
+  // connectRpc(); // Enable for pages without a terminal WebSocket
+  var refreshDebounce = null;
+  onRpc('refresh-catalog', function() {
+    clearTimeout(refreshDebounce);
+    refreshDebounce = setTimeout(function() { window.refreshCatalog(); }, 300);
+  });
 
   // Config popover toggle
   document.addEventListener('click', function(e) {

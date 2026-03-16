@@ -16,6 +16,28 @@ import type { IPty } from 'node-pty';
 import YAML from 'yaml';
 import { version } from '../package.json';
 
+// --- OSC 777 wsh RPC encoding ---
+// Protocol: \x1b]777;wsh:<part0>;<part1>;...\x07
+// Parts are percent-encoded to avoid conflicts with ; \x1b \x07 framing.
+
+function oscRpcEncode(s: string): string {
+  return s.replace(/[%;\x00-\x1f\x7f]/g, (ch) => '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
+}
+
+function oscRpcDecode(s: string): string {
+  return s.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+function oscRpcEmit(action: string, ...args: string[]): string {
+  const payload = [action, ...args].map(oscRpcEncode).join(';');
+  return `\x1b]777;wsh:${payload}\x07`;
+}
+
+function oscRpcParse(payload: string): { action: string; args: string[] } {
+  const parts = payload.split(';').map(oscRpcDecode);
+  return { action: parts[0], args: parts.slice(1) };
+}
+
 // --- Subcommands (handled before server startup) ---
 
 if (process.argv[2] === 'version') {
@@ -46,6 +68,17 @@ if (process.argv[2] === 'version') {
     console.error('No TLS key found. Run wsh once to generate it.');
     process.exit(1);
   }
+} else if (process.argv[2] === 'rpc') {
+  // Usage: wsh rpc <action> [arg1] [arg2] ...
+  // Emits an OSC 777 wsh RPC sequence to stdout, safe for use inside a PTY session.
+  const action = process.argv[3];
+  if (!action) {
+    console.error('Usage: wsh rpc <action> [args...]');
+    process.exit(1);
+  }
+  const args = process.argv.slice(4);
+  process.stdout.write(oscRpcEmit(action, ...args));
+  process.exit(0);
 } else if (process.argv[2] === 'apps') {
   const YAML = require('yaml') as typeof import('yaml');
   const subCmd = process.argv[3];
@@ -488,6 +521,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
   session.pty = ptyProcess;
 
   const oscTitleRe = /\x1b\](?:0|2);([^\x07]*)\x07/;
+  const oscRpcRe = /\x1b\]777;wsh:([^\x07]*)\x07/g;
   const spawnTime = Date.now();
   let ptyMsgCount = 0;
   ptyProcess.onData((data: string) => {
@@ -496,10 +530,28 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
     const m = data.match(oscTitleRe);
     if (m) session.title = m[1];
     session.lastOutput = Date.now();
-    const buf = Buffer.from(data, 'utf8');
-    appendScrollback(session, buf);
-    const send = (ws: WebSocket) => { if (ws.readyState === WebSocket.OPEN) ws.send(buf, { binary: true }); };
-    for (const ws of session.peers.keys()) send(ws);
+
+    // Extract wsh RPC sequences before forwarding terminal data
+    const rpcs: { action: string; args: string[] }[] = [];
+    const cleaned = data.replace(oscRpcRe, (_match, payload: string) => {
+      rpcs.push(oscRpcParse(payload));
+      return ''; // strip from terminal output
+    });
+
+    const buf = Buffer.from(cleaned, 'utf8');
+    if (buf.length > 0) {
+      appendScrollback(session, buf);
+      for (const ws of session.peers.keys()) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(buf, { binary: true });
+      }
+    }
+    // Forward RPCs as JSON control messages
+    for (const rpc of rpcs) {
+      const msg = JSON.stringify({ type: 'rpc', action: rpc.action, args: rpc.args });
+      for (const ws of session.peers.keys()) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+      }
+    }
   });
 
   ptyProcess.onExit(({ exitCode, signal }) => {
@@ -1025,6 +1077,32 @@ if (token) app.use(makeTokenMiddleware(token));
 
 const router = express.Router();
 
+/** Control-only WebSocket clients that receive broadcast RPCs but have no session. */
+const rpcClients = new Set<WebSocket>();
+
+/** Send an RPC message to all peers of a specific session. */
+function sessionRpc(sessionId: string, action: string, ...args: string[]): void {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  const msg = JSON.stringify({ type: 'rpc', action, args });
+  for (const ws of session.peers.keys()) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+  }
+}
+
+/** Send an RPC message to all connected WebSocket peers (sessions + control clients). */
+function broadcastRpc(action: string, ...args: string[]): void {
+  const msg = JSON.stringify({ type: 'rpc', action, args });
+  for (const session of sessions.values()) {
+    for (const ws of session.peers.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+    }
+  }
+  for (const ws of rpcClients) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+  }
+}
+
 // Serve the catalog page at /.
 // When BASE != '/', also redirect /base -> /base/ to fix relative URL resolution.
 router.get('/', (req: express.Request, res: express.Response) => {
@@ -1057,6 +1135,7 @@ router.get('/api/apps', (_req: express.Request, res: express.Response) => {
       type: app.type ?? 'pty',
       access: app.access ?? null,
       hidden: app.hidden ? true : undefined,
+      _raw: app,
     }));
   res.json({ apps: list });
 });
@@ -1363,6 +1442,15 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
   const id  = url.searchParams.get('session');
 
   if (!id) { console.log('[ws] rejected: no session ID'); ws.close(4000, 'session ID required'); return; }
+
+  // Control-only connection: receives broadcast RPCs, no session needed.
+  if (id === '_rpc') {
+    console.log('[ws] rpc control client connected');
+    rpcClients.add(ws);
+    ws.on('close', () => rpcClients.delete(ws));
+    return;
+  }
+
   console.log(`[ws] connect session=${id} url=${req.url}`);
 
   const credential = getRoleForSession(req, id) ?? 'viewer';
