@@ -16,26 +16,26 @@ import type { IPty } from 'node-pty';
 import YAML from 'yaml';
 import { version } from '../package.json';
 
-// --- OSC 777 wsh RPC encoding ---
-// Protocol: \x1b]777;wsh:<part0>;<part1>;...\x07
-// Parts are percent-encoded to avoid conflicts with ; \x1b \x07 framing.
+// --- wsh RPC encoding ---
+// Parts are percent-encoded to avoid conflicts with framing characters.
 
-function oscRpcEncode(s: string): string {
+function rpcEncode(s: string): string {
   return s.replace(/[%;\x00-\x1f\x7f]/g, (ch) => '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
 }
 
-function oscRpcDecode(s: string): string {
+function rpcDecode(s: string): string {
   return s.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
 }
 
-function oscRpcEmit(action: string, ...args: string[]): string {
-  const payload = [action, ...args].map(oscRpcEncode).join(';');
-  return `\x1b]777;wsh:${payload}\x07`;
+function rpcParse(payload: string): { action: string; args: string[] } {
+  const parts = payload.split(';').map(rpcDecode);
+  return { action: parts[0], args: parts.slice(1) };
 }
 
-function oscRpcParse(payload: string): { action: string; args: string[] } {
-  const parts = payload.split(';').map(oscRpcDecode);
-  return { action: parts[0], args: parts.slice(1) };
+// OSC protocol: \x1b]777;wsh:<part0>;<part1>;...\x07
+function rpcEmitOsc(action: string, ...args: string[]): string {
+  const payload = [action, ...args].map(rpcEncode).join(';');
+  return `\x1b]777;wsh:${payload}\x07`;
 }
 
 // --- Subcommands (handled before server startup) ---
@@ -76,8 +76,19 @@ if (process.argv[2] === 'version') {
     console.error('Usage: wsh rpc <action> [args...]');
     process.exit(1);
   }
-  const args = process.argv.slice(4);
-  process.stdout.write(oscRpcEmit(action, ...args));
+  const rpcArgs: string[] = [];
+  let plain = false;
+  for (const a of process.argv.slice(4)) {
+    if (a === '--plain') plain = true;
+    else rpcArgs.push(a);
+  }
+  if (plain) {
+    const payload = [action, ...rpcArgs].map(rpcEncode).join(';');
+    process.stdout.write(`__wsh_rpc_c7f3e2a1b09d4f58_${payload}_d4b8f6e93a7c2e10__\n`);
+  } else {
+    process.stdout.write(rpcEmitOsc(action, ...rpcArgs));
+  }
+  console.log('ok');
   process.exit(0);
 } else if (process.argv[2] === 'apps') {
   const YAML = require('yaml') as typeof import('yaml');
@@ -522,6 +533,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
 
   const oscTitleRe = /\x1b\](?:0|2);([^\x07]*)\x07/;
   const oscRpcRe = /\x1b\]777;wsh:([^\x07]*)\x07/g;
+  const plainRpcRe = /__wsh_rpc_c7f3e2a1b09d4f58_(.*?)_d4b8f6e93a7c2e10__\n?/g;
   const spawnTime = Date.now();
   let ptyMsgCount = 0;
   ptyProcess.onData((data: string) => {
@@ -533,10 +545,15 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
 
     // Extract wsh RPC sequences before forwarding terminal data
     const rpcs: { action: string; args: string[] }[] = [];
-    const cleaned = data.replace(oscRpcRe, (_match, payload: string) => {
-      rpcs.push(oscRpcParse(payload));
-      return ''; // strip from terminal output
-    });
+    const cleaned = data
+      .replace(oscRpcRe, (_match, payload: string) => {
+        rpcs.push(rpcParse(payload));
+        return '';
+      })
+      .replace(plainRpcRe, (_match, payload: string) => {
+        rpcs.push(rpcParse(payload));
+        return '';
+      });
 
     const buf = Buffer.from(cleaned, 'utf8');
     if (buf.length > 0) {
@@ -547,6 +564,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
     }
     // Forward RPCs as JSON control messages
     for (const rpc of rpcs) {
+      console.log(`[session ${id}] rpc: ${rpc.action} ${rpc.args.join(' ')}`);
       const msg = JSON.stringify({ type: 'rpc', action: rpc.action, args: rpc.args });
       for (const ws of session.peers.keys()) {
         if (ws.readyState === WebSocket.OPEN) ws.send(msg);

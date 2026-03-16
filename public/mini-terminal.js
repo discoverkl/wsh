@@ -395,6 +395,7 @@ window.MiniTerminal = {
                     term.write(new Uint8Array(event.data));
                 }
                 else {
+                    console.log('[MiniTerminal] text message:', event.data);
                     handleWshRpc(event, container);
                 }
             });

@@ -402,7 +402,10 @@ interface MiniTerminalHandle {
           }
           term.write(new Uint8Array(event.data));
         }
-        else { handleWshRpc(event, container); }
+        else {
+          console.log('[MiniTerminal] text message:', event.data);
+          handleWshRpc(event, container);
+        }
       });
 
       ws.addEventListener('close', (event: CloseEvent) => {

@@ -1254,6 +1254,7 @@ import { onRpc, connectRpc } from './wsh-rpc.js';
   // connectRpc(); // Enable for pages without a terminal WebSocket
   var refreshDebounce = null;
   onRpc('refresh-catalog', function() {
+    console.log('[catalog] refresh-catalog RPC received');
     clearTimeout(refreshDebounce);
     refreshDebounce = setTimeout(function() { window.refreshCatalog(); }, 300);
   });

@@ -9,6 +9,7 @@ export function handleWshRpc(event, target) {
     try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'rpc' && msg.action) {
+            console.log('[wsh-rpc] received:', msg.action, msg.args ?? []);
             target.dispatchEvent(new CustomEvent('wsh-rpc', {
                 bubbles: true,
                 detail: { action: msg.action, args: (msg.args ?? []) },
@@ -67,3 +68,5 @@ export function connectRpc() {
         return;
     doConnect();
 }
+// Built-in RPC actions
+onRpc('log', (...args) => console.log('[wsh-rpc]', ...args));
