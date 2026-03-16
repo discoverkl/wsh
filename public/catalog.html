@@ -1359,11 +1359,24 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
     // If there's a live inline session, send input to it instead of creating a new one
     var existing = inlineTerminals[appKey];
     if (existing && existing.isAlive() && !newTabFlag) {
-      var raw = input && (input[0] === '/' || input[0] === '?');
+      var raw = input && (input[0] === '/' || input[0] === '?' || input[0] === '!');
       existing.send(raw ? input + '\r' : '/' + appKey + (input ? ' ' + input : '') + '\r');
       ta.value = '';
       ta.style.height = 'auto';
       saveDraft(appKey, '');
+      return;
+    }
+
+    // Raw commands (/, ?, !) require a live session — hint the user
+    if (input && (input[0] === '/' || input[0] === '?' || input[0] === '!')) {
+      var origPlaceholder = ta.getAttribute('placeholder');
+      ta.value = '';
+      ta.style.height = 'auto';
+      saveDraft(appKey, '');
+      var submitBtn = form.querySelector('.skill-submit');
+      if (submitBtn) submitBtn.classList.remove('has-input');
+      ta.setAttribute('placeholder', 'Start a session first — describe your task');
+      setTimeout(function() { ta.setAttribute('placeholder', origPlaceholder || 'Describe your task...'); }, 3000);
       return;
     }
 
