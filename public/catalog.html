@@ -228,6 +228,26 @@ header {
   box-shadow: 0 0 20px var(--card-glow, rgba(99, 102, 241, 0.15));
 }
 
+/* Patch animations — removals, updates */
+.card.removing,
+.skill-card.removing {
+  opacity: 0 !important;
+  transform: scale(0.96) translateY(4px) !important;
+  transition: opacity 0.35s ease-out, transform 0.35s ease-out !important;
+  pointer-events: none;
+}
+
+.card.updated,
+.skill-card.updated {
+  animation: card-flash 0.6s ease-out;
+}
+
+@keyframes card-flash {
+  0%   { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.3); }
+  40%  { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15); }
+  100% { box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2); }
+}
+
 .card-header {
   display: flex;
   align-items: center;
@@ -1110,7 +1130,7 @@ import { onRpc, connectRpc } from './wsh-rpc.js';
     }
 
     input.addEventListener('input', function() {
-      var skillsVisible = filterCards('.skill-card');
+      var skillsVisible = filterCards('#skills-content .skill-card');
       var appsVisible = filterCards('#apps-content .card');
       var skillsSection = document.getElementById('skills-section');
       var appsSection = document.getElementById('apps-section');
@@ -1234,6 +1254,96 @@ import { onRpc, connectRpc } from './wsh-rpc.js';
     });
   }
 
+  // Previous app list for diffing
+  var lastApps = null;
+
+  /** Find the single-app difference between old and new lists.
+   *  Returns { type, key, app } or null if >1 app changed. */
+  function diffApps(oldApps, newApps) {
+    var oldByKey = {};
+    oldApps.forEach(function(a) { oldByKey[a.key] = a; });
+    var newByKey = {};
+    newApps.forEach(function(a) { newByKey[a.key] = a; });
+
+    var changes = [];
+
+    // Added or changed
+    newApps.forEach(function(a) {
+      var old = oldByKey[a.key];
+      if (!old) { changes.push({ type: 'added', key: a.key, app: a }); }
+      else if (old.hidden && !a.hidden) { changes.push({ type: 'unhide', key: a.key, app: a }); }
+      else if (!old.hidden && a.hidden) { changes.push({ type: 'hide', key: a.key, app: a }); }
+      else if (old.title !== a.title || old.description !== a.description ||
+               old.icon !== a.icon || old.command !== a.command ||
+               old.skill !== a.skill || old.type !== a.type || old.access !== a.access) {
+        changes.push({ type: 'updated', key: a.key, app: a });
+      }
+    });
+    // Removed
+    oldApps.forEach(function(a) {
+      if (!newByKey[a.key]) changes.push({ type: 'removed', key: a.key, app: a });
+    });
+
+    if (changes.length === 0) {
+      // Check order changed
+      if (oldApps.length !== newApps.length) return null;
+      for (var i = 0; i < oldApps.length; i++) {
+        if (oldApps[i].key !== newApps[i].key) return null;
+      }
+      return 'none';
+    }
+    return changes.length === 1 ? changes[0] : null;
+  }
+
+  /** Find a card element by app key in skills or apps grids. */
+  function findCard(key) {
+    return document.querySelector('#skills-content > .skill-card[data-app="' + CSS.escape(key) + '"]') ||
+           document.querySelector('#apps-content > .card[data-app="' + CSS.escape(key) + '"]') ||
+           document.querySelector('#apps-content > .card-swipe-wrap > .card[data-app="' + CSS.escape(key) + '"]');
+  }
+
+  /** Animate a card removal: fade out in-place, then remove from DOM. */
+  function animateRemove(card) {
+    var target = card.closest('.card-swipe-wrap') || card;
+    var rect = target.getBoundingClientRect();
+    target.style.position = 'fixed';
+    target.style.left = rect.left + 'px';
+    target.style.top = rect.top + 'px';
+    target.style.width = rect.width + 'px';
+    target.style.height = rect.height + 'px';
+    target.style.margin = '0';
+    target.style.zIndex = '0';
+    document.body.appendChild(target);
+    card.classList.add('removing');
+    function cleanup() { if (target.parentNode) target.remove(); }
+    card.addEventListener('transitionend', function handler() {
+      card.removeEventListener('transitionend', handler);
+      cleanup();
+    });
+    setTimeout(cleanup, 400);
+  }
+
+  /** Insert a new card into the correct grid and animate it in. */
+  function animateAdd(app) {
+    var container, card;
+    if (app.skill) {
+      container = document.getElementById('skills-content');
+      card = buildSkillCard(app, !!app.hidden);
+      document.getElementById('skills-section').hidden = false;
+    } else {
+      container = document.getElementById('apps-content');
+      card = buildAppCard(app, !!app.hidden);
+      if (isMobile) card = SwipeCards.wrapCard(card, app, escapeAttr);
+      document.getElementById('apps-section').hidden = false;
+    }
+    container.appendChild(card);
+    if (isMobile && !app.skill) SwipeCards.init();
+    // The .card/.skill-card element (may be inside a swipe wrapper)
+    var animTarget = card.classList.contains('card') || card.classList.contains('skill-card')
+      ? card : card.querySelector('.card, .skill-card') || card;
+    requestAnimationFrame(function() { animTarget.classList.add('visible'); });
+  }
+
   window.refreshCatalog = function refreshCatalog() {
     return fetch('./api/apps')
       .then(function(res) {
@@ -1242,7 +1352,87 @@ import { onRpc, connectRpc } from './wsh-rpc.js';
         return res.json();
       })
       .then(function(data) {
-        renderCards(data.apps || []);
+        var apps = data.apps || [];
+
+        // Initial load — full render
+        if (!lastApps) {
+          lastApps = apps;
+          renderCards(apps);
+          return;
+        }
+
+        // Diff against previous
+        var diff = diffApps(lastApps, apps);
+        lastApps = apps;
+
+        // No changes — just refresh session badges
+        if (diff === 'none') {
+          fetchSessions();
+          return;
+        }
+        // Multiple changes — full re-render
+        if (!diff) {
+          renderCards(apps);
+          return;
+        }
+
+        var card = findCard(diff.key);
+
+        if (diff.type === 'removed') {
+          if (card && !inlineTerminals[diff.key]) animateRemove(card);
+
+        } else if (diff.type === 'added') {
+          animateAdd(diff.app);
+
+        } else if (diff.type === 'hide') {
+          if (card) {
+            card.classList.add('hidden-app');
+            card.style.borderStyle = 'dashed';
+            card.dataset.hidden = '1';
+            // Fade out then hide
+            card.classList.add('removing');
+            setTimeout(function() {
+              card.style.display = 'none';
+              card.classList.remove('removing');
+            }, 350);
+          }
+
+        } else if (diff.type === 'unhide') {
+          if (card) {
+            card.classList.remove('hidden-app');
+            card.style.borderStyle = '';
+            delete card.dataset.hidden;
+            var badge = card.querySelector('.hidden-badge');
+            if (badge) badge.remove();
+            var btn = card.querySelector('.unhide-btn');
+            if (btn) btn.remove();
+            // Fade in: momentarily hide visibility, show display, then animate
+            card.classList.remove('visible');
+            card.style.display = '';
+            requestAnimationFrame(function() { card.classList.add('visible'); });
+          }
+
+        } else if (diff.type === 'updated') {
+          if (card && !inlineTerminals[diff.key]) {
+            // Replace the card entirely and flash it
+            var container = card.closest('#skills-content, #apps-content');
+            var newCard;
+            if (diff.app.skill) {
+              newCard = buildSkillCard(diff.app, !!diff.app.hidden);
+            } else {
+              newCard = buildAppCard(diff.app, !!diff.app.hidden);
+              if (isMobile) newCard = SwipeCards.wrapCard(newCard, diff.app, escapeAttr);
+            }
+            var target = card.closest('.card-swipe-wrap') || card;
+            container.replaceChild(newCard, target);
+            var animTarget = newCard.classList.contains('card') || newCard.classList.contains('skill-card')
+              ? newCard : newCard.querySelector('.card, .skill-card') || newCard;
+            animTarget.classList.add('visible', 'updated');
+            if (isMobile && !diff.app.skill) SwipeCards.init();
+          }
+        }
+
+        fetchSessions();
       })
       .catch(function(err) {
         showError(err.message);
@@ -1254,7 +1444,7 @@ import { onRpc, connectRpc } from './wsh-rpc.js';
   // connectRpc(); // Enable for pages without a terminal WebSocket
   var refreshDebounce = null;
   onRpc('refresh-catalog', function() {
-    console.log('[catalog] refresh-catalog RPC received');
+    console.log('[wsh-rpc] refresh-catalog');
     clearTimeout(refreshDebounce);
     refreshDebounce = setTimeout(function() { window.refreshCatalog(); }, 300);
   });
@@ -1396,16 +1586,13 @@ import { onRpc, connectRpc } from './wsh-rpc.js';
     btn.disabled = true;
     ta.disabled = true;
 
-    var _t0 = performance.now();
-    console.log('[Catalog] POST /api/sessions starting');
     fetch('./api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ app: appKey, input: input, mode: newTabFlag ? '' : 'inline' })
     })
-    .then(function(res) { console.log('[Catalog] POST response: +' + (performance.now() - _t0).toFixed(0) + 'ms'); return res.json(); })
+    .then(function(res) { return res.json(); })
     .then(function(data) {
-      console.log('[Catalog] MiniTerminal.create(): +' + (performance.now() - _t0).toFixed(0) + 'ms');
       btn.disabled = false;
       ta.disabled = false;
       ta.value = '';

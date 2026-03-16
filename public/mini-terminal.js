@@ -347,7 +347,14 @@ window.MiniTerminal = {
             // Block keyboard input while allowing xterm.js to respond to OSC queries.
             // (disableStdin suppresses OSC responses, causing TUI apps to stall.)
             term.attachCustomKeyEventHandler(() => false);
-            term.onSelectionChange(() => term.clearSelection());
+            let clearingSelection = false;
+            term.onSelectionChange(() => {
+                if (clearingSelection)
+                    return;
+                clearingSelection = true;
+                term.clearSelection();
+                clearingSelection = false;
+            });
             // Touch scrolling with inertia (same xterm.js v6 workaround as full terminal)
             bindTouchScroll({
                 el: termDiv,
@@ -395,7 +402,6 @@ window.MiniTerminal = {
                     term.write(new Uint8Array(event.data));
                 }
                 else {
-                    console.log('[MiniTerminal] text message:', event.data);
                     handleWshRpc(event, container);
                 }
             });

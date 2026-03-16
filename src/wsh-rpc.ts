@@ -9,7 +9,6 @@ export function handleWshRpc(event: MessageEvent, target: EventTarget): boolean 
   try {
     const msg = JSON.parse(event.data);
     if (msg.type === 'rpc' && msg.action) {
-      console.log('[wsh-rpc] received:', msg.action, msg.args ?? []);
       target.dispatchEvent(new CustomEvent('wsh-rpc', {
         bubbles: true,
         detail: { action: msg.action as string, args: (msg.args ?? []) as string[] },
