@@ -248,8 +248,13 @@ python3:
       process.exit(1);
     }
     const parsed = JSON.parse(responseBody);
-    const externalBase = process.env.WSH_URL || `http://localhost:${port}`;
-    console.log(`${externalBase}${parsed.path}`);
+    if (process.env.WSH_URL) {
+      // Behind a proxy: construct URL from external origin + relative path
+      try { const u = new URL(parsed.url); console.log(`${process.env.WSH_URL}${u.pathname}${u.hash}`); }
+      catch { console.log(parsed.url); }
+    } else {
+      console.log(parsed.url);
+    }
   } catch (err: any) {
     if (err.stderr?.includes('onnect') || err.stderr?.includes('refused')) {
       console.error(`No wsh server running on localhost:${port}`);
@@ -1375,7 +1380,8 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   if (appConfig.type === 'web') {
     res.cookie(`wsh_last_${appKey}`, id, { path: BASE, maxAge: 365 * 24 * 60 * 60 * 1000 });
   }
-  res.json({ id, path: `${BASE}${appKey}#${id}` });
+  const base = networkBase ?? `http://localhost:${PORT}`;
+  res.json({ id, url: `${base}${BASE}${appKey}#${id}` });
 });
 
 router.get('/:appName', (req: express.Request, res: express.Response, next: express.NextFunction) => {
