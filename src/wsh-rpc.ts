@@ -118,7 +118,7 @@ export { makeResponder };
 
 // Built-in RPC actions
 onRpc('log', (...args) => { console.log('[wsh-rpc]', ...args); });
-onRpc('eval', (code) => {
-  try { return { value: eval(code) }; }
+onRpc('eval', async (code) => {
+  try { return { value: await eval(code) }; }
   catch (e) { return { error: String(e) }; }
 });

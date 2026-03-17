@@ -47,13 +47,16 @@ if (process.argv[2] === 'version') {
     process.exit(1);
   }
 } else if (process.argv[2] === 'rpc') {
-  // Usage: wsh rpc [--async] <action> [arg1] [arg2] ...
+  // Usage: wsh rpc [--async] [--timeout <ms>] <action> [arg1] [arg2] ...
   // Default: sync (waits for browser response). --async: fire-and-forget.
   // Requires WSH_RPC_PORT to be set (HTTP mode).
   const rpcArgs: string[] = [];
   let isAsync = false;
-  for (const a of process.argv.slice(3)) {
+  let rpcTimeout: number | undefined;
+  for (let i = 3; i < process.argv.length; i++) {
+    const a = process.argv[i];
     if (a === '--async') isAsync = true;
+    else if (a === '--timeout' && process.argv[i + 1]) rpcTimeout = parseInt(process.argv[++i], 10);
     else rpcArgs.push(a);
   }
   const action = rpcArgs[0];
@@ -68,7 +71,7 @@ if (process.argv[2] === 'version') {
     process.exit(1);
   }
   // HTTP mode: POST to the wsh server directly (bypasses stdout capture by agent tools)
-  const body = JSON.stringify({ action, args, session: process.env.WSH_SESSION, ...(isAsync ? { async: true } : {}) });
+  const body = JSON.stringify({ action, args, session: process.env.WSH_SESSION, ...(isAsync ? { async: true } : {}), ...(rpcTimeout ? { timeout: rpcTimeout } : {}) });
   const basePath = process.env.WSH_RPC_BASE || '/';
   try {
     const proxySecret = process.env.WSH_PROXY_SECRET;
@@ -245,7 +248,8 @@ python3:
       process.exit(1);
     }
     const parsed = JSON.parse(responseBody);
-    console.log(parsed.url);
+    const externalBase = process.env.WSH_URL || `http://localhost:${port}`;
+    console.log(`${externalBase}${parsed.path}`);
   } catch (err: any) {
     if (err.stderr?.includes('onnect') || err.stderr?.includes('refused')) {
       console.error(`No wsh server running on localhost:${port}`);
@@ -446,15 +450,19 @@ function killProcessGroup(child: ChildProcess): void {
 }
 
 
-// Strip OSC color/cursor queries (e.g. \e]10;?\a, \e]11;?\e\\) from data.
-// These are ephemeral requests that should not be replayed — replaying them
-// causes xterm.js to generate fresh responses that appear as garbage in TUI
-// input fields on reconnect.
+// Strip ephemeral terminal queries/responses from scrollback data.
+// These should not be replayed — replaying them causes xterm.js to generate
+// fresh responses that appear as garbage in TUI input fields on reconnect.
+//
+// Stripped sequences:
+//   - OSC color queries:  \e]10;?\a  \e]11;?\e\\  etc.
+//   - DSR cursor reports: \e[row;colR  (response to \e[6n)
 const oscQueryStripRe = /\x1b\]\d+;\?(?:\x07|\x1b\\)/g;
-function stripOscQueries(buf: Buffer): Buffer {
+const dsrResponseRe = /\x1b\[\d+;\d+R/g;
+function stripEphemeralSequences(buf: Buffer): Buffer {
   const str = buf.toString('utf8');
-  if (!str.includes('\x1b]')) return buf;
-  const stripped = str.replace(oscQueryStripRe, '');
+  if (!str.includes('\x1b')) return buf;
+  const stripped = str.replace(oscQueryStripRe, '').replace(dsrResponseRe, '');
   return stripped.length === str.length ? buf : Buffer.from(stripped, 'utf8');
 }
 
@@ -751,8 +759,7 @@ function scheduleCleanup(id: string, session: Session): void {
 const { values } = parseArgs({
   allowPositionals: true,
   options: {
-    port:      { type: 'string',  short: 'p', default: '7681' },
-    url:       { type: 'string',              default: '' },
+    port:      { type: 'string',  short: 'p', default: process.env.WSH_PORT || '7681' },
     bind:      { type: 'string',              default: '' },
     'no-open':  { type: 'boolean',             default: false },
     'no-login': { type: 'boolean',             default: false },
@@ -760,7 +767,7 @@ const { values } = parseArgs({
     'no-tls':   { type: 'boolean',             default: false },
     help:       { type: 'boolean', short: 'h', default: false },
     version:    { type: 'boolean', short: 'v', default: false },
-    base:       { type: 'string', default: '/' },
+    base:       { type: 'string', default: process.env.WSH_BASE_PATH || '/' },
     title:      { type: 'string', default: 'wsh' },
     tagline:    { type: 'string', default: 'Apps in the browser' },
   },
@@ -786,7 +793,6 @@ if (values.help) {
   console.log('');
   console.log('Options:');
   console.log('  -p, --port <port>  Port to listen on (default: 7681)');
-  console.log('      --url <url>    Override advertised network URL (for NAT/proxy)');
   console.log('      --bind <addr>  Bind network server to this address (default: auto-detect LAN IP)');
   console.log('                     Use 0.0.0.0 to listen on all interfaces (e.g. inside Docker --network host)');
   console.log('      --base <path>  Base path prefix (default: /)');
@@ -800,8 +806,10 @@ if (values.help) {
   console.log('  -h, --help         Show this help message');
   console.log('');
   console.log('Environment:');
-  console.log('  WSH_PORT           Default port for ls/kill commands (default: 7681)');
-  console.log('  WSH_BASE_PATH    Base path for ls/kill/new commands (default: /)');
+  console.log('  WSH_PORT           Port (default: 7681, overridden by --port)');
+  console.log('  WSH_BASE_PATH      Base path prefix (default: /, overridden by --base)');
+  console.log('  WSH_URL            External origin for session URLs (e.g. https://mybox.example.com)');
+  console.log('  WSH_PROXY_SECRET   Shared secret for --trust-proxy mode');
   process.exit(0);
 }
 
@@ -817,7 +825,7 @@ const SITE_TITLE = values.title!;
 const SITE_TAGLINE = values.tagline!;
 
 const PORT = parseInt(values.port!, 10);
-const CUSTOM_URL = values.url || null;
+const CUSTOM_URL = process.env.WSH_URL || null;
 const BIND_ADDR  = values.bind || null;
 const TRUST_PROXY = values['trust-proxy']!;
 const NO_TLS = values['no-tls']!;
@@ -1278,7 +1286,7 @@ function handleRpcResult(msg: { id: string; value?: string; error?: string }): v
 }
 
 router.post('/api/rpc', (req: express.Request, res: express.Response) => {
-  const { action, args, session: sid, async: isAsync } = req.body as { action?: string; args?: string[]; session?: string; async?: boolean };
+  const { action, args, session: sid, async: isAsync, timeout: reqTimeout } = req.body as { action?: string; args?: string[]; session?: string; async?: boolean; timeout?: number };
   if (!action) { res.status(400).json({ error: 'action required' }); return; }
 
   if (isAsync) {
@@ -1293,10 +1301,11 @@ router.post('/api/rpc', (req: express.Request, res: express.Response) => {
   const id = crypto.randomUUID();
   const rpcMsg = JSON.stringify({ type: 'rpc', id, action, args: args ?? [] });
 
+  const timeoutMs = (typeof reqTimeout === 'number' && reqTimeout > 0) ? Math.min(reqTimeout, 300000) : 10000;
   const timeout = setTimeout(() => {
     rpcPending.delete(id);
     res.json({ error: 'timeout' });
-  }, 10000);
+  }, timeoutMs);
 
   rpcPending.set(id, (result) => {
     clearTimeout(timeout);
@@ -1363,11 +1372,10 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     }
   }
 
-  const base = networkBase ?? `http://localhost:${PORT}`;
   if (appConfig.type === 'web') {
     res.cookie(`wsh_last_${appKey}`, id, { path: BASE, maxAge: 365 * 24 * 60 * 60 * 1000 });
   }
-  res.json({ id, url: `${base}${BASE}${appKey}#${id}` });
+  res.json({ id, path: `${BASE}${appKey}#${id}` });
 });
 
 router.get('/:appName', (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -1545,7 +1553,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     if (session.appType === 'web' && session.ready) {
       ws.send(JSON.stringify({ type: 'ready' }));
     }
-    if (session.scrollback.length > 0) ws.send(stripOscQueries(session.scrollback), { binary: true });
+    if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
   } else {
     // reconnect=1 means "only attach to existing session, don't create a new one"
     if (url.searchParams.get('reconnect') === '1') {
@@ -1605,7 +1613,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     session.writer = ws;
     session.peers.set(ws, credential);
     sendRoleMessage(ws, id, session, credential, credential);
-    if (session.scrollback.length > 0) ws.send(stripOscQueries(session.scrollback), { binary: true });
+    if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
     if (session.appType === 'web') {
       ws.send(JSON.stringify({ type: 'cookie', name: `wsh_last_${appKey}`, value: id }));
     }
