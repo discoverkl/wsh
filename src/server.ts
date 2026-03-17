@@ -104,18 +104,25 @@ if (process.argv[2] === 'version') {
     process.exit(1);
   }
 } else if (process.argv[2] === 'rpc') {
-  // Usage: wsh rpc <action> [arg1] [arg2] ...
-  // Emits an OSC 777 wsh RPC sequence to stdout, safe for use inside a PTY session.
-  const action = process.argv[3];
+  // Usage: wsh rpc [--async] <action> [arg1] [arg2] ...
+  // Default: sync (waits for browser response). --async: fire-and-forget.
+  // HTTP mode when WSH_RPC_PORT is set, OSC mode otherwise (always async).
+  const rpcArgs: string[] = [];
+  let isAsync = false;
+  for (const a of process.argv.slice(3)) {
+    if (a === '--async') isAsync = true;
+    else rpcArgs.push(a);
+  }
+  const action = rpcArgs[0];
   if (!action) {
-    console.error('Usage: wsh rpc <action> [args...]');
+    console.error('Usage: wsh rpc [--async] <action> [args...]');
     process.exit(1);
   }
-  const args = process.argv.slice(4);
+  const args = rpcArgs.slice(1);
   const rpcPort = process.env.WSH_RPC_PORT;
   if (rpcPort) {
     // HTTP mode: POST to the wsh server directly (bypasses stdout capture by agent tools)
-    const body = JSON.stringify({ action, args, session: process.env.WSH_SESSION });
+    const body = JSON.stringify({ action, args, session: process.env.WSH_SESSION, ...(isAsync ? { async: true } : {}) });
     const basePath = process.env.WSH_RPC_BASE || '/';
     try {
       const proxySecret = process.env.WSH_PROXY_SECRET;
@@ -124,22 +131,27 @@ if (process.argv[2] === 'version') {
       if (proxySecret) headers += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
       if (aboxUser) headers += ` -H 'X-WSH-User: ${aboxUser}'`;
       const escapedBody = body.replace(/'/g, "'\\''");
+      let response: string;
       // Try HTTP first, fall back to HTTPS (for httpsOnly mode)
       try {
-        execSync(`curl -sS -X POST ${headers} -d '${escapedBody}' 'http://127.0.0.1:${rpcPort}${basePath}api/rpc'`, { stdio: 'pipe' });
+        response = execSync(`curl -sS -X POST ${headers} -d '${escapedBody}' 'http://127.0.0.1:${rpcPort}${basePath}api/rpc'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
       } catch {
-        execSync(`curl -sSk -X POST ${headers} -d '${escapedBody}' 'https://127.0.0.1:${rpcPort}${basePath}api/rpc'`, { stdio: 'pipe' });
+        response = execSync(`curl -sSk -X POST ${headers} -d '${escapedBody}' 'https://127.0.0.1:${rpcPort}${basePath}api/rpc'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
       }
-      console.log('ok');
+      const result = JSON.parse(response);
+      if (result.error) {
+        console.error(result.error);
+        process.exit(1);
+      }
+      if (result.value != null) console.log(result.value);
       process.exit(0);
     } catch (err: any) {
       console.error('wsh rpc: failed —', err.stderr?.toString().trim() || err.message);
       process.exit(1);
     }
   } else {
-    // OSC mode: write escape sequence to stdout (works in direct PTY sessions)
+    // OSC mode: write escape sequence to stdout (always async, no return channel)
     process.stdout.write(rpcEmitOsc(action, ...args));
-    console.log('ok');
     process.exit(0);
   }
 } else if (process.argv[2] === 'apps') {
@@ -1339,15 +1351,57 @@ router.all('/_p/:sessionId/*', proxyHandler as any);
 
 router.use(express.json());
 
+// Pending sync RPC responses: id → resolve callback
+const rpcPending = new Map<string, (result: { value?: string; error?: string }) => void>();
+
+function handleRpcResult(msg: { id: string; value?: string; error?: string }): void {
+  const resolve = rpcPending.get(msg.id);
+  if (resolve) { rpcPending.delete(msg.id); resolve(msg); }
+}
+
 router.post('/api/rpc', (req: express.Request, res: express.Response) => {
-  const { action, args, session: sid } = req.body as { action?: string; args?: string[]; session?: string };
+  const { action, args, session: sid, async: isAsync } = req.body as { action?: string; args?: string[]; session?: string; async?: boolean };
   if (!action) { res.status(400).json({ error: 'action required' }); return; }
-  if (sid) {
-    sessionRpc(sid, action, ...(args ?? []));
-  } else {
-    broadcastRpc(action, ...(args ?? []));
+
+  if (isAsync) {
+    // Fire-and-forget
+    if (sid) sessionRpc(sid, action, ...(args ?? []));
+    else broadcastRpc(action, ...(args ?? []));
+    res.json({ ok: true });
+    return;
   }
-  res.json({ ok: true });
+
+  // Sync: send with id, wait for response
+  const id = crypto.randomUUID();
+  const rpcMsg = JSON.stringify({ type: 'rpc', id, action, args: args ?? [] });
+
+  const timeout = setTimeout(() => {
+    rpcPending.delete(id);
+    res.json({ error: 'timeout' });
+  }, 10000);
+
+  rpcPending.set(id, (result) => {
+    clearTimeout(timeout);
+    res.json(result);
+  });
+
+  if (sid) {
+    const session = sessions.get(sid);
+    if (session) {
+      for (const ws of session.peers.keys()) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(rpcMsg);
+      }
+    }
+  } else {
+    for (const session of sessions.values()) {
+      for (const ws of session.peers.keys()) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(rpcMsg);
+      }
+    }
+    for (const ws of rpcClients) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(rpcMsg);
+    }
+  }
 });
 
 router.post('/api/sessions', async (req: express.Request, res: express.Response) => {
@@ -1530,6 +1584,12 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
   if (id === '_rpc') {
     console.log('[ws] rpc control client connected');
     rpcClients.add(ws);
+    ws.on('message', (data: Buffer) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === 'rpc-result' && msg.id) handleRpcResult(msg);
+      } catch {}
+    });
     ws.on('close', () => rpcClients.delete(ws));
     return;
   }
@@ -1645,6 +1705,11 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       return;
     }
     const text = (data as Buffer).toString();
+    // Handle RPC result messages from browser
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed.type === 'rpc-result' && parsed.id) { handleRpcResult(parsed); return; }
+    } catch {}
     const msg  = parseClientMessage(text);
     if (msg) {
       console.log(`[session ${id}] msg: ${msg.type}`, msg.type === 'resize' ? `${msg.cols}x${msg.rows}` : '');

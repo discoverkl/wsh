@@ -2,7 +2,7 @@
 // Lazy-loads xterm.js + fit addon from CDN, streams PTY output read-only.
 
 import { bindTouchScroll } from './touch-scroll.js';
-import { handleWshRpc } from './wsh-rpc.js';
+import { handleWshRpc, makeResponder } from './wsh-rpc.js';
 
 declare const Terminal: any;
 declare const FitAddon: any;
@@ -408,7 +408,7 @@ interface MiniTerminalHandle {
           }
           term.write(new Uint8Array(event.data));
         }
-        else { handleWshRpc(event, container); }
+        else { handleWshRpc(event, container, makeResponder(ws!)); }
       });
 
       ws.addEventListener('close', (event: CloseEvent) => {

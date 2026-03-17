@@ -1,7 +1,7 @@
 // MiniTerminal — lightweight inline terminal component for skill cards.
 // Lazy-loads xterm.js + fit addon from CDN, streams PTY output read-only.
 import { bindTouchScroll } from './touch-scroll.js';
-import { handleWshRpc } from './wsh-rpc.js';
+import { handleWshRpc, makeResponder } from './wsh-rpc.js';
 let xtermPromise = null;
 function ensureXterm() {
     if (xtermPromise)
@@ -402,7 +402,7 @@ window.MiniTerminal = {
                     term.write(new Uint8Array(event.data));
                 }
                 else {
-                    handleWshRpc(event, container);
+                    handleWshRpc(event, container, makeResponder(ws));
                 }
             });
             ws.addEventListener('close', (event) => {
