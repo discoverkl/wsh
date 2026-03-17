@@ -16,63 +16,6 @@ import type { IPty } from 'node-pty';
 import YAML from 'yaml';
 import { version } from '../package.json';
 
-// --- wsh RPC encoding ---
-// Parts are percent-encoded to avoid conflicts with framing characters.
-
-function rpcEncode(s: string): string {
-  return s.replace(/[%;\x00-\x1f\x7f]/g, (ch) => '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
-}
-
-function rpcDecode(s: string): string {
-  return s.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
-}
-
-function rpcParse(payload: string): { action: string; args: string[] } {
-  const parts = payload.split(';').map(rpcDecode);
-  return { action: parts[0], args: parts.slice(1) };
-}
-
-// OSC protocol: \x1b]777;wsh:<part0>;<part1>;...\x07
-function rpcEmitOsc(action: string, ...args: string[]): string {
-  const payload = [action, ...args].map(rpcEncode).join(';');
-  return `\x1b]777;wsh:${payload}\x07`;
-}
-
-const OSC_RPC_RE = /\x1b\]777;wsh:([^\x07]*)\x07/g;
-const MAX_OSC_BUF = 4096;
-
-/**
- * Extract wsh RPC sequences from PTY output, handling data that may be split
- * across multiple chunks. Returns clean terminal output, parsed RPCs, and any
- * pending partial OSC to carry over to the next call.
- */
-function extractRpcs(data: string, pending: string): { output: string; pending: string; rpcs: { action: string; args: string[] }[] } {
-  if (pending) data = pending + data;
-
-  // Hold back a trailing incomplete OSC (\x1b] with no \x07).
-  // Also buffer a trailing lone \x1b that could be the start of \x1b].
-  let newPending = '';
-  const lastEsc = data.lastIndexOf('\x1b]');
-  if (lastEsc >= 0 && data.indexOf('\x07', lastEsc) < 0) {
-    const partial = data.slice(lastEsc);
-    if (partial.length < MAX_OSC_BUF) {
-      newPending = partial;
-      data = data.slice(0, lastEsc);
-    }
-  } else if (data.endsWith('\x1b')) {
-    newPending = '\x1b';
-    data = data.slice(0, -1);
-  }
-
-  const rpcs: { action: string; args: string[] }[] = [];
-  const output = data.replace(OSC_RPC_RE, (_match, payload: string) => {
-    rpcs.push(rpcParse(payload));
-    return '';
-  });
-
-  return { output, pending: newPending, rpcs };
-}
-
 // --- Subcommands (handled before server startup) ---
 
 if (process.argv[2] === 'version') {
@@ -106,7 +49,7 @@ if (process.argv[2] === 'version') {
 } else if (process.argv[2] === 'rpc') {
   // Usage: wsh rpc [--async] <action> [arg1] [arg2] ...
   // Default: sync (waits for browser response). --async: fire-and-forget.
-  // HTTP mode when WSH_RPC_PORT is set, OSC mode otherwise (always async).
+  // Requires WSH_RPC_PORT to be set (HTTP mode).
   const rpcArgs: string[] = [];
   let isAsync = false;
   for (const a of process.argv.slice(3)) {
@@ -120,39 +63,37 @@ if (process.argv[2] === 'version') {
   }
   const args = rpcArgs.slice(1);
   const rpcPort = process.env.WSH_RPC_PORT;
-  if (rpcPort) {
-    // HTTP mode: POST to the wsh server directly (bypasses stdout capture by agent tools)
-    const body = JSON.stringify({ action, args, session: process.env.WSH_SESSION, ...(isAsync ? { async: true } : {}) });
-    const basePath = process.env.WSH_RPC_BASE || '/';
+  if (!rpcPort) {
+    console.error('wsh rpc: WSH_RPC_PORT environment variable is required');
+    process.exit(1);
+  }
+  // HTTP mode: POST to the wsh server directly (bypasses stdout capture by agent tools)
+  const body = JSON.stringify({ action, args, session: process.env.WSH_SESSION, ...(isAsync ? { async: true } : {}) });
+  const basePath = process.env.WSH_RPC_BASE || '/';
+  try {
+    const proxySecret = process.env.WSH_PROXY_SECRET;
+    const aboxUser = process.env.ABOX_USER;
+    let headers = "-H 'Content-Type: application/json'";
+    if (proxySecret) headers += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
+    if (aboxUser) headers += ` -H 'X-WSH-User: ${aboxUser}'`;
+    const escapedBody = body.replace(/'/g, "'\\''");
+    let response: string;
+    // Try HTTP first, fall back to HTTPS (for httpsOnly mode)
     try {
-      const proxySecret = process.env.WSH_PROXY_SECRET;
-      const aboxUser = process.env.ABOX_USER;
-      let headers = "-H 'Content-Type: application/json'";
-      if (proxySecret) headers += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
-      if (aboxUser) headers += ` -H 'X-WSH-User: ${aboxUser}'`;
-      const escapedBody = body.replace(/'/g, "'\\''");
-      let response: string;
-      // Try HTTP first, fall back to HTTPS (for httpsOnly mode)
-      try {
-        response = execSync(`curl -sS -X POST ${headers} -d '${escapedBody}' 'http://127.0.0.1:${rpcPort}${basePath}api/rpc'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-      } catch {
-        response = execSync(`curl -sSk -X POST ${headers} -d '${escapedBody}' 'https://127.0.0.1:${rpcPort}${basePath}api/rpc'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-      }
-      const result = JSON.parse(response);
-      if (result.error) {
-        console.error(result.error);
-        process.exit(1);
-      }
-      if (result.value != null) console.log(result.value);
-      process.exit(0);
-    } catch (err: any) {
-      console.error('wsh rpc: failed —', err.stderr?.toString().trim() || err.message);
+      response = execSync(`curl -sS -X POST ${headers} -d '${escapedBody}' 'http://127.0.0.1:${rpcPort}${basePath}api/rpc'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch {
+      response = execSync(`curl -sSk -X POST ${headers} -d '${escapedBody}' 'https://127.0.0.1:${rpcPort}${basePath}api/rpc'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+    }
+    const result = JSON.parse(response);
+    if (result.error) {
+      console.error(result.error);
       process.exit(1);
     }
-  } else {
-    // OSC mode: write escape sequence to stdout (always async, no return channel)
-    process.stdout.write(rpcEmitOsc(action, ...args));
+    if (result.value != null) console.log(result.value);
     process.exit(0);
+  } catch (err: any) {
+    console.error('wsh rpc: failed —', err.stderr?.toString().trim() || err.message);
+    process.exit(1);
   }
 } else if (process.argv[2] === 'apps') {
   const YAML = require('yaml') as typeof import('yaml');
@@ -599,47 +540,24 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
   session.pty = ptyProcess;
 
   const oscTitleRe = /\x1b\](?:0|2);([^\x07]*)\x07/;
-  let oscPending = '';
   const spawnTime = Date.now();
   let ptyMsgCount = 0;
   ptyProcess.onData((data: string) => {
     ptyMsgCount++;
     if (ptyMsgCount <= 10) console.log(`[session ${id}] PTY data #${ptyMsgCount}: ${Buffer.byteLength(data)}B +${Date.now() - spawnTime}ms peers=${session.peers.size}`);
 
-    const { output, pending, rpcs } = extractRpcs(data, oscPending);
-    oscPending = pending;
-
-    if (output) {
-      const m = output.match(oscTitleRe);
-      if (m) session.title = m[1];
-      session.lastOutput = Date.now();
-      const buf = Buffer.from(output, 'utf8');
-      appendScrollback(session, buf);
-      for (const ws of session.peers.keys()) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(buf, { binary: true });
-      }
-    }
-
-    for (const rpc of rpcs) {
-      console.log(`[session ${id}] rpc: ${rpc.action} ${rpc.args.join(' ')}`);
-      const msg = JSON.stringify({ type: 'rpc', action: rpc.action, args: rpc.args });
-      for (const ws of session.peers.keys()) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-      }
+    const m = data.match(oscTitleRe);
+    if (m) session.title = m[1];
+    session.lastOutput = Date.now();
+    const buf = Buffer.from(data, 'utf8');
+    appendScrollback(session, buf);
+    for (const ws of session.peers.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(buf, { binary: true });
     }
   });
 
   ptyProcess.onExit(({ exitCode, signal }) => {
     console.log(`[session ${id}] PTY exited (code=${exitCode} signal=${signal})`);
-    // Flush any buffered partial OSC as raw data
-    if (oscPending) {
-      const buf = Buffer.from(oscPending, 'utf8');
-      appendScrollback(session, buf);
-      for (const ws of session.peers.keys()) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(buf, { binary: true });
-      }
-      oscPending = '';
-    }
     session.pty = null;
     const closeWs = (ws: WebSocket) => { if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'PTY process exited'); };
     for (const ws of session.peers.keys()) closeWs(ws);
