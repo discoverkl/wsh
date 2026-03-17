@@ -16,12 +16,40 @@ import type { IPty } from 'node-pty';
 import YAML from 'yaml';
 import { version } from '../package.json';
 
+// --- Error handling ---
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  return String(err);
+}
+
+process.on('uncaughtException', (err) => {
+  console.error(`Error: ${errorMessage(err)}`);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error(`Error: ${errorMessage(reason)}`);
+  process.exit(1);
+});
+
 // --- Subcommands (handled before server startup) ---
 
+const wantsHelp = process.argv.slice(3).includes('-h') || process.argv.slice(3).includes('--help');
+
+function subHelp(usage: string, lines: string[] = []): never {
+  console.log(usage);
+  for (const l of lines) console.log(l);
+  process.exit(0);
+}
+
 if (process.argv[2] === 'version') {
+  if (wantsHelp) subHelp('Usage: wsh version', ['', 'Print the current version and exit.']);
   console.log(`v${version}`);
   process.exit(0);
 } else if (process.argv[2] === 'update') {
+  if (wantsHelp) subHelp('Usage: wsh update', ['', 'Update wsh to the latest version.']);
   try {
     const body = execSync('curl -fsSL https://api.github.com/repos/discoverkl/wsh/releases/latest', { encoding: 'utf8' });
     const latest = (JSON.parse(body) as { tag_name: string }).tag_name.replace(/^v/, '');
@@ -37,6 +65,7 @@ if (process.argv[2] === 'version') {
   }
   process.exit(0);
 } else if (process.argv[2] === 'token') {
+  if (wantsHelp) subHelp('Usage: wsh token', ['', 'Print the auth token derived from the TLS key.']);
   const keyFile = path.join(os.homedir(), '.wsh', 'tls', 'key.pem');
   try {
     const key = fs.readFileSync(keyFile, 'utf8');
@@ -47,9 +76,15 @@ if (process.argv[2] === 'version') {
     process.exit(1);
   }
 } else if (process.argv[2] === 'rpc') {
-  // Usage: wsh rpc [--async] [--timeout <ms>] <action> [arg1] [arg2] ...
-  // Default: sync (waits for browser response). --async: fire-and-forget.
-  // Requires WSH_RPC_PORT to be set (HTTP mode).
+  if (wantsHelp) subHelp('Usage: wsh rpc [--async] [--timeout <ms>] <action> [args...]', [
+    '', 'Execute an RPC action on the wsh server.',
+    '', 'Options:',
+    '  --async          Fire-and-forget (do not wait for response)',
+    '  --timeout <ms>   Response timeout in milliseconds',
+    '', 'Environment:',
+    '  WSH_RPC_PORT     Port of the wsh server (required)',
+    '  WSH_SESSION      Session ID for the RPC call',
+  ]);
   const rpcArgs: string[] = [];
   let isAsync = false;
   let rpcTimeout: number | undefined;
@@ -99,6 +134,11 @@ if (process.argv[2] === 'version') {
     process.exit(1);
   }
 } else if (process.argv[2] === 'apps') {
+  if (wantsHelp) subHelp('Usage: wsh apps [init]', [
+    '', 'List available apps, or initialize a starter config.',
+    '', 'Subcommands:',
+    '  init  Create ~/.wsh/apps.yaml with example app definitions',
+  ]);
   const YAML = require('yaml') as typeof import('yaml');
   const subCmd = process.argv[3];
   const appsPath = path.join(os.homedir(), '.wsh', 'apps.yaml');
@@ -198,22 +238,39 @@ python3:
       }
     }
   }
-  console.log('Available apps:');
-  for (const [key, app] of Object.entries(apps) as [string, any][]) {
+  // Build table rows
+  const rows = (Object.entries(apps) as [string, any][]).map(([key, app]) => {
     const title = app.title ?? path.basename(app.command);
-    const args = app.args?.length ? ' ' + app.args.join(' ') : '';
-    const tags = [];
+    const command = app.command + (app.args?.length ? ' ' + app.args.join(' ') : '');
+    const tags: string[] = [];
     if (app.type === 'web') tags.push('web');
     if (app.access === 'public') tags.push('public');
     if (app.skill) tags.push('skill');
-    const tagStr = tags.length ? ' [' + tags.join(', ') + ']' : '';
-    console.log(`  ${key}  ${title}  (${app.command}${args})${tagStr}`);
+    if (app.hidden) tags.push('hidden');
+    return { key, title, command, tags: tags.join(', ') };
+  });
+  const col = (field: 'key' | 'title' | 'command' | 'tags', header: string) => {
+    const w = Math.max(header.length, ...rows.map(r => r[field].length));
+    return { header, field, w } as const;
+  };
+  const cols = [col('key', 'APP'), col('title', 'TITLE'), col('command', 'COMMAND'), col('tags', 'TAGS')];
+  const headerLine = cols.map(c => c.header.padEnd(c.w)).join('  ');
+  const separator = cols.map(c => '─'.repeat(c.w)).join('──');
+  console.log(headerLine);
+  console.log(separator);
+  for (const row of rows) {
+    console.log(cols.map(c => row[c.field].padEnd(c.w)).join('  '));
   }
   console.log(`\nSystem config: ${path.join(systemDir, 'apps.yaml')}`);
   console.log(`User config:   ${appsPath}`);
   console.log('Run "wsh apps init" to create a starter user config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
+  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [app-key] [input...]', [
+    '', 'Create a new session and print its URL.',
+    '', 'Options:',
+    '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)',
+  ]);
   const subArgs = process.argv.slice(3);
 
   let port = parseInt(process.env.WSH_PORT || '', 10) || 7681;
@@ -230,7 +287,10 @@ python3:
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
   if (!basePath.endsWith('/')) basePath += '/';
   const aboxUser = process.env.ABOX_USER;
-  const userHeader = aboxUser ? `-H 'X-WSH-User: ${aboxUser}'` : '';
+  const proxySecret = process.env.WSH_PROXY_SECRET;
+  let userHeader = '';
+  if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
+  if (aboxUser) userHeader += ` -H 'X-WSH-User: ${aboxUser}'`;
   const payload: Record<string, string> = { app: appKey };
   if (input) payload.input = input;
   const jsonData = JSON.stringify(payload);
@@ -273,6 +333,10 @@ python3:
   process.exit(1);
 } else if (process.argv[2] === 'ls' || process.argv[2] === 'kill') {
   const subcommand = process.argv[2];
+  if (wantsHelp) {
+    if (subcommand === 'ls') subHelp('Usage: wsh ls [-p <port>]', ['', 'List active sessions.', '', 'Options:', '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)']);
+    else subHelp('Usage: wsh kill [-p <port>] <session-id>', ['', 'Close a session by ID.', '', 'Options:', '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)']);
+  }
   const subArgs = process.argv.slice(3);
 
   // Parse --port / -p, fallback to WSH_PORT env var, then default 7681
@@ -287,11 +351,11 @@ python3:
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
   if (!basePath.endsWith('/')) basePath += '/';
 
-  // When running inside an abox container with --trust-proxy, loopback auth is
-  // disabled.  The CLI must identify itself via X-WSH-User so the server grants
-  // owner access (anyone with shell access in the container IS the owner).
   const aboxUser = process.env.ABOX_USER;
-  const userHeader = aboxUser ? `-H 'X-WSH-User: ${aboxUser}'` : '';
+  const proxySecret = process.env.WSH_PROXY_SECRET;
+  let userHeader = '';
+  if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
+  if (aboxUser) userHeader += ` -H 'X-WSH-User: ${aboxUser}'`;
 
   function curlRequest(method: string, urlPath: string): { status: number; body: string } {
     // Try HTTP first; if it fails (e.g. httpsOnly mode), retry with HTTPS.
@@ -1368,7 +1432,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     try {
       await spawnWebSession(id, appKey, effectiveConfig);
     } catch (err) {
-      console.error('Failed to spawn web app:', err);
+      console.error('Failed to spawn web app:', errorMessage(err));
       res.status(500).json({ error: 'Failed to spawn session' }); return;
     }
   } else if (mode === 'inline') {
@@ -1379,7 +1443,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     try {
       spawnSession(id, appKey, effectiveConfig);
     } catch (err) {
-      console.error('Failed to spawn PTY:', err);
+      console.error('Failed to spawn PTY:', errorMessage(err));
       res.status(500).json({ error: 'Failed to spawn session' }); return;
     }
   }
@@ -1610,7 +1674,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
         ws.send(JSON.stringify({ type: 'status', status: 'starting' }));
         session = await spawnWebSession(id, appKey, effectiveConfig);
       } catch (err) {
-        console.error('Failed to spawn web app:', err);
+        console.error('Failed to spawn web app:', errorMessage(err));
         ws.close(1011, 'Failed to spawn web app');
         return;
       }
@@ -1618,7 +1682,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       try {
         session = spawnSession(id, appKey, effectiveConfig);
       } catch (err) {
-        console.error('Failed to spawn PTY:', err);
+        console.error('Failed to spawn PTY:', errorMessage(err));
         ws.close(1011, 'Failed to spawn PTY');
         return;
       }
@@ -1665,7 +1729,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
             try {
               spawnPty(id, currentSession, cfg, cols, rows);
             } catch (err) {
-              console.error(`[session ${id}] deferred spawn failed:`, err);
+              console.error(`[session ${id}] deferred spawn failed:`, errorMessage(err));
               ws.close(1011, 'Failed to spawn PTY');
             }
           } else if (currentSession.pty) {
@@ -1785,6 +1849,27 @@ function onListening(): void {
 
   if (!values['no-open']) openBrowser(localURL);
 }
+
+function onServerError(err: NodeJS.ErrnoException): void {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\nError: Port ${PORT} is already in use.`);
+    console.error(`  Kill the existing process:  lsof -ti :${PORT} | xargs kill`);
+    console.error(`  Or use a different port:    wsh -p <port>\n`);
+  } else if (err.code === 'EACCES') {
+    console.error(`\nError: Permission denied for port ${PORT}.`);
+    console.error(`  Ports below 1024 require elevated privileges.`);
+    console.error(`  Try a higher port:  wsh -p <port>\n`);
+  } else if (err.code === 'EADDRNOTAVAIL') {
+    console.error(`\nError: Address not available — cannot bind to the requested interface.`);
+    console.error(`  Check --bind value or use 0.0.0.0 for all interfaces.\n`);
+  } else {
+    console.error(`\nError: Failed to start server — ${err.message}\n`);
+  }
+  process.exit(1);
+}
+
+localServer.on('error', onServerError);
+if (networkServer) networkServer.on('error', onServerError);
 
 if (httpsOnly) {
   networkServer!.listen(PORT, '0.0.0.0', onListening);
