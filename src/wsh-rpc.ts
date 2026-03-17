@@ -47,7 +47,8 @@ function ensureListener(): void {
     const { action, args, id, respond } = e.detail;
     const fn = handlers.get(action);
     if (!fn) {
-      if (id && respond) respond(id, undefined, `unknown action: ${action}`);
+      console.debug('[wsh-rpc] unknown action:', action);
+      if (id && respond) respond(id);
       return;
     }
     const result = fn(...args);
