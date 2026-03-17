@@ -231,39 +231,46 @@ python3:
   if (!basePath.endsWith('/')) basePath += '/';
   const aboxUser = process.env.ABOX_USER;
   const userHeader = aboxUser ? `-H 'X-WSH-User: ${aboxUser}'` : '';
-  const url = `http://127.0.0.1:${port}${basePath}api/sessions`;
   const payload: Record<string, string> = { app: appKey };
   if (input) payload.input = input;
-  try {
-    const body = execSync(
-      `curl -sS ${userHeader} -X POST -H 'Content-Type: application/json' -d '${JSON.stringify(payload)}' -w '\\n%{http_code}' '${url}'`,
-      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
-    );
-    const lines = body.trimEnd().split('\n');
-    const httpCode = parseInt(lines.pop()!, 10);
-    const responseBody = lines.join('\n');
-    if (httpCode >= 400) {
+  const jsonData = JSON.stringify(payload);
+  let lastErr: any;
+  for (const scheme of ['http', 'https'] as const) {
+    const url = `${scheme}://127.0.0.1:${port}${basePath}api/sessions`;
+    const flags = scheme === 'https' ? '-sSk' : '-sS';
+    try {
+      const body = execSync(
+        `curl ${flags} ${userHeader} -X POST -H 'Content-Type: application/json' -d '${jsonData}' -w '\\n%{http_code}' '${url}'`,
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      const lines = body.trimEnd().split('\n');
+      const httpCode = parseInt(lines.pop()!, 10);
+      const responseBody = lines.join('\n');
+      if (httpCode >= 400) {
+        const parsed = JSON.parse(responseBody);
+        console.error(`Error: ${parsed.error}`);
+        process.exit(1);
+      }
       const parsed = JSON.parse(responseBody);
-      console.error(`Error: ${parsed.error}`);
-      process.exit(1);
+      if (process.env.WSH_URL) {
+        // Behind a proxy: construct URL from external origin + relative path
+        try { const u = new URL(parsed.url); console.log(`${process.env.WSH_URL}${u.pathname}${u.hash}`); }
+        catch { console.log(parsed.url); }
+      } else {
+        console.log(parsed.url);
+      }
+      process.exit(0);
+    } catch (err: any) {
+      lastErr = err;
+      if (scheme === 'http') continue;
     }
-    const parsed = JSON.parse(responseBody);
-    if (process.env.WSH_URL) {
-      // Behind a proxy: construct URL from external origin + relative path
-      try { const u = new URL(parsed.url); console.log(`${process.env.WSH_URL}${u.pathname}${u.hash}`); }
-      catch { console.log(parsed.url); }
-    } else {
-      console.log(parsed.url);
-    }
-  } catch (err: any) {
-    if (err.stderr?.includes('onnect') || err.stderr?.includes('refused')) {
-      console.error(`No wsh server running on localhost:${port}`);
-    } else {
-      console.error('Error:', err.stderr?.trim() || err.message);
-    }
-    process.exit(1);
   }
-  process.exit(0);
+  if (lastErr?.stderr?.includes('onnect') || lastErr?.stderr?.includes('refused')) {
+    console.error(`No wsh server running on localhost:${port}`);
+  } else {
+    console.error('Error:', lastErr?.stderr?.trim() || lastErr?.message);
+  }
+  process.exit(1);
 } else if (process.argv[2] === 'ls' || process.argv[2] === 'kill') {
   const subcommand = process.argv[2];
   const subArgs = process.argv.slice(3);
