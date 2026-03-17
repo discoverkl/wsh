@@ -32,8 +32,7 @@ func TestSessions(t *testing.T) {
 		if !ok || id == "" {
 			t.Fatalf("expected session id, got %v", resp)
 		}
-		// API returns relative path, not full URL
-		assertContains(t, resp["path"].(string), "bash#"+id)
+		assertContains(t, resp["url"].(string), "bash#"+id)
 
 		list := srv.getJSON(t, "/api/sessions")
 		sessions := list["sessions"].([]any)
