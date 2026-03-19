@@ -266,10 +266,11 @@ python3:
   console.log('Run "wsh apps init" to create a starter user config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
-  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [app-key] [input...]', [
+  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [--notify] [app-key] [input...]', [
     '', 'Create a new session and print its URL.',
     '', 'Options:',
     '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)',
+    '  --notify           Show a toast on the catalog page when the app is ready',
   ]);
   const subArgs = process.argv.slice(3);
 
@@ -280,6 +281,9 @@ python3:
     subArgs.splice(portIdx, 2);
   }
 
+  const notifyIdx = subArgs.indexOf('--notify');
+  const notify = notifyIdx !== -1;
+  if (notifyIdx !== -1) subArgs.splice(notifyIdx, 1);
   const positionalArgs = subArgs.filter(a => !a.startsWith('-'));
   const appKey = positionalArgs[0] || 'bash';
   const input = positionalArgs.slice(1).join(' ');
@@ -291,8 +295,9 @@ python3:
   let userHeader = '';
   if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
   if (aboxUser) userHeader += ` -H 'X-WSH-User: ${aboxUser}'`;
-  const payload: Record<string, string> = { app: appKey };
+  const payload: Record<string, string | boolean> = { app: appKey };
   if (input) payload.input = input;
+  if (notify) payload.notify = true;
   const jsonData = JSON.stringify(payload);
   let lastErr: any;
   for (const scheme of ['http', 'https'] as const) {
@@ -696,7 +701,7 @@ function pollUntilReady(port: number, healthPath = '/', timeoutMs = 30000): Prom
   });
 }
 
-async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig): Promise<Session> {
+async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig, options?: { notify?: boolean }): Promise<Session> {
   const port = await findFreePort();
   const configuredTimeout = appConfig.timeout ? parseTimeout(appConfig.timeout) : undefined;
   const timeoutMs = (configuredTimeout != null && !isNaN(configuredTimeout)) ? configuredTimeout : WEB_SESSION_TTL;
@@ -782,7 +787,9 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
       if (ws.readyState === WebSocket.OPEN) ws.send(readyMsg);
     }
     // Notify catalog pages so they can show a clickable "open" toast
-    broadcastRpc('session:ready', id, appKey, session.title || appKey);
+    if (options?.notify) {
+      broadcastRpc('session:ready', id, appKey, session.title || appKey);
+    }
   }).catch(() => {
     if (sessions.has(id)) {
       console.log(`[session ${id}] health check failed, but process still running`);
@@ -1414,6 +1421,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   const appKey = (req.body?.app as string) || 'bash';
   const input = (req.body?.input as string) || '';
   const mode = (req.body?.mode as string) || '';
+  const notify = !!req.body?.notify;
   const apps = loadApps();
   const appConfig = apps[appKey];
   if (!appConfig) { res.status(400).json({ error: `Unknown app: "${appKey}"` }); return; }
@@ -1432,7 +1440,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
 
   if (effectiveConfig.type === 'web') {
     try {
-      await spawnWebSession(id, appKey, effectiveConfig);
+      await spawnWebSession(id, appKey, effectiveConfig, { notify });
     } catch (err) {
       console.error('Failed to spawn web app:', errorMessage(err));
       res.status(500).json({ error: 'Failed to spawn session' }); return;
