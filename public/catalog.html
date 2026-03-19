@@ -1449,12 +1449,38 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
   window.refreshCatalog();
 
   // Handle RPC events (from inline terminals or server broadcasts)
-  // connectRpc(); // Enable for pages without a terminal WebSocket
+  connectRpc();
   var refreshDebounce = null;
   onRpc('refresh-catalog', function() {
     console.log('[wsh-rpc] refresh-catalog');
     clearTimeout(refreshDebounce);
     refreshDebounce = setTimeout(function() { window.refreshCatalog(); }, 300);
+  });
+
+  // Show a clickable toast when a web app session becomes ready
+  onRpc('session:ready', function(sessionId, appKey, title) {
+    console.log('[wsh-rpc] session:ready', sessionId, appKey, title);
+    var container = document.getElementById('toast-container');
+    var toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.innerHTML = '<span class="toast-dot"></span>'
+      + '<span class="toast-text"><b>' + escapeHtml(title || appKey) + '</b> is ready</span>'
+      + '<span class="toast-action">Open &#x2197;</span>';
+    toast.addEventListener('click', function() {
+      window.open('./' + encodeURIComponent(appKey) + '#' + encodeURIComponent(sessionId), '_blank');
+      toast.classList.add('removing');
+      setTimeout(function() { toast.remove(); }, 300);
+    });
+    container.appendChild(toast);
+    // Also refresh session badges
+    fetchSessions();
+    // Auto-dismiss after 15 seconds
+    setTimeout(function() {
+      if (toast.parentNode) {
+        toast.classList.add('removing');
+        setTimeout(function() { toast.remove(); }, 300);
+      }
+    }, 15000);
   });
 
   // Config popover toggle
