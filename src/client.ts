@@ -1,6 +1,7 @@
 import type { Terminal as TerminalType } from '@xterm/xterm';
 import type { FitAddon as FitAddonType } from '@xterm/addon-fit';
 import { bindTouchScroll } from './touch-scroll.js';
+import './api.js';
 import { handleWshRpc, makeResponder } from './wsh-rpc.js';
 
 // These globals are injected by the CDN <script> tags in index.html.

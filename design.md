@@ -140,16 +140,16 @@ Environment injected into web app processes: `WSH_PORT`, `WSH_SESSION`, `WSH_BAS
 
 ## RPC (PTY-to-Client / Server-to-Client)
 
-A running PTY process can trigger client-side actions by writing an OSC 777 escape sequence to stdout. The server intercepts and strips these from the terminal stream, forwarding them as JSON `{ type: 'rpc', action, args }` messages over WebSocket. Server code can also send RPCs directly via `sessionRpc()` or `broadcastRpc()`.
+All RPC is `eval` — the server delivers JavaScript to connected browser clients for execution. Pages expose capabilities on `window.api` (defined in `src/api.ts`). PTY processes, server code, or external tools can call any `api.*` function.
 
-**OSC protocol**: `\x1b]777;wsh:<action>[;<arg1>;<arg2>...]\x07` — parts are percent-encoded (control chars, `%`, `;`).
+**Entry points:**
+- **CLI**: `wsh rpc '<code>'` (defaults to own session via `$WSH_SESSION`; `--session <id>`, `--session index`, `--broadcast`; `-` reads stdin)
+- **Server code**: `broadcastRpc('eval', code)` / `sessionRpc(id, 'eval', code)`
+- **Control WebSocket**: Pages without a terminal connect with `session=_rpc` to receive broadcasts
 
-**Three entry points:**
-- **PTY process**: `wsh rpc <action> [args...]` (or raw `printf`)
-- **Server code**: `sessionRpc(id, action, ...args)` / `broadcastRpc(action, ...args)`
-- **Control WebSocket**: Pages without a terminal can connect with `session=_rpc` to receive broadcasts
+**Built-in `api` functions** (`src/api.ts`): `api.toast(msg)` — toast notifications (text/html, raw mode, configurable duration, swipe-to-dismiss). Catalog adds `api.refreshCatalog()`, `api.sessionReady()`.
 
-**Client handling** (`src/wsh-rpc.ts`): RPC messages are dispatched as `wsh-rpc` CustomEvents on the DOM. Pages register handlers via `onRpc(action, handler)`.
+**Transport**: OSC 777 escape sequences (`\x1b]777;wsh:eval;<code>\x07`) or HTTP POST to `/api/rpc`.
 
 ## Skills
 

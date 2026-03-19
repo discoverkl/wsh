@@ -1,110 +1,96 @@
 # wsh RPC
 
-PTY-to-client and server-to-client RPC via OSC 777 escape sequences.
+Client-side JavaScript evaluation via WebSocket, triggered from PTY processes or server code.
 
-## Protocol
+## How It Works
 
-```
-\x1b]777;wsh:<action>[;<arg1>;<arg2>...]\x07
-```
-
-Parts are percent-encoded to avoid conflicts with OSC framing (`;`, control characters).
+All RPC messages are `eval` — they execute JavaScript on connected browser clients. Pages expose capabilities on `window.api` (e.g. `api.toast`, `api.refreshCatalog`). The RPC system simply delivers code to the browser for execution.
 
 ## Entry Points
 
 | Source | Method |
 |---|---|
-| PTY process | `wsh rpc <action> [args...]` or raw `printf` |
-| Server code | `sessionRpc(id, action, ...args)` / `broadcastRpc(action, ...args)` |
+| PTY process | `wsh rpc [options] <code>` or pipe via `wsh rpc -` |
+| Server code | `broadcastRpc('eval', code)` / `sessionRpc(id, 'eval', code)` |
 | Control WebSocket | Connect with `session=_rpc` to receive broadcasts without a terminal |
 
-## Client Handling
+## CLI Usage
 
-RPC messages arrive as `{ type: 'rpc', action, args }` JSON over WebSocket. The client dispatches them as `wsh-rpc` CustomEvents on the DOM. Pages register handlers via `onRpc(action, handler)`.
+```bash
+# Send to own session (default via $WSH_SESSION)
+wsh rpc 'api.toast("hello")'
 
-## Scenarios
+# Target a specific session
+wsh rpc --session <id> 'api.toast("done")'
 
-### PTY → Client (`wsh rpc`)
+# Target catalog/index pages only
+wsh rpc --session index 'api.refreshCatalog()'
 
-**Catalog / Navigation:**
+# Broadcast to all sessions + index pages
+wsh rpc --broadcast 'api.toast("server restarting")'
 
-| Action | Args | Description |
-|---|---|---|
-| `refresh-catalog` | — | Reload the catalog app list (e.g. after a skill modifies `apps.yaml`) |
-| `navigate` | `appKey` | Redirect the user to another app page |
-| `close` | — | Tell the catalog to close the inline terminal widget |
-| `launch` | `appKey`, `input?` | Start another app/skill from the catalog (skill chaining) |
+# Read code from stdin (useful for complex HTML)
+wsh rpc --broadcast - <<'JS'
+api.toast({
+  html: '<div><b>Deployed</b> v2.4.1</div>',
+  raw: true
+})
+JS
 
-**Rich content (things terminals can't do):**
+# Fire-and-forget (no response wait)
+wsh rpc --async 'api.toast("fire and forget")'
 
-| Action | Args | Description |
-|---|---|---|
-| `notify` | `message`, `level?` | Show a toast notification (`info`, `success`, `warning`, `error`) |
-| `image` | `url` | Display an image in a modal/overlay (diagrams, screenshots, charts) |
-| `markdown` | `content` | Render markdown in a panel beside the terminal |
-| `html` | `content` | Render arbitrary HTML (rich tables, forms, embedded widgets) |
-| `qrcode` | `text` | Display a QR code overlay (sharing URLs to mobile devices) |
+# Custom timeout
+wsh rpc --timeout 30000 'api.someSlowAction()'
+```
 
-**Browser capabilities (things terminals don't have access to):**
+## window.api
 
-| Action | Args | Description |
-|---|---|---|
-| `copy` | `text` | Copy text to clipboard (generated tokens, passwords, snippets) |
-| `open` | `url` | Open a URL in a new browser tab |
-| `download` | `url` | Trigger a file download in the browser |
-| `upload` | `path?` | Prompt user to pick a file; deliver it to the PTY process |
-| `sound` | `name?` | Play a notification sound (for long-running tasks completing) |
-| `speak` | `text` | Text-to-speech notification |
+Pages register capabilities on `window.api`. Built-in:
 
-**Interactive prompts (better UX than terminal stdin):**
+| Method | Description |
+|---|---|
+| `api.toast(msg)` | Show a toast notification. `msg` is a string or options object. |
 
-| Action | Args | Description |
-|---|---|---|
-| `prompt` | `message` | Ask for text input via a browser dialog; response written to PTY stdin |
-| `confirm` | `message` | Yes/no confirmation dialog; response written to PTY stdin |
-| `select` | `option1`, `option2`, ... | Selection picker; chosen value written to PTY stdin |
+### api.toast(msg)
 
-**Terminal UX:**
+```js
+// Plain text
+api.toast("Hello world")
 
-| Action | Args | Description |
-|---|---|---|
-| `progress` | `percent`, `label` | Show/update a progress indicator on the terminal widget |
-| `badge` | `count` | Set a notification badge on the browser tab (0 to clear) |
-| `fullscreen` | `state?` | Toggle or set fullscreen mode for the terminal |
+// Plain text with options
+api.toast({ text: "Hello", duration: 5000 })
 
-**State persistence:**
+// HTML content
+api.toast({ html: "<b>Bold</b> message" })
 
-| Action | Args | Description |
-|---|---|---|
-| `set` | `key`, `value` | Store a key-value pair in browser localStorage |
-| `remove` | `key` | Remove a key from browser localStorage |
+// Raw mode — no icon, accent bar, or progress bar
+api.toast({ html: "<div>fully custom</div>", raw: true })
 
-### Server → All Clients (`broadcastRpc`)
+// Sticky — no auto-dismiss (duration: 0)
+api.toast({ text: "Close me manually", duration: 0 })
+```
 
-| Action | Args | Description |
-|---|---|---|
-| `session-update` | — | Notify catalog to refresh its active sessions list |
-| `server-shutdown` | — | Warn all clients that the server is about to restart |
-| `config-update` | — | Notify all clients after a REST API modifies `apps.yaml` |
-| `version-update` | `version` | Prompt clients to reload when a new server version is deployed |
+Options: `text`, `html`, `raw` (boolean), `duration` (ms, 0=sticky, default 8000).
 
-### Server → Session (`sessionRpc`)
+### Catalog-specific
 
-| Action | Args | Description |
-|---|---|---|
-| `reload-iframe` | — | Tell a web app's iframe to reload after a hot deploy |
-| `theme` | `name` | Switch terminal theme on the fly from a running process |
-| `title` | `text` | Update the catalog card or tab title for the session |
-| `pin` | `state` | Toggle pin state from server-side logic |
+| Method | Description |
+|---|---|
+| `api.refreshCatalog()` | Reload the app/skill list |
+| `api.sessionReady(sessionId, appKey, title)` | Show a "ready" toast for a web app session |
 
-## Priority
+## Extending
 
-Top 3 candidates for implementation:
+Any page can add to `window.api`:
 
-1. **`copy`** — Clipboard access is impossible from a terminal. Skills constantly generate tokens, passwords, and URLs that users need to paste elsewhere.
-2. **`confirm`** — Turns one-way RPC into two-way interaction. Browser dialog for destructive actions, response flows back through PTY stdin with no new protocol needed.
-3. **`image`** — Bridges the biggest gap between terminal and browser. Turns wsh from text-only into a rich output environment for diagrams, charts, and screenshots.
+```js
+import './api.js';
+api.myAction = (arg) => { /* ... */ };
+```
 
-## Response Channel
+Then callable via: `wsh rpc 'api.myAction("value")'`
 
-Most RPCs are fire-and-forget. For interactive RPCs (`prompt`, `confirm`, `select`, `upload`), the browser writes the user's response back to the PTY process via stdin over the existing WebSocket. This keeps the protocol simple — no need for a separate response mechanism.
+## Protocol
+
+RPC messages arrive as `{ type: 'rpc', action: 'eval', args: [code] }` JSON over WebSocket. The `wsh-rpc` module dispatches them and returns `{ value }` or `{ error }` responses for sync calls.
