@@ -127,4 +127,11 @@ export function bindTouchScroll(opts) {
     };
     el.addEventListener('touchend', endTouch, { passive: true });
     el.addEventListener('touchcancel', endTouch, { passive: true });
+    return {
+        stop() {
+            stopInertia();
+            overscroll = 0;
+            applyOverscroll();
+        },
+    };
 }

@@ -235,6 +235,7 @@ function connect(): void {
               document.getElementById('web-container')!.removeAttribute('hidden');
               document.getElementById('clear-btn')!.setAttribute('hidden', '');
               document.getElementById('logs-btn')!.removeAttribute('hidden');
+              document.getElementById('debug-btn')!.removeAttribute('hidden');
               document.getElementById('share-btn')!.setAttribute('hidden', '');
               document.getElementById('shortcut-bar')!.classList.add('hidden');
               document.getElementById('input-toggle')!.setAttribute('hidden', '');
@@ -324,6 +325,23 @@ document.getElementById('logs-btn')!.addEventListener('click', () => {
     termContainer.setAttribute('hidden', '');
     webContainer.removeAttribute('hidden');
   }
+});
+
+document.getElementById('debug-btn')!.addEventListener('click', () => {
+  const base = location.pathname.split('/').slice(0, -1).join('/') || '';
+  const input = `debug web app "${appName}" (session ${sessionId})`;
+  fetch(`${base}/api/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app: 'box', input }),
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (data.url) {
+        try { const u = new URL(data.url); window.open(u.pathname + u.hash, '_blank'); }
+        catch { window.open(data.url, '_blank'); }
+      }
+    });
 });
 
 function sendAction(msg: Record<string, unknown>): void {
@@ -469,86 +487,134 @@ term.onData((data: string) => {
   if (ws.readyState === WebSocket.OPEN) ws.send(data);
 });
 
+// Modifier toggles (Ctrl / Shift) + soft keyboard for touch shortcut bar
+let ctrlActive = false;
+let shiftActive = false;
+const ctrlKeyboard = document.getElementById('ctrl-keyboard');
+
+const ctrlKeyboardLabel = ctrlKeyboard?.querySelector('.ctrl-keyboard-label');
+
+function updateKeyboard(): void {
+  const show = ctrlActive || shiftActive;
+  ctrlKeyboard?.classList.toggle('visible', show);
+  if (ctrlKeyboardLabel) {
+    ctrlKeyboardLabel.textContent = ctrlActive ? 'Ctrl +' : 'Shift +';
+  }
+}
+
+function setCtrl(on: boolean): void {
+  ctrlActive = on;
+  document.querySelectorAll('.ctrl-toggle').forEach((b) => b.classList.toggle('active', on));
+  if (on && shiftActive) { shiftActive = false; document.querySelectorAll('.shift-toggle').forEach((b) => b.classList.remove('active')); }
+  updateKeyboard();
+}
+
+function setShift(on: boolean): void {
+  shiftActive = on;
+  document.querySelectorAll('.shift-toggle').forEach((b) => b.classList.toggle('active', on));
+  if (on && ctrlActive) { ctrlActive = false; document.querySelectorAll('.ctrl-toggle').forEach((b) => b.classList.remove('active')); }
+  updateKeyboard();
+}
+
+function clearModifiers(): void {
+  if (ctrlActive) setCtrl(false);
+  if (shiftActive) setShift(false);
+}
+
+// Map data-send values to their Shift equivalents (terminal escape sequences)
+function shiftKey(data: string): string | null {
+  switch (data) {
+    case '\x1b[A': return '\x1b[1;2A'; // Shift+Up
+    case '\x1b[B': return '\x1b[1;2B'; // Shift+Down
+    case '\x09': return '\x1b[Z';      // Shift+Tab (backtab)
+    case '\r': return '\x1b[13;2u';    // Shift+Enter
+    default: return null;
+  }
+}
+
+// Convert a character to its Ctrl equivalent (Ctrl+A = \x01, ..., Ctrl+Z = \x1a)
+function ctrlChar(ch: string): string {
+  const code = ch.toUpperCase().charCodeAt(0);
+  if (code >= 65 && code <= 90) return String.fromCharCode(code - 64); // A-Z
+  if (ch === '/') return String.fromCharCode(31);  // Ctrl+/
+  if (ch === '[') return String.fromCharCode(27);  // Ctrl+[ = Esc
+  if (ch === '\\') return String.fromCharCode(28); // Ctrl+backslash
+  if (ch === ']') return String.fromCharCode(29);  // Ctrl+]
+  return ch;
+}
+
+// Soft keyboard key taps (shared by Ctrl and Shift)
+ctrlKeyboard?.addEventListener('pointerdown', (e: PointerEvent) => {
+  const key = (e.target as HTMLElement).closest('.ctrl-key') as HTMLElement | null;
+  if (!key) return;
+  e.preventDefault();
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+  const ch = key.dataset.ch;
+  if (!ch || ws.readyState !== WebSocket.OPEN) return;
+  if (ctrlActive) {
+    ws.send(ctrlChar(ch));
+  } else if (shiftActive) {
+    ws.send(ch.toUpperCase());
+  }
+  clearModifiers();
+});
+
+
 // Mobile shortcut bar — use pointerdown to both prevent focus steal and handle action
 document.getElementById('shortcut-bar')?.addEventListener('pointerdown', (e: PointerEvent) => {
-  const ta = document.getElementById('shortcut-input') as HTMLTextAreaElement | null;
-  const taFocused = ta && document.activeElement === ta;
   const isSendBtn = !!(e.target as HTMLElement).closest('.shortcut-send-btn');
   const isTextarea = !!(e.target as HTMLElement).closest('.shortcut-text-input');
-  if (taFocused && !isSendBtn && !isTextarea) e.preventDefault(); // keep textarea focused, but let Send button and textarea itself handle normally
+  if (isSendBtn || isTextarea) return; // let Send button and textarea handle normally
+
+  e.preventDefault();
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
 
   const btn = (e.target as HTMLElement).closest('.shortcut-btn') as HTMLElement | null;
   if (!btn) return;
+
+  // Handle modifier toggle buttons
+  if (btn.classList.contains('ctrl-toggle')) {
+    setCtrl(!ctrlActive);
+    return;
+  }
+  if (btn.classList.contains('shift-toggle')) {
+    setShift(!shiftActive);
+    return;
+  }
+
   const data = btn.dataset.send;
   if (!data) return;
 
-  // Ctrl+C (\x03) and Esc (\x1b) always bypass textarea and go to terminal
-  if (data === '\x03' || data === '\x1b') {
-    if (ws.readyState === WebSocket.OPEN) ws.send(data);
-    return;
-  }
-
-  // When textarea is focused, redirect to textarea (strip trailing \r from auto-enter buttons)
-  if (taFocused && ta) {
-    const bare = data.endsWith('\r') && data.length > 1 ? data.slice(0, -1) : data;
-    if (bare !== data && bare.length === 1) {
-      // Auto-enter shortcut (e.g. "y\r") — just insert the character in textarea
-      document.execCommand('insertText', false, bare);
-      autoResizeInput();
+  // When Shift is active, try to send shifted version
+  if (shiftActive) {
+    const shifted = shiftKey(data);
+    if (shifted) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(shifted);
+      clearModifiers();
       return;
     }
-    if (data === '\r') {
-      // Enter → submit
-      sendShortcutInput();
-    } else if (data === '\x7f') {
-      // Backspace → delete before cursor
-      const start = ta.selectionStart;
-      const end = ta.selectionEnd;
-      if (start !== end) {
-        document.execCommand('delete');
-      } else if (start > 0) {
-        ta.setSelectionRange(start - 1, start);
-        document.execCommand('delete');
-      }
-    } else if (data === '\x1b[A') {
-      // Arrow up → history navigation
-      if (inputHistory.length) {
-        if (historyIndex === -1) historyIndex = inputHistory.length;
-        if (historyIndex > 0) {
-          historyIndex--;
-          ta.value = inputHistory[historyIndex];
-        }
-      }
-    } else if (data === '\x1b[B') {
-      // Arrow down → history navigation
-      if (inputHistory.length && historyIndex >= 0) {
-        if (historyIndex < inputHistory.length - 1) {
-          historyIndex++;
-          ta.value = inputHistory[historyIndex];
-        } else {
-          historyIndex = -1;
-          ta.value = '';
-        }
-      }
-    } else if (data === '\x09') {
-      // Tab → insert tab
-      document.execCommand('insertText', false, '\t');
-    } else {
-      // Printable characters → insert at cursor
-      document.execCommand('insertText', false, data);
+    // For printable chars (e.g. "y\r"), uppercase the char
+    const bare = data.endsWith('\r') && data.length > 1 ? data.slice(0, -1) : data;
+    if (bare.length === 1 && bare !== bare.toUpperCase()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(bare.toUpperCase() + (data.endsWith('\r') ? '\r' : ''));
+      clearModifiers();
+      return;
     }
-    autoResizeInput();
-    return;
   }
 
-  // Default: send to terminal
+  // Always send to terminal
   if (ws.readyState === WebSocket.OPEN) ws.send(data);
+  clearModifiers();
 });
 
-// Scroll-to-bottom shortcut button
-document.getElementById('scroll-bottom-btn')?.addEventListener('pointerdown', (e: PointerEvent) => {
-  e.preventDefault();
-  term.scrollToBottom();
+// Scroll-to-bottom shortcut buttons (one in landscape row, one in portrait rows)
+let touchScroller: { stop: () => void } | null = null;
+document.querySelectorAll('.scroll-bottom-btn').forEach((btn) => {
+  btn.addEventListener('pointerdown', (e: Event) => {
+    e.preventDefault();
+    if (touchScroller) touchScroller.stop();
+    term.scrollToBottom();
+  });
 });
 
 // Text input for typing/dictation
@@ -578,7 +644,21 @@ function sendShortcutInput(): void {
     resetInputSize();
   }
 }
-shortcutInput?.addEventListener('input', autoResizeInput);
+shortcutInput?.addEventListener('input', () => {
+  if (ctrlActive && shortcutInput.value) {
+    const ch = shortcutInput.value.slice(-1);
+    shortcutInput.value = shortcutInput.value.slice(0, -1);
+    if (ws.readyState === WebSocket.OPEN) ws.send(ctrlChar(ch));
+    clearModifiers();
+    return;
+  }
+  if (shiftActive && shortcutInput.value) {
+    const ch = shortcutInput.value.slice(-1);
+    shortcutInput.value = shortcutInput.value.slice(0, -1) + ch.toUpperCase();
+    clearModifiers();
+  }
+  autoResizeInput();
+});
 shortcutInput?.addEventListener('keydown', (e: KeyboardEvent) => {
   // Desktop: Enter submits, Shift+Enter newline. Touch: Enter is newline (use Send button to submit).
   if (e.key === 'Enter' && !e.shiftKey && !isTouchDevice) {
@@ -616,7 +696,7 @@ if (inputToggle && shortcutBar) {
 {
   const container = document.getElementById('terminal-container');
   if (container) {
-    bindTouchScroll({
+    touchScroller = bindTouchScroll({
       el: container,
       lineHeight: Math.ceil((term.options.fontSize || 14) * (term.options.lineHeight || 1.2)),
       scrollLines: (n) => term.scrollLines(n),

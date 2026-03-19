@@ -4,45 +4,45 @@ package wsh_test
 // │ Helper                      │ Description                                            │
 // ├─────────────────────────────┼────────────────────────────────────────────────────────┤
 // │ server                      │ Server lifecycle                                       │
-// │  ├ startServer              │ launch node server on free port, wait for ready         │
-// │  ├ waitReady                │ poll GET /api/sessions until 200                        │
+// │  ├ startServer              │ launch node server on free port, wait for ready        │
+// │  ├ waitReady                │ poll GET /api/sessions until 200                       │
 // │  ├ url                      │ build http://127.0.0.1:port/path                       │
-// │  ├ getJSON                  │ GET path, decode JSON response                          │
-// │  ├ postJSON                 │ POST path with JSON body, fail on 5xx                   │
-// │  ├ postJSONRaw              │ POST path, return (status, body)                        │
-// │  ├ deleteJSONRaw            │ DELETE path, return (status, body)                      │
-// │  ├ connectTerminal          │ create session + WS, return termConn                    │
+// │  ├ getJSON                  │ GET path, decode JSON response                         │
+// │  ├ postJSON                 │ POST path with JSON body, fail on 5xx                  │
+// │  ├ postJSONRaw              │ POST path, return (status, body)                       │
+// │  ├ deleteJSONRaw            │ DELETE path, return (status, body)                     │
+// │  ├ connectTerminal          │ create session + WS, return termConn                   │
 // │  └ connectRPCClient         │ WS to session=_rpc, return rpcClient                   │
 // ├─────────────────────────────┼────────────────────────────────────────────────────────┤
 // │ termConn                    │ WebSocket terminal client                              │
-// │  ├ readRole                 │ read initial role message from server                   │
-// │  ├ sendJSON                 │ write JSON text frame                                   │
-// │  ├ sendBinary               │ write binary frame (PTY input)                          │
-// │  ├ readUntil                │ read until substring found or timeout                   │
-// │  └ handleRPC                │ goroutine: read RPCs, call handler, send results        │
+// │  ├ readRole                 │ read initial role message from server                  │
+// │  ├ sendJSON                 │ write JSON text frame                                  │
+// │  ├ sendBinary               │ write binary frame (PTY input)                         │
+// │  ├ readUntil                │ read until substring found or timeout                  │
+// │  └ handleRPC                │ goroutine: read RPCs, call handler, send results       │
 // ├─────────────────────────────┼────────────────────────────────────────────────────────┤
 // │ rpcClient                   │ RPC-only control client (wraps termConn)               │
-// │  └ handleRPC                │ delegate to termConn.handleRPC                          │
+// │  └ handleRPC                │ delegate to termConn.handleRPC                         │
 // ├─────────────────────────────┼────────────────────────────────────────────────────────┤
 // │ CLI                         │ Subprocess helpers                                     │
-// │  ├ runCLI                   │ run wsh subcommand, fail on error                       │
-// │  ├ runCLIWithEnv            │ run wsh with extra env vars, fail on error              │
-// │  └ runCLIErr                │ run wsh, return (stdout, error)                         │
+// │  ├ runCLI                   │ run wsh subcommand, fail on error                      │
+// │  ├ runCLIWithEnv            │ run wsh with extra env vars, fail on error             │
+// │  └ runCLIErr                │ run wsh, return (stdout, error)                        │
 // ├─────────────────────────────┼────────────────────────────────────────────────────────┤
 // │ Mock                        │ Test doubles                                           │
-// │  └ evalJS                   │ simulate browser eval for known expressions             │
+// │  └ evalJS                   │ simulate browser eval for known expressions            │
 // ├─────────────────────────────┼────────────────────────────────────────────────────────┤
 // │ Assertions                  │ Test assertions                                        │
-// │  ├ assertField              │ assert JSON field equals expected value                 │
-// │  ├ assertEqual              │ assert two values are equal                             │
-// │  └ assertContains           │ assert string contains substring                        │
+// │  ├ assertField              │ assert JSON field equals expected value                │
+// │  ├ assertEqual              │ assert two values are equal                            │
+// │  └ assertContains           │ assert string contains substring                       │
 // ├─────────────────────────────┼────────────────────────────────────────────────────────┤
 // │ Misc                        │ Utility functions                                      │
-// │  ├ freePort                 │ find an available TCP port                              │
+// │  ├ freePort                 │ find an available TCP port                             │
 // │  ├ projectRoot              │ resolve absolute path to repo root                     │
-// │  ├ mustProjectRoot          │ projectRoot without testing.T                           │
-// │  ├ str                      │ nil-safe fmt.Sprintf("%v", v)                           │
-// │  └ strPtr                   │ return pointer to string                                │
+// │  ├ mustProjectRoot          │ projectRoot without testing.T                          │
+// │  ├ str                      │ nil-safe fmt.Sprintf("%v", v)                          │
+// │  └ strPtr                   │ return pointer to string                               │
 // └─────────────────────────────┴────────────────────────────────────────────────────────┘
 
 import (
