@@ -6,7 +6,6 @@
 <title>{{title}}</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%231e1e2e'/><text x='4' y='24' font-family='monospace' font-size='18' font-weight='bold' fill='%23a6e3a1'>&#x3e;_</text></svg>" />
 <script type="module" src="mini-terminal.js"></script>
-<script src="swipe-cards.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -700,9 +699,16 @@ html.touch .config-gear { opacity: 0.5; width: 44px; height: 44px; top: 6px; rig
 html.touch .card:active { transform: scale(0.98); background: var(--bg-card-hover); transition: none; }
 html.touch .skill-card:active { transform: scale(0.99); background: var(--bg-card-hover); transition: none; }
 
+/* ── Swipe cards base (always present, actions hidden until narrow+touch) ── */
+.card-swipe-wrap {
+  position: relative;
+}
+.card-actions {
+  display: none;
+}
+
 /* ── Narrow + Touch: swipe cards ── */
 html.narrow.touch .card-swipe-wrap {
-  position: relative;
   overflow: hidden;
   border-radius: 12px;
 }
@@ -774,6 +780,7 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
 </div>
 <script type="module">
 import { onRpc, connectRpc } from './wsh-rpc.js';
+import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
 
 (function() {
   // Track active inline terminals per app key
@@ -1038,24 +1045,23 @@ import { onRpc, connectRpc } from './wsh-rpc.js';
   }
 
   var d = document.documentElement;
-  var isMobile = d.classList.contains('narrow') && d.classList.contains('touch');
 
   function renderApps(apps, hiddenApps) {
     var content = document.getElementById('apps-content');
     content.innerHTML = '';
     apps.forEach(function(app, i) {
       var a = buildAppCard(app, false);
-      var el = isMobile ? SwipeCards.wrapCard(a, app, escapeAttr) : a;
+      var el = swipeWrapCard(a, app, escapeAttr);
       content.appendChild(el);
       setTimeout(function() { a.classList.add('visible'); }, 30 * i);
     });
     (hiddenApps || []).forEach(function(app, i) {
       var a = buildAppCard(app, true);
-      var el = isMobile ? SwipeCards.wrapCard(a, app, escapeAttr) : a;
+      var el = swipeWrapCard(a, app, escapeAttr);
       content.appendChild(el);
       setTimeout(function() { a.classList.add('visible'); }, 30 * (apps.length + i));
     });
-    if (isMobile) SwipeCards.init();
+    swipeInit();
     document.getElementById('apps-section').hidden = false;
   }
 
@@ -1333,11 +1339,11 @@ import { onRpc, connectRpc } from './wsh-rpc.js';
     } else {
       container = document.getElementById('apps-content');
       card = buildAppCard(app, !!app.hidden);
-      if (isMobile) card = SwipeCards.wrapCard(card, app, escapeAttr);
+      card = swipeWrapCard(card, app, escapeAttr);
       document.getElementById('apps-section').hidden = false;
     }
     container.appendChild(card);
-    if (isMobile && !app.skill) SwipeCards.init();
+    if (!app.skill) swipeInit();
     // The .card/.skill-card element (may be inside a swipe wrapper)
     var animTarget = card.classList.contains('card') || card.classList.contains('skill-card')
       ? card : card.querySelector('.card, .skill-card') || card;
@@ -1386,29 +1392,31 @@ import { onRpc, connectRpc } from './wsh-rpc.js';
 
         } else if (diff.type === 'hide') {
           if (card) {
+            var target = card.closest('.card-swipe-wrap') || card;
             card.classList.add('hidden-app');
             card.style.borderStyle = 'dashed';
-            card.dataset.hidden = '1';
+            target.dataset.hidden = '1';
             // Fade out then hide
             card.classList.add('removing');
             setTimeout(function() {
-              card.style.display = 'none';
+              target.style.display = 'none';
               card.classList.remove('removing');
             }, 350);
           }
 
         } else if (diff.type === 'unhide') {
           if (card) {
+            var target = card.closest('.card-swipe-wrap') || card;
             card.classList.remove('hidden-app');
             card.style.borderStyle = '';
-            delete card.dataset.hidden;
+            delete target.dataset.hidden;
             var badge = card.querySelector('.hidden-badge');
             if (badge) badge.remove();
             var btn = card.querySelector('.unhide-btn');
             if (btn) btn.remove();
             // Fade in: momentarily hide visibility, show display, then animate
             card.classList.remove('visible');
-            card.style.display = '';
+            target.style.display = '';
             requestAnimationFrame(function() { card.classList.add('visible'); });
           }
 
@@ -1421,14 +1429,14 @@ import { onRpc, connectRpc } from './wsh-rpc.js';
               newCard = buildSkillCard(diff.app, !!diff.app.hidden);
             } else {
               newCard = buildAppCard(diff.app, !!diff.app.hidden);
-              if (isMobile) newCard = SwipeCards.wrapCard(newCard, diff.app, escapeAttr);
+              newCard = swipeWrapCard(newCard, diff.app, escapeAttr);
             }
             var target = card.closest('.card-swipe-wrap') || card;
             container.replaceChild(newCard, target);
             var animTarget = newCard.classList.contains('card') || newCard.classList.contains('skill-card')
               ? newCard : newCard.querySelector('.card, .skill-card') || newCard;
             animTarget.classList.add('visible', 'updated');
-            if (isMobile && !diff.app.skill) SwipeCards.init();
+            if (!diff.app.skill) swipeInit();
           }
         }
 
@@ -1518,7 +1526,7 @@ import { onRpc, connectRpc } from './wsh-rpc.js';
 
   document.getElementById('skills-content').addEventListener('keydown', function(e) {
     if (!e.target.classList.contains('skill-input')) return;
-    if (e.key === 'Enter' && !e.shiftKey && !d.classList.contains('touch')) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !d.classList.contains('touch')) {
       e.preventDefault();
       var form = e.target.closest('form');
       if (!form) return;

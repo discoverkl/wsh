@@ -26,7 +26,7 @@ const STOP_THRESHOLD = 0.03; // px/ms
 const BOUNCE_RESISTANCE = 0.35;
 const BOUNCE_BACK_SPEED = 0.15;
 
-export function bindTouchScroll(opts: TouchScrollOpts): void {
+export function bindTouchScroll(opts: TouchScrollOpts): { stop: () => void } {
   const { el, scrollLines, isAtTop, isAtBottom, bounceEl } = opts;
   const lineH = opts.lineHeight;
   const bounce = bounceEl != null;
@@ -145,4 +145,12 @@ export function bindTouchScroll(opts: TouchScrollOpts): void {
   };
   el.addEventListener('touchend', endTouch, { passive: true });
   el.addEventListener('touchcancel', endTouch, { passive: true });
+
+  return {
+    stop(): void {
+      stopInertia();
+      overscroll = 0;
+      applyOverscroll();
+    },
+  };
 }
