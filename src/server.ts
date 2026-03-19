@@ -781,6 +781,8 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig)
     for (const ws of session.peers.keys()) {
       if (ws.readyState === WebSocket.OPEN) ws.send(readyMsg);
     }
+    // Notify catalog pages so they can show a clickable "open" toast
+    broadcastRpc('session:ready', id, appKey, session.title || appKey);
   }).catch(() => {
     if (sessions.has(id)) {
       console.log(`[session ${id}] health check failed, but process still running`);
