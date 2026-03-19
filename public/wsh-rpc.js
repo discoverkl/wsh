@@ -103,8 +103,8 @@ export function connectRpc() {
     doConnect();
 }
 export { makeResponder };
-// Built-in RPC actions
-onRpc('log', (...args) => { console.log('[wsh-rpc]', ...args); });
+// Built-in RPC action: eval is the universal handler — pages register
+// capabilities on window.api (e.g. api.refreshCatalog, api.toast).
 onRpc('eval', async (code) => {
     try {
         return { value: await eval(code) };

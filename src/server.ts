@@ -76,37 +76,65 @@ if (process.argv[2] === 'version') {
     process.exit(1);
   }
 } else if (process.argv[2] === 'rpc') {
-  if (wantsHelp) subHelp('Usage: wsh rpc [--async] [--timeout <ms>] <action> [args...]', [
-    '', 'Execute an RPC action on the wsh server.',
+  if (wantsHelp) subHelp('Usage: wsh rpc [options] <code> [args...]', [
+    '', 'Evaluate JavaScript on connected clients via the wsh RPC mechanism.',
+    '', 'Pages expose capabilities on window.api (e.g. api.toast, api.refreshCatalog).',
     '', 'Options:',
     '  --async          Fire-and-forget (do not wait for response)',
     '  --timeout <ms>   Response timeout in milliseconds',
+    '  --session <id>   Target a specific session (default: $WSH_SESSION, "index" for catalog)',
+    '  --broadcast      Send to all sessions (ignore $WSH_SESSION)',
+    '  -                Read argument from stdin',
     '', 'Environment:',
     '  WSH_RPC_PORT     Port of the wsh server (required)',
-    '  WSH_SESSION      Session ID for the RPC call',
+    '  WSH_SESSION      Session ID for the RPC call (overridden by --session)',
+    '', 'Examples:',
+    '  wsh rpc \'api.toast("hello")\'',
+    '  wsh rpc --broadcast \'api.refreshCatalog()\'',
+    '  echo \'api.toast({html:"<b>hi</b>"})\' | wsh rpc --broadcast -',
   ]);
   const rpcArgs: string[] = [];
   let isAsync = false;
   let rpcTimeout: number | undefined;
+  let rpcSession: string | undefined;
+  let rpcBroadcast = false;
   for (let i = 3; i < process.argv.length; i++) {
     const a = process.argv[i];
     if (a === '--async') isAsync = true;
     else if (a === '--timeout' && process.argv[i + 1]) rpcTimeout = parseInt(process.argv[++i], 10);
+    else if (a === '--session' && process.argv[i + 1]) rpcSession = process.argv[++i];
+    else if (a === '--broadcast') rpcBroadcast = true;
     else rpcArgs.push(a);
   }
-  const action = rpcArgs[0];
-  if (!action) {
-    console.error('Usage: wsh rpc [--async] <action> [args...]');
+  // Replace `-` args with stdin content
+  if (rpcArgs.includes('-')) {
+    const stdin = fs.readFileSync(0, 'utf8').trimEnd();
+    for (let i = 0; i < rpcArgs.length; i++) {
+      if (rpcArgs[i] === '-') rpcArgs[i] = stdin;
+    }
+  }
+  if (rpcArgs.length === 0) {
+    console.error('Usage: wsh rpc [options] <code>');
     process.exit(1);
   }
-  const args = rpcArgs.slice(1);
+  if (rpcArgs.length > 1) {
+    console.error('wsh rpc: expected a single code argument (use quotes or stdin)');
+    process.exit(1);
+  }
+  const action = 'eval';
+  const args = rpcArgs;
   const rpcPort = process.env.WSH_RPC_PORT;
   if (!rpcPort) {
     console.error('wsh rpc: WSH_RPC_PORT environment variable is required');
     process.exit(1);
   }
   // HTTP mode: POST to the wsh server directly (bypasses stdout capture by agent tools)
-  const body = JSON.stringify({ action, args, session: process.env.WSH_SESSION, ...(isAsync ? { async: true } : {}), ...(rpcTimeout ? { timeout: rpcTimeout } : {}) });
+  const session = rpcBroadcast ? undefined : (rpcSession ?? process.env.WSH_SESSION);
+  if (!session && !rpcBroadcast) {
+    console.error('wsh rpc: no target session — use --session <id>, --broadcast, or set $WSH_SESSION');
+    process.exit(1);
+  }
+  const body = JSON.stringify({ action, args, session, ...(isAsync ? { async: true } : {}), ...(rpcTimeout ? { timeout: rpcTimeout } : {}) });
   const basePath = process.env.WSH_RPC_BASE || '/';
   try {
     const proxySecret = process.env.WSH_PROXY_SECRET;
@@ -266,11 +294,12 @@ python3:
   console.log('Run "wsh apps init" to create a starter user config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
-  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [--notify] [app-key] [input...]', [
+  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [app-key] [input...]', [
     '', 'Create a new session and print its URL.',
     '', 'Options:',
-    '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)',
-    '  --notify           Show a toast on the catalog page when the app is ready',
+    '  -p, --port <port>       Server port (default: $WSH_PORT or 7681)',
+    '  -s, --session <id>      Reuse a specific session ID',
+    '  --notify                Show a toast on the catalog page when the app is ready',
   ]);
   const subArgs = process.argv.slice(3);
 
@@ -279,6 +308,13 @@ python3:
   if (portIdx !== -1 && subArgs[portIdx + 1]) {
     port = parseInt(subArgs[portIdx + 1], 10);
     subArgs.splice(portIdx, 2);
+  }
+
+  let sessionId = '';
+  const sidIdx = subArgs.findIndex(a => a === '--session' || a === '-s');
+  if (sidIdx !== -1 && subArgs[sidIdx + 1]) {
+    sessionId = subArgs[sidIdx + 1];
+    subArgs.splice(sidIdx, 2);
   }
 
   const notifyIdx = subArgs.indexOf('--notify');
@@ -297,6 +333,7 @@ python3:
   if (aboxUser) userHeader += ` -H 'X-WSH-User: ${aboxUser}'`;
   const payload: Record<string, string | boolean> = { app: appKey };
   if (input) payload.input = input;
+  if (sessionId) payload.session = sessionId;
   if (notify) payload.notify = true;
   const jsonData = JSON.stringify(payload);
   let lastErr: any;
@@ -651,7 +688,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
     const closeWs = (ws: WebSocket) => { if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'PTY process exited'); };
     for (const ws of session.peers.keys()) closeWs(ws);
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
-    sessions.delete(id);
+    if (sessions.get(id) === session) sessions.delete(id);
   });
 
   console.log(`[session ${id}] spawned (${cols}x${rows}) cmd: ${wrapped}`);
@@ -768,7 +805,8 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
       if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'Process exited');
     }
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
-    sessions.delete(id);
+    // Only delete if this session is still the current one (not replaced by -s reuse)
+    if (sessions.get(id) === session) sessions.delete(id);
   });
 
   console.log(`[session ${id}] web app spawned on port ${port}`);
@@ -788,7 +826,8 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
     }
     // Notify catalog pages so they can show a clickable "open" toast
     if (options?.notify) {
-      broadcastRpc('session:ready', id, appKey, session.title || appKey);
+      const escJs = (s: string) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      broadcastRpc('eval', `api.sessionReady&&api.sessionReady('${escJs(id)}','${escJs(appKey)}','${escJs(session.title || appKey)}')`);
     }
   }).catch(() => {
     if (sessions.has(id)) {
@@ -1374,10 +1413,36 @@ router.post('/api/rpc', (req: express.Request, res: express.Response) => {
   const { action, args, session: sid, async: isAsync, timeout: reqTimeout } = req.body as { action?: string; args?: string[]; session?: string; async?: boolean; timeout?: number };
   if (!action) { res.status(400).json({ error: 'action required' }); return; }
 
+  /** Send an RPC message string to the appropriate targets based on session ID. */
+  const sendToTargets = (msg: string): void => {
+    if (sid === 'index') {
+      // Target only control-only (index page) clients
+      for (const ws of rpcClients) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+      }
+    } else if (sid) {
+      const session = sessions.get(sid);
+      if (session) {
+        for (const ws of session.peers.keys()) {
+          if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+        }
+      }
+    } else {
+      // Broadcast to all sessions + control clients
+      for (const session of sessions.values()) {
+        for (const ws of session.peers.keys()) {
+          if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+        }
+      }
+      for (const ws of rpcClients) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+      }
+    }
+  };
+
   if (isAsync) {
     // Fire-and-forget
-    if (sid) sessionRpc(sid, action, ...(args ?? []));
-    else broadcastRpc(action, ...(args ?? []));
+    sendToTargets(JSON.stringify({ type: 'rpc', action, args: args ?? [] }));
     res.json({ ok: true });
     return;
   }
@@ -1397,23 +1462,7 @@ router.post('/api/rpc', (req: express.Request, res: express.Response) => {
     res.json(result);
   });
 
-  if (sid) {
-    const session = sessions.get(sid);
-    if (session) {
-      for (const ws of session.peers.keys()) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(rpcMsg);
-      }
-    }
-  } else {
-    for (const session of sessions.values()) {
-      for (const ws of session.peers.keys()) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(rpcMsg);
-      }
-    }
-    for (const ws of rpcClients) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(rpcMsg);
-    }
-  }
+  sendToTargets(rpcMsg);
 });
 
 router.post('/api/sessions', async (req: express.Request, res: express.Response) => {
@@ -1422,6 +1471,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   const input = (req.body?.input as string) || '';
   const mode = (req.body?.mode as string) || '';
   const notify = !!req.body?.notify;
+  const requestedSession = (req.body?.session as string) || '';
   const apps = loadApps();
   const appConfig = apps[appKey];
   if (!appConfig) { res.status(400).json({ error: `Unknown app: "${appKey}"` }); return; }
@@ -1436,7 +1486,20 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     };
   }
 
-  const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
+  // Use requested session ID or generate a random one
+  if (requestedSession && sessions.has(requestedSession)) {
+    // Kill existing session with same ID so it can be reused
+    const existing = sessions.get(requestedSession)!;
+    // Remove from map first so the old exit handler won't delete the new session
+    sessions.delete(requestedSession);
+    if (existing.cleanupTimer !== null) clearTimeout(existing.cleanupTimer);
+    for (const ws of existing.peers.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'Session replaced');
+    }
+    if (existing.child) killProcessGroup(existing.child);
+    else if (existing.pty) existing.pty.kill('SIGHUP');
+  }
+  const id = requestedSession || crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
 
   if (effectiveConfig.type === 'web') {
     try {
