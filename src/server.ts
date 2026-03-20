@@ -647,7 +647,7 @@ function buildPtyCommand(appConfig: AppConfig): string {
 /** Spawn a PTY and wire it into an existing session. */
 function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: number, rows: number): void {
   const wrapped = buildPtyCommand(appConfig);
-  const ptyProcess = pty.spawn('/bin/bash', ['-c', wrapped], {
+  const ptyProcess = pty.spawn(userShell, ['-c', wrapped], {
     name: 'xterm-256color',
     cols,
     rows,
@@ -986,6 +986,7 @@ interface AppConfig {
   startupTimeout?: string;
 }
 
+const userShell = process.env.SHELL || '/bin/bash';
 const DEFAULT_APPS: Record<string, AppConfig> = {
   bash: {
     command: '/bin/bash',
