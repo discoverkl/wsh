@@ -647,7 +647,7 @@ function buildPtyCommand(appConfig: AppConfig): string {
 /** Spawn a PTY and wire it into an existing session. */
 function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: number, rows: number): void {
   const wrapped = buildPtyCommand(appConfig);
-  const ptyProcess = pty.spawn('/bin/sh', ['-c', wrapped], {
+  const ptyProcess = pty.spawn('/bin/bash', ['-c', wrapped], {
     name: 'xterm-256color',
     cols,
     rows,
@@ -763,7 +763,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   };
 
   const child = spawn(appConfig.command, appConfig.args ?? [], {
-    shell: process.env.SHELL || '/bin/sh',
+    shell: process.env.SHELL || '/bin/bash',
     detached: true,
     env: env as Record<string, string>,
     cwd: resolveCwd(appConfig),
@@ -1838,6 +1838,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
   ws.on('close', (code: number, reason: Buffer) => {
     console.log(`[session ${id}] ws closed (code=${code} reason=${reason?.toString() || ''})`);
     clearInterval(pingTimer);
+    if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }
     currentSession.peers.delete(ws);
     if (currentSession.writer === ws) {
       currentSession.writer = null;
@@ -1854,13 +1855,23 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     }
   });
 
-  // Heartbeat: detect dead connections within PING_INTERVAL + PONG_TIMEOUT.
+  // Heartbeat: detect dead connections.
+  // Send a ping every PING_INTERVAL. If no pong arrives within PONG_TIMEOUT
+  // after a ping, terminate the connection. This tolerates slow networks
+  // better than the single-interval check.
   let pongReceived = true;
-  ws.on('pong', () => { pongReceived = true; });
+  let pongTimer: ReturnType<typeof setTimeout> | null = null;
+  ws.on('pong', () => {
+    pongReceived = true;
+    if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }
+  });
   const pingTimer = setInterval(() => {
-    if (!pongReceived) { ws.terminate(); return; }
+    if (!pongReceived) { ws.close(4001, 'pong timeout'); return; }
     pongReceived = false;
     ws.ping();
+    pongTimer = setTimeout(() => {
+      if (!pongReceived) ws.close(4001, 'pong timeout');
+    }, PONG_TIMEOUT);
   }, PING_INTERVAL);
 });
 
