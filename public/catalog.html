@@ -241,6 +241,47 @@ header {
   animation: card-flash 0.6s ease-out;
 }
 
+.update-label {
+  position: absolute;
+  bottom: 8px;
+  right: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: rgba(255,255,255,.88);
+  background: linear-gradient(165deg, rgba(50,50,68,.88) 0%, rgba(32,32,46,.92) 100%);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  border: 1px solid rgba(255,255,255,.1);
+  box-shadow: 0 4px 12px -2px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.06);
+  padding: 4px 10px 4px 14px;
+  border-radius: 8px;
+  pointer-events: none;
+  z-index: 10;
+  animation: update-label-in .35s cubic-bezier(.16,1,.3,1);
+  transition: opacity .6s ease-out, transform .6s ease-out;
+}
+/* Accent dot */
+.update-label::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #818cf8;
+}
+.update-label.fade-out {
+  opacity: 0;
+  transform: translateY(4px);
+}
+@keyframes update-label-in {
+  0%   { opacity: 0; transform: translateY(6px) scale(.95); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 @keyframes card-flash {
   0%   { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.3); }
   40%  { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15); }
@@ -1282,10 +1323,16 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       if (!old) { changes.push({ type: 'added', key: a.key, app: a }); }
       else if (old.hidden && !a.hidden) { changes.push({ type: 'unhide', key: a.key, app: a }); }
       else if (!old.hidden && a.hidden) { changes.push({ type: 'hide', key: a.key, app: a }); }
-      else if (old.title !== a.title || old.description !== a.description ||
-               old.icon !== a.icon || old.command !== a.command ||
-               old.skill !== a.skill || old.type !== a.type || old.access !== a.access) {
-        changes.push({ type: 'updated', key: a.key, app: a });
+      else {
+        var fields = [];
+        if (old.title !== a.title) fields.push('title');
+        if (old.description !== a.description) fields.push('description');
+        if (old.icon !== a.icon) fields.push('icon');
+        if (old.command !== a.command) fields.push('command');
+        if (old.skill !== a.skill) fields.push('skill');
+        if (old.type !== a.type) fields.push('type');
+        if (old.access !== a.access) fields.push('access');
+        if (fields.length) changes.push({ type: 'updated', key: a.key, app: a, fields: fields });
       }
     });
     // Removed
@@ -1439,6 +1486,16 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
             var animTarget = newCard.classList.contains('card') || newCard.classList.contains('skill-card')
               ? newCard : newCard.querySelector('.card, .skill-card') || newCard;
             animTarget.classList.add('visible', 'updated');
+            // Show a brief label indicating what changed
+            if (diff.fields && diff.fields.length) {
+              var label = document.createElement('div');
+              label.className = 'update-label';
+              label.textContent = diff.fields.join(', ') + ' updated';
+              animTarget.style.position = 'relative';
+              animTarget.appendChild(label);
+              setTimeout(function() { label.classList.add('fade-out'); }, 1500);
+              setTimeout(function() { if (label.parentNode) label.remove(); }, 2500);
+            }
             if (!diff.app.skill) swipeInit();
           }
         }

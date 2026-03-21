@@ -70,26 +70,13 @@ const hadSession = location.hash.length > 1;
 
 // Writer share links embed the token in the hash: /#id?wt=...
 // Viewer share links are just /#id — the session ID alone is the viewer secret.
-function getCookie(name: string): string | null {
-  const match = document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
-  return match ? match[1] : null;
-}
-
 function getSessionParams(): { sessionId: string; wtoken: string | null } {
   const hash = location.hash.slice(1);
   const q = hash.indexOf('?');
   let id = q >= 0 ? hash.slice(0, q) : hash;
   const params = q >= 0 ? new URLSearchParams(hash.slice(q + 1)) : null;
   if (!id) {
-    // For web apps: check last-session cookie before generating a new ID
-    const pathParts = location.pathname.replace(/\/+$/g, '').split('/');
-    const app = pathParts[pathParts.length - 1] || '';
-    const lastSession = getCookie(`wsh_last_${app}`);
-    if (lastSession) {
-      id = lastSession;
-    } else {
-      id = (crypto.getRandomValues(new Uint32Array(1))[0] % 2176782336).toString(36).padStart(6, '0');
-    }
+    id = (crypto.getRandomValues(new Uint32Array(1))[0] % 2176782336).toString(36).padStart(6, '0');
     history.replaceState(null, '', `#${id}`);
   }
   return { sessionId: id, wtoken: params?.get('wt') ?? null };
@@ -193,6 +180,7 @@ let intentionalReconnect = false;
 let currentRole = '';
 let sessionDead = false;
 let appType: 'pty' | 'web' = 'pty';
+let sessionCwd = '';
 let showingLogs = false;
 
 function connect(): void {
@@ -219,7 +207,7 @@ function connect(): void {
     } else if (typeof event.data === 'string') {
       if (handleWshRpc(event, document, makeResponder(ws))) return;
       try {
-        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string };
+        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; cwd?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string; session?: string };
         if (msg.type === 'role' && msg.role) {
           if (msg.app && msg.app !== appName) {
             appName = msg.app;
@@ -227,6 +215,7 @@ function connect(): void {
             document.title = appName;
             history.replaceState(null, '', `${appName}#${sessionId}`);
           }
+          if (msg.cwd) sessionCwd = msg.cwd;
           applyRole(msg.role, msg.credential);
           const desktop = document.getElementById('desktop')!;
           if (desktop.hasAttribute('hidden')) {
@@ -236,7 +225,7 @@ function connect(): void {
               document.getElementById('web-container')!.removeAttribute('hidden');
               document.getElementById('clear-btn')!.setAttribute('hidden', '');
               document.getElementById('logs-btn')!.removeAttribute('hidden');
-              document.getElementById('debug-btn')!.removeAttribute('hidden');
+              document.getElementById('debug-btn')!.closest('.agent-wrap')?.removeAttribute('hidden');
               document.getElementById('share-btn')!.setAttribute('hidden', '');
               document.getElementById('shortcut-bar')!.classList.add('hidden');
               document.getElementById('input-toggle')!.setAttribute('hidden', '');
@@ -263,9 +252,11 @@ function connect(): void {
           }
         }
         if (msg.type === 'pin' && typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
-        if (msg.type === 'cookie' && msg.name && msg.value) {
-          const basePath = location.pathname.split('/').slice(0, -1).join('/') || '/';
-          document.cookie = `${msg.name}=${msg.value}; path=${basePath}; max-age=${365 * 24 * 60 * 60}`;
+        if (msg.type === 'redirect' && msg.session) {
+          // Server is redirecting us to an existing singleton web session
+          history.replaceState(null, '', `#${msg.session}`);
+          location.reload();
+          return;
         }
       } catch { /* ignore */ }
     }
@@ -334,7 +325,7 @@ document.getElementById('debug-btn')!.addEventListener('click', () => {
   fetch(`${base}/api/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ app: 'box', input }),
+    body: JSON.stringify({ app: 'box', input, ...(sessionCwd ? { cwd: sessionCwd } : {}) }),
   })
     .then(r => r.json())
     .then(data => {

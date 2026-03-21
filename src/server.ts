@@ -34,6 +34,11 @@ process.on('unhandledRejection', (reason) => {
   process.exit(1);
 });
 
+// --- Common utilities ---
+
+/** Session IDs are 6 lowercase alphanumeric characters. */
+function isSessionId(s: string): boolean { return /^[a-z0-9]{6}$/.test(s); }
+
 // --- Subcommands (handled before server startup) ---
 
 const wantsHelp = process.argv.slice(3).includes('-h') || process.argv.slice(3).includes('--help');
@@ -294,12 +299,14 @@ python3:
   console.log('Run "wsh apps init" to create a starter user config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
-  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [app-key] [input...]', [
+  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [--cwd <dir>] [--env KEY=VALUE] [app-key] [input...]', [
     '', 'Create a new session and print its URL.',
     '', 'Options:',
     '  -p, --port <port>       Server port (default: $WSH_PORT or 7681)',
     '  -s, --session <id>      Reuse a specific session ID',
     '  --notify                Show a toast on the catalog page when the app is ready',
+    '  --cwd <dir>             Override working directory for the session',
+    '  --env KEY=VALUE         Set environment variable (repeatable)',
   ]);
   const subArgs = process.argv.slice(3);
 
@@ -317,6 +324,23 @@ python3:
     subArgs.splice(sidIdx, 2);
   }
 
+  let cwdFlag = '';
+  const cwdIdx = subArgs.findIndex(a => a === '--cwd');
+  if (cwdIdx !== -1 && subArgs[cwdIdx + 1]) {
+    cwdFlag = subArgs[cwdIdx + 1];
+    subArgs.splice(cwdIdx, 2);
+  }
+
+  const envFlags: Record<string, string> = {};
+  for (;;) {
+    const envIdx = subArgs.findIndex(a => a === '--env');
+    if (envIdx === -1 || !subArgs[envIdx + 1]) break;
+    const val = subArgs[envIdx + 1];
+    const eqPos = val.indexOf('=');
+    if (eqPos > 0) envFlags[val.slice(0, eqPos)] = val.slice(eqPos + 1);
+    subArgs.splice(envIdx, 2);
+  }
+
   const notifyIdx = subArgs.indexOf('--notify');
   const notify = notifyIdx !== -1;
   if (notifyIdx !== -1) subArgs.splice(notifyIdx, 1);
@@ -331,10 +355,12 @@ python3:
   let userHeader = '';
   if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
   if (aboxUser) userHeader += ` -H 'X-WSH-User: ${aboxUser}'`;
-  const payload: Record<string, string | boolean> = { app: appKey };
+  const payload: Record<string, unknown> = { app: appKey };
   if (input) payload.input = input;
   if (sessionId) payload.session = sessionId;
   if (notify) payload.notify = true;
+  if (cwdFlag) payload.cwd = cwdFlag;
+  if (Object.keys(envFlags).length) payload.env = envFlags;
   const jsonData = JSON.stringify(payload);
   let lastErr: any;
   for (const scheme of ['http', 'https'] as const) {
@@ -373,6 +399,137 @@ python3:
     console.error('Error:', lastErr?.stderr?.trim() || lastErr?.message);
   }
   process.exit(1);
+} else if (process.argv[2] === 'logs') {
+  if (wantsHelp) subHelp('Usage: wsh logs [-p <port>] [-f] <session-id>', [
+    '', 'Print session scrollback (stdout/stderr output).',
+    '', 'Options:',
+    '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)',
+    '  -f, --follow       Stream new output after printing scrollback',
+  ]);
+  const subArgs = process.argv.slice(3);
+
+  let port = parseInt(process.env.WSH_PORT || '', 10) || 7681;
+  const portIdx = subArgs.findIndex(a => a === '--port' || a === '-p');
+  if (portIdx !== -1 && subArgs[portIdx + 1]) {
+    port = parseInt(subArgs[portIdx + 1], 10);
+    subArgs.splice(portIdx, 2);
+  }
+
+  const followIdx = subArgs.findIndex(a => a === '--follow' || a === '-f');
+  const follow = followIdx !== -1;
+  if (followIdx !== -1) subArgs.splice(followIdx, 1);
+
+  const target = subArgs.find(a => !a.startsWith('-'));
+  if (!target) { console.error('Usage: wsh logs <session-id | app-name>'); process.exit(1); }
+
+  let basePath = process.env.WSH_BASE_PATH || '/';
+  if (!basePath.startsWith('/')) basePath = '/' + basePath;
+  if (!basePath.endsWith('/')) basePath += '/';
+
+  const aboxUser = process.env.ABOX_USER;
+  const proxySecret = process.env.WSH_PROXY_SECRET;
+  let userHeader = '';
+  if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
+  if (aboxUser) userHeader += ` -H 'X-WSH-User: ${aboxUser}'`;
+
+  // Resolve target: if it matches a session ID, use it; otherwise look up by app name.
+  function resolveSessionId(): string {
+    for (const scheme of ['http', 'https'] as const) {
+      const url = `${scheme}://127.0.0.1:${port}${basePath}api/sessions`;
+      const flags = scheme === 'https' ? '-sSk' : '-sS';
+      try {
+        const body = execSync(`curl ${flags} ${userHeader} '${url}'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+        const data = JSON.parse(body) as { sessions: { id: string; app: string }[] };
+        // Exact session ID match (only if target looks like a 6-char session ID)
+        if (isSessionId(target!)) {
+          const byId = data.sessions.find(s => s.id === target);
+          if (byId) return byId.id;
+        }
+        // App name match (most recently created)
+        const byApp = data.sessions.filter(s => s.app === target);
+        if (byApp.length > 0) return byApp[byApp.length - 1].id;
+        // Partial app name match
+        const byPartial = data.sessions.filter(s => s.app.includes(target!));
+        if (byPartial.length === 1) return byPartial[0].id;
+        if (byPartial.length > 1) {
+          console.error(`Multiple sessions match "${target}": ${byPartial.map(s => `${s.id} (${s.app})`).join(', ')}`);
+          process.exit(1);
+        }
+        console.error(`No session found for "${target}".`);
+        process.exit(1);
+      } catch (err: any) {
+        if (scheme === 'http') continue;
+        if (err.stderr?.includes('onnect') || err.stderr?.includes('refused')) {
+          console.error(`No wsh server running on localhost:${port}`);
+        } else {
+          console.error('Error:', err.stderr?.trim() || err.message);
+        }
+        process.exit(1);
+      }
+    }
+    return ''; // unreachable
+  }
+  const sessionId = resolveSessionId();
+
+  if (!follow) {
+    // One-shot: fetch scrollback via HTTP and print
+    let lastErr: any;
+    for (const scheme of ['http', 'https'] as const) {
+      const url = `${scheme}://127.0.0.1:${port}${basePath}api/sessions/${sessionId}/logs`;
+      const flags = scheme === 'https' ? '-sSk' : '-sS';
+      try {
+        const result = execSync(`curl ${flags} ${userHeader} -w '\\n%{http_code}' '${url}'`, { stdio: ['pipe', 'pipe', 'pipe'] });
+        const raw = result.toString('utf8');
+        // Last line is HTTP status code
+        const lastNl = raw.lastIndexOf('\n');
+        const httpCode = parseInt(raw.slice(lastNl + 1), 10);
+        const body = raw.slice(0, lastNl);
+        if (httpCode === 404) { console.error(`Session "${sessionId}" not found.`); process.exit(1); }
+        if (httpCode >= 400) { console.error(`Error: server returned ${httpCode}`); process.exit(1); }
+        process.stdout.write(body);
+        process.exit(0);
+      } catch (err: any) {
+        lastErr = err;
+        if (scheme === 'http') continue;
+      }
+    }
+    if (lastErr?.stderr?.toString().includes('onnect') || lastErr?.stderr?.toString().includes('refused')) {
+      console.error(`No wsh server running on localhost:${port}`);
+    } else {
+      console.error('Error:', lastErr?.stderr?.toString().trim() || lastErr?.message);
+    }
+    process.exit(1);
+  } else {
+    // Follow mode: connect via WebSocket, print scrollback then stream live output
+    function tryConnect(scheme: 'ws' | 'wss'): void {
+      const wsUrl = `${scheme}://127.0.0.1:${port}${basePath}terminal?session=${sessionId}&yield=1&reconnect=1`;
+      const headers: Record<string, string> = {};
+      if (proxySecret) headers['X-WSH-Proxy-Secret'] = proxySecret;
+      if (aboxUser) headers['X-WSH-User'] = aboxUser;
+      let opened = false;
+      let abandoned = false;
+      const ws = new WebSocket(wsUrl, { headers, rejectUnauthorized: false });
+      ws.on('open', () => { opened = true; });
+      ws.on('message', (data: Buffer, isBinary: boolean) => {
+        if (isBinary) process.stdout.write(data);
+      });
+      ws.on('close', (code: number) => {
+        if (abandoned) return;
+        if (code === 4003) { console.error(`Session "${sessionId}" not found.`); process.exit(1); }
+        if (!opened) { console.error(`No wsh server running on localhost:${port}`); process.exit(1); }
+        process.exit(0);
+      });
+      ws.on('error', () => {
+        if (!opened && scheme === 'ws') { abandoned = true; ws.terminate(); tryConnect('wss'); return; }
+        if (!opened) { console.error(`No wsh server running on localhost:${port}`); process.exit(1); }
+        process.exit(1);
+      });
+      process.on('SIGINT', () => { ws.close(); process.exit(0); });
+      process.on('SIGTERM', () => { ws.close(); process.exit(0); });
+    }
+    tryConnect('ws');
+    (globalThis as any).__wshFollowMode = true;
+  }
 } else if (process.argv[2] === 'ls' || process.argv[2] === 'kill') {
   const subcommand = process.argv[2];
   if (wantsHelp) {
@@ -475,6 +632,9 @@ python3:
   process.exit(0);
 }
 
+// `wsh logs -f` keeps the process alive via WebSocket — skip server startup.
+if ((globalThis as any).__wshFollowMode) { /* event loop stays alive */ } else {
+
 const MAX_SCROLLBACK     = 5 * 1024 * 1024; // 5 MB
 const MAX_SCROLLBACK_WEB = 512 * 1024;      // 512 KB (web app logs)
 const SESSION_TTL     = 10 * 60 * 1000;     // 10 minutes
@@ -495,6 +655,7 @@ interface Session {
   pinned: boolean;
   title: string;
   app: string;
+  cwd: string;
   createdAt: number;
   lastInput: number;
   lastOutput: number;
@@ -605,6 +766,7 @@ function baseSession(appKey: string, appConfig: AppConfig): Session {
     pinned: false,
     title: appConfig.title ?? path.basename(appConfig.command),
     app: appKey,
+    cwd: resolveCwd(appConfig),
     createdAt: now,
     lastInput: now,
     lastOutput: now,
@@ -617,6 +779,13 @@ function expandHome(p: string): string {
   if (p === '~') return os.homedir();
   if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
   return p;
+}
+
+/** Prepend ~/.local/bin to PATH so user-installed tools are available in spawned apps. */
+function appPath(): string {
+  const localBin = path.join(os.homedir(), '.local', 'bin');
+  const current = process.env.PATH || '';
+  return current.includes(localBin) ? current : `${localBin}:${current}`;
 }
 
 function resolveCwd(appConfig: AppConfig): string {
@@ -647,13 +816,14 @@ function buildPtyCommand(appConfig: AppConfig): string {
 /** Spawn a PTY and wire it into an existing session. */
 function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: number, rows: number): void {
   const wrapped = buildPtyCommand(appConfig);
-  const ptyProcess = pty.spawn(userShell, ['-c', wrapped], {
+  const ptyProcess = pty.spawn('/bin/sh', ['-c', wrapped], {
     name: 'xterm-256color',
     cols,
     rows,
     cwd: resolveCwd(appConfig),
     env: {
       ...process.env,
+      PATH: appPath(),
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       WSH_RPC_PORT: String(PORT),
@@ -756,14 +926,15 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
 
   const env = {
     ...process.env,
+    PATH: appPath(),
     ...(appConfig.env ?? {}),
     WSH_PORT: String(port),
     WSH_SESSION: id,
-    WSH_BASE_URL: BASE + '_p/' + id + '/',
+    WSH_BASE_URL: BASE + '_a/' + appKey + '/',
   };
 
   const child = spawn(appConfig.command, appConfig.args ?? [], {
-    shell: process.env.SHELL || '/bin/bash',
+    shell: '/bin/sh',
     detached: true,
     env: env as Record<string, string>,
     cwd: resolveCwd(appConfig),
@@ -779,7 +950,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   const resolvedCmd = cmdLine
     .replace(/\$WSH_PORT\b/g, String(port))
     .replace(/\$WSH_SESSION\b/g, id)
-    .replace(/\$WSH_BASE_URL\b/g, BASE + '_p/' + id + '/');
+    .replace(/\$WSH_BASE_URL\b/g, BASE + '_a/' + appKey + '/');
   const cwd = resolveCwd(appConfig);
   const banner = `\x1b[90m$ cd ${cwd} && ${resolvedCmd}\x1b[0m\r\n`;
   const bannerBuf = Buffer.from(banner);
@@ -813,7 +984,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
 
   // Poll for readiness in the background — don't block session creation.
   // The client shows its own loading spinner until the iframe loads.
-  const healthBase = session.stripPrefix ? '' : BASE + '_p/' + id;
+  const healthBase = session.stripPrefix ? '' : BASE + '_a/' + appKey;
   const healthPath = healthBase + (appConfig.healthCheck || '/');
   const startupTimeoutMs = appConfig.startupTimeout ? parseTimeout(appConfig.startupTimeout) : 30000;
   const effectiveStartupTimeout = (!isNaN(startupTimeoutMs) && startupTimeoutMs > 0) ? startupTimeoutMs : 30000;
@@ -908,6 +1079,7 @@ if (values.help) {
   console.log('');
   console.log('Commands:');
   console.log('  ls                 List active sessions');
+  console.log('  logs <session-id>  Print session scrollback (stdout/stderr)');
   console.log('  kill <session-id>  Close a session');
   console.log('  new [app-key]      Create a new session (default: bash)');
   console.log('  apps               List available apps');
@@ -986,7 +1158,6 @@ interface AppConfig {
   startupTimeout?: string;
 }
 
-const userShell = process.env.SHELL || '/bin/bash';
 const DEFAULT_APPS: Record<string, AppConfig> = {
   bash: {
     command: '/bin/bash',
@@ -1067,6 +1238,14 @@ function loadApps(): Record<string, AppConfig> {
     }
   }
   return apps;
+}
+
+/** Find an existing web session for a given app key (singleton semantics). */
+function findWebSession(appKey: string): { id: string; session: Session } | null {
+  for (const [id, s] of sessions) {
+    if (s.app === appKey && s.appType === 'web') return { id, session: s };
+  }
+  return null;
 }
 
 // --- Network helpers ---
@@ -1332,8 +1511,16 @@ router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
     process: s.pty?.process ?? null,
     port: s.port ?? null,
     ready: s.ready ?? null,
+    cwd: s.cwd ?? null,
   }));
   res.json({ sessions: list });
+});
+
+router.get('/api/sessions/:id/logs', (req: express.Request, res: express.Response) => {
+  const session = sessions.get(req.params.id);
+  if (!session) { res.status(404).json({ error: 'session not found' }); return; }
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.send(stripEphemeralSequences(session.scrollback));
 });
 
 router.delete('/api/sessions/:id', (req: express.Request, res: express.Response) => {
@@ -1376,8 +1563,13 @@ function proxyHandler(req: express.Request, res: express.Response): void {
   // Track proxy activity for idle detection
   session.lastOutput = Date.now();
   // stripPrefix: send just the relative path (e.g. '/'); otherwise forward the full prefixed path
-  const suffix = req.url.slice(('/_p/' + sessionId).length) || '/';
-  const targetPath = session.stripPrefix ? suffix : BASE + '_p/' + sessionId + suffix;
+  // req.url may start with /_p/<sessionId> or /_a/<appKey> — strip the matching prefix
+  const appKey = req.params.appKey;
+  const prefixToStrip = appKey ? '/_a/' + appKey : '/_p/' + sessionId;
+  const rawSuffix = req.url.slice(prefixToStrip.length);
+  const suffix = rawSuffix || '/';
+  const stableBase = BASE + '_a/' + (session.app || sessionId);
+  const targetPath = session.stripPrefix ? suffix : stableBase + rawSuffix;
 
   const proxyReq = http.request({
     hostname: '127.0.0.1',
@@ -1399,6 +1591,37 @@ function proxyHandler(req: express.Request, res: express.Response): void {
 
 router.all('/_p/:sessionId', proxyHandler as any);
 router.all('/_p/:sessionId/*', proxyHandler as any);
+
+// Stable app-level proxy: /_a/<appKey>/... resolves to the singleton web session.
+// Auto-starts the app if no session is running.
+function appProxyHandler(req: express.Request, res: express.Response): void {
+  const appKey = req.params.appKey;
+  const apps = loadApps();
+  const appConfig = apps[appKey];
+  if (!appConfig || appConfig.type !== 'web') {
+    res.status(404).json({ error: 'web app not found' });
+    return;
+  }
+
+  const existing = findWebSession(appKey);
+  if (existing) {
+    // Reuse proxyHandler by injecting the resolved session ID
+    req.params.sessionId = existing.id;
+    proxyHandler(req, res);
+    return;
+  }
+
+  // Auto-start the app
+  const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
+  spawnWebSession(id, appKey, appConfig).then(() => {
+    req.params.sessionId = id;
+    proxyHandler(req, res);
+  }).catch(() => {
+    res.status(500).json({ error: 'Failed to start app' });
+  });
+}
+router.all('/_a/:appKey', appProxyHandler as any);
+router.all('/_a/:appKey/*', appProxyHandler as any);
 
 router.use(express.json());
 
@@ -1473,6 +1696,8 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   const mode = (req.body?.mode as string) || '';
   const notify = !!req.body?.notify;
   const requestedSession = (req.body?.session as string) || '';
+  const cwdOverride = (req.body?.cwd as string) || '';
+  const envOverride: Record<string, string> = (req.body?.env as Record<string, string>) ?? {};
   const apps = loadApps();
   const appConfig = apps[appKey];
   if (!appConfig) { res.status(400).json({ error: `Unknown app: "${appKey}"` }); return; }
@@ -1487,6 +1712,20 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     };
   }
 
+  // Apply runtime cwd/env overrides
+  if (cwdOverride) effectiveConfig = { ...effectiveConfig, cwd: cwdOverride };
+  if (Object.keys(envOverride).length) effectiveConfig = { ...effectiveConfig, env: { ...(effectiveConfig.env ?? {}), ...envOverride } };
+
+  // Web apps are singletons: return existing session if one is running (unless -s forces a specific ID)
+  if (appConfig.type === 'web' && !requestedSession) {
+    const existing = findWebSession(appKey);
+    if (existing) {
+      const base = networkBase ?? `http://localhost:${PORT}`;
+      res.json({ id: existing.id, url: `${base}${BASE}${appKey}#${existing.id}` });
+      return;
+    }
+  }
+
   // Use requested session ID or generate a random one
   if (requestedSession && sessions.has(requestedSession)) {
     // Kill existing session with same ID so it can be reused
@@ -1499,6 +1738,9 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     }
     if (existing.child) killProcessGroup(existing.child);
     else if (existing.pty) existing.pty.kill('SIGHUP');
+  }
+  if (requestedSession && !isSessionId(requestedSession)) {
+    res.status(400).json({ error: 'Session ID must be exactly 6 lowercase alphanumeric characters' }); return;
   }
   const id = requestedSession || crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
 
@@ -1522,9 +1764,6 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     }
   }
 
-  if (appConfig.type === 'web') {
-    res.cookie(`wsh_last_${appKey}`, id, { path: BASE, maxAge: 365 * 24 * 60 * 60 * 1000 });
-  }
   const base = networkBase ?? `http://localhost:${PORT}`;
   res.json({ id, url: `${base}${BASE}${appKey}#${id}` });
 });
@@ -1532,6 +1771,8 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
 router.get('/:appName', (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const apps = loadApps();
   if (!apps[req.params.appName]) { next(); return; }
+  // Web app singleton redirect is handled client-side via WebSocket { type: 'redirect' } message,
+  // because the server cannot see the hash fragment — a server-side 302 would loop.
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
@@ -1570,18 +1811,31 @@ function sendRoleMessage(ws: WebSocket, sessionId: string, session: Session, rol
   const pinnedOther = role === 'owner'
     ? [...sessions.entries()].filter(([sid, s]) => sid !== sessionId && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
     : undefined;
-  ws.send(JSON.stringify({ type: 'role', role, credential, app: session.app, appType: session.appType, ...(role === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
+  ws.send(JSON.stringify({ type: 'role', role, credential, app: session.app, appType: session.appType, cwd: session.cwd, ...(role === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
 }
 
 function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
 
-  // WebSocket proxy for web apps
+  // WebSocket proxy for web apps — supports both /_p/<sessionId> and /_a/<appKey>
+  let wsSessionId: string | undefined;
+  let wsAppKey: string | undefined;
+  let wsRest: string;
   if (url.pathname.startsWith(BASE + '_p/')) {
-    const rest = url.pathname.slice((BASE + '_p/').length);
-    const slashIdx = rest.indexOf('/');
-    const wsSessionId = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
-    const wsSession = sessions.get(wsSessionId);
+    wsRest = url.pathname.slice((BASE + '_p/').length);
+    const slashIdx = wsRest.indexOf('/');
+    wsSessionId = slashIdx >= 0 ? wsRest.slice(0, slashIdx) : wsRest;
+    wsRest = slashIdx >= 0 ? wsRest.slice(slashIdx) : '';
+  } else if (url.pathname.startsWith(BASE + '_a/')) {
+    wsRest = url.pathname.slice((BASE + '_a/').length);
+    const slashIdx = wsRest.indexOf('/');
+    wsAppKey = slashIdx >= 0 ? wsRest.slice(0, slashIdx) : wsRest;
+    wsRest = slashIdx >= 0 ? wsRest.slice(slashIdx) : '';
+    const found = findWebSession(wsAppKey);
+    if (found) wsSessionId = found.id;
+  }
+  if (wsSessionId || wsAppKey) {
+    const wsSession = wsSessionId ? sessions.get(wsSessionId) : undefined;
     if (!wsSession || wsSession.appType !== 'web' || !wsSession.port) {
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
       socket.destroy();
@@ -1607,8 +1861,9 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
       }
     }
     const target = net.connect(wsSession.port, '127.0.0.1', () => {
-      const wsSuffix = (slashIdx >= 0 ? '/' + rest.slice(slashIdx + 1) : '/') + (url.search || '');
-      const targetPath = wsSession.stripPrefix ? wsSuffix : BASE + '_p/' + wsSessionId + wsSuffix;
+      const wsSuffix = (wsRest || '/') + (url.search || '');
+      const stableBase = BASE + '_a/' + (wsSession.app || wsSessionId);
+      const targetPath = wsSession.stripPrefix ? wsSuffix : stableBase + wsSuffix;
       let upgradeReq = `${req.method} ${targetPath} HTTP/1.1\r\n`;
       for (const [key, val] of Object.entries(req.headers)) {
         if (val) {
@@ -1732,6 +1987,17 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     const requestedApp = url.searchParams.get('app') || 'bash';
     const appKey = apps[requestedApp] ? requestedApp : 'bash';
     const appConfig = apps[appKey];
+
+    // Web apps are singletons: redirect to existing session if one is running
+    if (appConfig.type === 'web') {
+      const existing = findWebSession(appKey);
+      if (existing) {
+        ws.send(JSON.stringify({ type: 'redirect', session: existing.id }));
+        ws.close(4100, 'redirecting to existing session');
+        return;
+      }
+    }
+
     let effectiveConfig = appConfig;
     if (appConfig.skill) {
       const input = url.searchParams.get('input') || '';
@@ -1765,9 +2031,6 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     session.peers.set(ws, credential);
     sendRoleMessage(ws, id, session, credential, credential);
     if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
-    if (session.appType === 'web') {
-      ws.send(JSON.stringify({ type: 'cookie', name: `wsh_last_${appKey}`, value: id }));
-    }
   }
 
   const currentSession = session;
@@ -1956,6 +2219,8 @@ function onServerError(err: NodeJS.ErrnoException): void {
 localServer.on('error', onServerError);
 if (networkServer) networkServer.on('error', onServerError);
 
+console.log('Starting server...');
+
 if (httpsOnly) {
   networkServer!.listen(PORT, '0.0.0.0', onListening);
 } else if (httpOnly) {
@@ -1964,3 +2229,4 @@ if (httpsOnly) {
   localServer.listen(PORT, '127.0.0.1', onListening);
   if (networkServer && networkBind) networkServer.listen(PORT, networkBind, onListening);
 }
+} // end __wshFollowMode guard

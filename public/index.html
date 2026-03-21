@@ -169,7 +169,90 @@
     #pin-btn.pinned { color: #a6e3a1; }
     #pin-btn[hidden] { display: none; }
 
-    #clear-btn, #logs-btn, #debug-btn, #share-btn, #new-session, #pin-btn, #input-toggle {
+    @keyframes agent-breathe {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(137, 180, 250, 0.3); transform: scale(1); }
+      50% { box-shadow: 0 0 6px 2px rgba(137, 180, 250, 0.15); transform: scale(1.05); }
+    }
+    @keyframes agent-wave {
+      0%, 100% { transform: scale(1) rotate(0deg); }
+      15% { transform: scale(1.15) rotate(-8deg); }
+      30% { transform: scale(1.15) rotate(8deg); }
+      45% { transform: scale(1.15) rotate(-5deg); }
+      60% { transform: scale(1.1) rotate(3deg); }
+      75% { transform: scale(1.05) rotate(0deg); }
+    }
+    .agent-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    .agent-wrap[hidden] { display: none; }
+    #debug-btn {
+      background: rgba(137, 180, 250, 0.12);
+      border: 1px solid rgba(137, 180, 250, 0.25);
+      border-radius: 50%;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #89b4fa;
+      cursor: pointer;
+      pointer-events: auto;
+      animation: agent-breathe 3s ease-in-out infinite;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+    #debug-btn:hover {
+      background: rgba(137, 180, 250, 0.22);
+      border-color: rgba(137, 180, 250, 0.45);
+      color: #b4d0fb;
+      animation: agent-wave 0.6s ease-in-out;
+    }
+
+    /* Speech bubble — fixed position, managed by JS */
+    #agent-bubble {
+      position: fixed;
+      background: #313244;
+      border: 1px solid rgba(137, 180, 250, 0.25);
+      border-radius: 10px;
+      padding: 6px 10px;
+      color: #cdd6f4;
+      font-size: 11px;
+      font-weight: 400;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(4px) scale(0.95);
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      z-index: 10000;
+      letter-spacing: 0.01em;
+      line-height: 1.3;
+    }
+    #agent-bubble.visible {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+    /* Tail pointing up toward the agent icon */
+    #agent-bubble::before {
+      content: '';
+      position: absolute;
+      top: -5px;
+      right: 12px;
+      width: 8px;
+      height: 8px;
+      background: #313244;
+      border-left: 1px solid rgba(137, 180, 250, 0.25);
+      border-top: 1px solid rgba(137, 180, 250, 0.25);
+      transform: rotate(45deg);
+    }
+    @keyframes bubble-typing {
+      0% { content: '.'; }
+      33% { content: '..'; }
+      66% { content: '...'; }
+    }
+
+    #clear-btn, #logs-btn, #share-btn, #new-session, #pin-btn, #input-toggle {
       background: none;
       border: none;
       padding: 0;
@@ -815,6 +898,14 @@
         <div id="title-group">
           <div id="conn-status" title="Connecting…"></div>
           <span id="window-title">bash</span>
+          <span class="agent-wrap" hidden>
+            <button id="debug-btn" title="Debug App">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="8" r="4"/>
+                <path d="M6 21v-2a6 6 0 0 1 12 0v2"/>
+              </svg>
+            </button>
+          </span>
         </div>
         <div id="actions">
           <span id="role-badge" hidden></span>
@@ -831,16 +922,6 @@
               <line x1="2" y1="6" x2="10" y2="6"/>
               <line x1="2" y1="9" x2="12" y2="9"/>
               <line x1="2" y1="12" x2="8" y2="12"/>
-            </svg>
-          </button>
-          <button id="debug-btn" title="Debug App" hidden>
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="3" y1="11" x2="10" y2="4"/>
-              <path d="M10 4l1.5-2.5L13 3l-2.5 1.5z" fill="currentColor" stroke="none"/>
-              <line x1="5" y1="2" x2="5" y2="4"/>
-              <line x1="4" y1="3" x2="6" y2="3"/>
-              <line x1="2" y1="6" x2="2" y2="8"/>
-              <line x1="1" y1="7" x2="3" y2="7"/>
             </svg>
           </button>
           <button id="share-btn" title="Share Session">
@@ -980,6 +1061,23 @@
     <div id="share-error" hidden></div>
   </div>
 
+  <div id="agent-bubble">Need help? Click me!</div>
+  <script>
+    (function() {
+      var btn = document.getElementById('debug-btn');
+      var bubble = document.getElementById('agent-bubble');
+      if (!btn || !bubble) return;
+      btn.addEventListener('mouseenter', function() {
+        var r = btn.getBoundingClientRect();
+        bubble.style.top = (r.bottom + 8) + 'px';
+        bubble.style.right = (window.innerWidth - r.right - 8) + 'px';
+        bubble.classList.add('visible');
+      });
+      btn.addEventListener('mouseleave', function() {
+        bubble.classList.remove('visible');
+      });
+    })();
+  </script>
   <script>
     window.onerror = function(msg, src, line, col, err) {
       document.body.style.overflow = 'auto';
