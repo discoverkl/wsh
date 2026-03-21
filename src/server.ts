@@ -230,6 +230,7 @@ python3:
   const systemDir = '/etc/wsh';
   const userDir = path.join(os.homedir(), '.wsh');
   const configs: any[] = [];
+  const cliWarnings: string[] = [];
   function loadAndMerge(dir: string) {
     let parsed: any = null;
     try { parsed = YAML.parse(fs.readFileSync(path.join(dir, 'apps.yaml'), 'utf8')); } catch {
@@ -239,6 +240,7 @@ python3:
       configs.push(parsed);
       for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
         if (key.startsWith('_')) continue;
+        if (key === 'skill') { cliWarnings.push(`"${key}" is a reserved name and cannot be used as an app name`); continue; }
         if (value && typeof value === 'object' && (typeof (value as any).command === 'string' || typeof (value as any).skill === 'string'))
           apps[key] = apps[key] ? { ...apps[key], ...value as any } : value as any;
       }
@@ -294,12 +296,16 @@ python3:
   for (const row of rows) {
     console.log(cols.map(c => row[c.field].padEnd(c.w)).join('  '));
   }
+  if (cliWarnings.length) {
+    console.log('');
+    for (const w of cliWarnings) console.log(`Warning: ${w}`);
+  }
   console.log(`\nSystem config: ${path.join(systemDir, 'apps.yaml')}`);
   console.log(`User config:   ${appsPath}`);
   console.log('Run "wsh apps init" to create a starter user config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
-  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [--cwd <dir>] [--env KEY=VALUE] [app-key] [input...]', [
+  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [--cwd <dir>] [--env KEY=VALUE] [--skill <name>] [app-key] [input...]', [
     '', 'Create a new session and print its URL.',
     '', 'Options:',
     '  -p, --port <port>       Server port (default: $WSH_PORT or 7681)',
@@ -307,6 +313,7 @@ python3:
     '  --notify                Show a toast on the catalog page when the app is ready',
     '  --cwd <dir>             Override working directory for the session',
     '  --env KEY=VALUE         Set environment variable (repeatable)',
+    '  --skill <name>          Run a skill instead of an app',
   ]);
   const subArgs = process.argv.slice(3);
 
@@ -341,12 +348,19 @@ python3:
     subArgs.splice(envIdx, 2);
   }
 
+  let skillFlag = '';
+  const skillIdx = subArgs.findIndex(a => a === '--skill');
+  if (skillIdx !== -1 && subArgs[skillIdx + 1]) {
+    skillFlag = subArgs[skillIdx + 1];
+    subArgs.splice(skillIdx, 2);
+  }
+
   const notifyIdx = subArgs.indexOf('--notify');
   const notify = notifyIdx !== -1;
   if (notifyIdx !== -1) subArgs.splice(notifyIdx, 1);
   const positionalArgs = subArgs.filter(a => !a.startsWith('-'));
-  const appKey = positionalArgs[0] || 'bash';
-  const input = positionalArgs.slice(1).join(' ');
+  const appKey = positionalArgs[0] || (skillFlag ? '' : 'bash');
+  const input = skillFlag ? positionalArgs.join(' ') : positionalArgs.slice(1).join(' ');
   let basePath = process.env.WSH_BASE_PATH || '/';
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
   if (!basePath.endsWith('/')) basePath += '/';
@@ -355,7 +369,7 @@ python3:
   let userHeader = '';
   if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
   if (aboxUser) userHeader += ` -H 'X-WSH-User: ${aboxUser}'`;
-  const payload: Record<string, unknown> = { app: appKey };
+  const payload: Record<string, unknown> = skillFlag ? { skill: skillFlag } : { app: appKey };
   if (input) payload.input = input;
   if (sessionId) payload.session = sessionId;
   if (notify) payload.notify = true;
@@ -1181,9 +1195,13 @@ function normalizeAppEntry(value: unknown): AppConfig | null {
   return null;
 }
 
-function mergeApps(apps: Record<string, AppConfig>, parsed: Record<string, unknown>): void {
+function mergeApps(apps: Record<string, AppConfig>, parsed: Record<string, unknown>, warnings?: string[]): void {
   for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
     if (key.startsWith('_') || !value || typeof value !== 'object') continue;
+    if (RESERVED_PATHS.has(key)) {
+      warnings?.push(`"${key}" is a reserved name and cannot be used as an app name — this entry was ignored`);
+      continue;
+    }
     if (apps[key]) {
       // Field-level merge into existing app (enables partial overrides like hidden: true)
       apps[key] = { ...apps[key], ...(value as Partial<AppConfig>) };
@@ -1194,6 +1212,9 @@ function mergeApps(apps: Record<string, AppConfig>, parsed: Record<string, unkno
     }
   }
 }
+
+/** Reserved URL paths that cannot be used as app names. */
+const RESERVED_PATHS = new Set(['skill']);
 
 const SKILL_DEFAULTS: Partial<AppConfig> = {
   command: 'claude "/$SKILL $INPUT"',
@@ -1221,13 +1242,13 @@ function extractSkillDefaults(...configs: (Record<string, unknown> | null)[]): P
   return defaults;
 }
 
-function loadApps(): Record<string, AppConfig> {
+function loadApps(warnings?: string[]): Record<string, AppConfig> {
   const apps = { ...DEFAULT_APPS };
   const system = loadConfigFile(SYSTEM_CONFIG_DIR);
   const user = loadConfigFile(path.join(os.homedir(), '.wsh'));
   // Merge app entries (keys starting with _ are reserved and skipped)
-  if (system && typeof system === 'object') mergeApps(apps, system);
-  if (user && typeof user === 'object') mergeApps(apps, user);
+  if (system && typeof system === 'object') mergeApps(apps, system, warnings);
+  if (user && typeof user === 'object') mergeApps(apps, user, warnings);
   // Apply _skills defaults to skill apps
   const skillDefaults = extractSkillDefaults(system, user);
   for (const app of Object.values(apps)) {
@@ -1238,6 +1259,28 @@ function loadApps(): Record<string, AppConfig> {
     }
   }
   return apps;
+}
+
+/** Build an AppConfig for running a skill by name. Uses _skills defaults from apps.yaml. */
+function buildSkillConfig(skillName: string, input: string, mode: string, cwd?: string, envOverride?: Record<string, string>): AppConfig {
+  const system = loadConfigFile(SYSTEM_CONFIG_DIR);
+  const user = loadConfigFile(path.join(os.homedir(), '.wsh'));
+  const defaults = extractSkillDefaults(system, user);
+  const useInline = mode === 'inline' && defaults.inlineCommand;
+  const config: AppConfig = {
+    command: useInline ? defaults.inlineCommand! : (defaults.command || SKILL_DEFAULTS.command!),
+    skill: skillName,
+    ...(defaults.cwd ? { cwd: defaults.cwd } : {}),
+    env: {
+      ...(defaults.env ?? {}),
+      SKILL: skillName,
+      INPUT: input,
+      ...(mode ? { WSH_MODE: mode } : {}),
+      ...(envOverride ?? {}),
+    },
+  };
+  if (cwd) config.cwd = cwd;
+  return config;
 }
 
 /** Find an existing web session for a given app key (singleton semantics). */
@@ -1437,7 +1480,8 @@ router.get('/api/share', (req: express.Request, res: express.Response) => {
 });
 
 router.get('/api/apps', (_req: express.Request, res: express.Response) => {
-  const apps = loadApps();
+  const warnings: string[] = [];
+  const apps = loadApps(warnings);
   const list = Object.entries(apps)
     .map(([key, app]) => ({
       key,
@@ -1451,7 +1495,7 @@ router.get('/api/apps', (_req: express.Request, res: express.Response) => {
       hidden: app.hidden ? true : undefined,
       _raw: app,
     }));
-  res.json({ apps: list });
+  res.json({ apps: list, ...(warnings.length ? { warnings } : {}) });
 });
 
 router.post('/api/apps/:key/unhide', (req: express.Request, res: express.Response) => {
@@ -1691,39 +1735,52 @@ router.post('/api/rpc', (req: express.Request, res: express.Response) => {
 
 router.post('/api/sessions', async (req: express.Request, res: express.Response) => {
   console.log(`[api] POST /api/sessions body=${JSON.stringify(req.body)}`);
-  const appKey = (req.body?.app as string) || 'bash';
+  const skillName = (req.body?.skill as string) || '';
+  const appKey = (req.body?.app as string) || (skillName ? '' : 'bash');
   const input = (req.body?.input as string) || '';
   const mode = (req.body?.mode as string) || '';
   const notify = !!req.body?.notify;
   const requestedSession = (req.body?.session as string) || '';
   const cwdOverride = (req.body?.cwd as string) || '';
   const envOverride: Record<string, string> = (req.body?.env as Record<string, string>) ?? {};
-  const apps = loadApps();
-  const appConfig = apps[appKey];
-  if (!appConfig) { res.status(400).json({ error: `Unknown app: "${appKey}"` }); return; }
 
-  let effectiveConfig = appConfig;
-  if (appConfig.skill) {
-    const useInline = mode === 'inline' && appConfig.inlineCommand;
-    effectiveConfig = {
-      ...appConfig,
-      ...(useInline ? { command: appConfig.inlineCommand! } : {}),
-      env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input, ...(mode ? { WSH_MODE: mode } : {}) },
-    };
-  }
+  let effectiveConfig: AppConfig;
+  let sessionLabel: string;  // used for the URL and session metadata
 
-  // Apply runtime cwd/env overrides
-  if (cwdOverride) effectiveConfig = { ...effectiveConfig, cwd: cwdOverride };
-  if (Object.keys(envOverride).length) effectiveConfig = { ...effectiveConfig, env: { ...(effectiveConfig.env ?? {}), ...envOverride } };
+  if (skillName) {
+    // --- Skill path: build config from _skills defaults, agent tool resolves the skill ---
+    effectiveConfig = buildSkillConfig(skillName, input, mode, cwdOverride || undefined, Object.keys(envOverride).length ? envOverride : undefined);
+    sessionLabel = 'skill';
+  } else {
+    // --- App path: lookup from apps.yaml ---
+    const apps = loadApps();
+    const appConfig = apps[appKey];
+    if (!appConfig) { res.status(400).json({ error: `Unknown app: "${appKey}"` }); return; }
 
-  // Web apps are singletons: return existing session if one is running (unless -s forces a specific ID)
-  if (appConfig.type === 'web' && !requestedSession) {
-    const existing = findWebSession(appKey);
-    if (existing) {
-      const base = networkBase ?? `http://localhost:${PORT}`;
-      res.json({ id: existing.id, url: `${base}${BASE}${appKey}#${existing.id}` });
-      return;
+    effectiveConfig = appConfig;
+    if (appConfig.skill) {
+      const useInline = mode === 'inline' && appConfig.inlineCommand;
+      effectiveConfig = {
+        ...appConfig,
+        ...(useInline ? { command: appConfig.inlineCommand! } : {}),
+        env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input, ...(mode ? { WSH_MODE: mode } : {}) },
+      };
     }
+
+    // Apply runtime cwd/env overrides
+    if (cwdOverride) effectiveConfig = { ...effectiveConfig, cwd: cwdOverride };
+    if (Object.keys(envOverride).length) effectiveConfig = { ...effectiveConfig, env: { ...(effectiveConfig.env ?? {}), ...envOverride } };
+
+    // Web apps are singletons: return existing session if one is running (unless -s forces a specific ID)
+    if (appConfig.type === 'web' && !requestedSession) {
+      const existing = findWebSession(appKey);
+      if (existing) {
+        const base = networkBase ?? `http://localhost:${PORT}`;
+        res.json({ id: existing.id, url: `${base}${BASE}${appKey}#${existing.id}` });
+        return;
+      }
+    }
+    sessionLabel = appKey;
   }
 
   // Use requested session ID or generate a random one
@@ -1746,18 +1803,20 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
 
   if (effectiveConfig.type === 'web') {
     try {
-      await spawnWebSession(id, appKey, effectiveConfig, { notify });
+      await spawnWebSession(id, sessionLabel, effectiveConfig, { notify });
     } catch (err) {
       console.error('Failed to spawn web app:', errorMessage(err));
       res.status(500).json({ error: 'Failed to spawn session' }); return;
     }
-  } else if (mode === 'inline') {
+  } else if (mode === 'inline' && !skillName) {
     // Defer PTY spawn until the first resize message so the PTY starts with
     // the correct terminal dimensions (avoids expensive SIGWINCH re-render).
-    createPendingSession(id, appKey, effectiveConfig);
+    // Skill sessions skip deferral — start immediately so the agent boots
+    // while the new tab is still loading (saves ~200-500ms to first output).
+    createPendingSession(id, sessionLabel, effectiveConfig);
   } else {
     try {
-      spawnSession(id, appKey, effectiveConfig);
+      spawnSession(id, sessionLabel, effectiveConfig);
     } catch (err) {
       console.error('Failed to spawn PTY:', errorMessage(err));
       res.status(500).json({ error: 'Failed to spawn session' }); return;
@@ -1765,12 +1824,13 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   }
 
   const base = networkBase ?? `http://localhost:${PORT}`;
-  res.json({ id, url: `${base}${BASE}${appKey}#${id}` });
+  const urlPath = skillName ? 'skill' : sessionLabel;
+  res.json({ id, url: `${base}${BASE}${urlPath}#${id}` });
 });
 
 router.get('/:appName', (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const apps = loadApps();
-  if (!apps[req.params.appName]) { next(); return; }
+  if (!apps[req.params.appName] && !RESERVED_PATHS.has(req.params.appName)) { next(); return; }
   // Web app singleton redirect is handled client-side via WebSocket { type: 'redirect' } message,
   // because the server cannot see the hash fragment — a server-side 302 would loop.
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
@@ -1983,36 +2043,52 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       ws.close(4003, 'only owners can create sessions');
       return;
     }
+    const wsSkillName = url.searchParams.get('skill') || '';
     const apps = loadApps();
-    const requestedApp = url.searchParams.get('app') || 'bash';
-    const appKey = apps[requestedApp] ? requestedApp : 'bash';
-    const appConfig = apps[appKey];
+    const requestedApp = url.searchParams.get('app') || (wsSkillName ? '' : 'bash');
 
-    // Web apps are singletons: redirect to existing session if one is running
-    if (appConfig.type === 'web') {
-      const existing = findWebSession(appKey);
-      if (existing) {
-        ws.send(JSON.stringify({ type: 'redirect', session: existing.id }));
-        ws.close(4100, 'redirecting to existing session');
-        return;
-      }
-    }
+    let effectiveConfig: AppConfig;
+    let sessionLabel: string;
 
-    let effectiveConfig = appConfig;
-    if (appConfig.skill) {
-      const input = url.searchParams.get('input') || '';
+    if (wsSkillName) {
+      // --- Skill path: build config from _skills defaults ---
+      const wsInput = url.searchParams.get('input') || '';
       const wsMode = url.searchParams.get('mode') || '';
-      const useInline = wsMode === 'inline' && appConfig.inlineCommand;
-      effectiveConfig = {
-        ...appConfig,
-        ...(useInline ? { command: appConfig.inlineCommand! } : {}),
-        env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input, ...(wsMode ? { WSH_MODE: wsMode } : {}) },
-      };
+      effectiveConfig = buildSkillConfig(wsSkillName, wsInput, wsMode);
+      sessionLabel = 'skill';
+    } else {
+      // --- App path ---
+      const appKey = apps[requestedApp] ? requestedApp : 'bash';
+      const appConfig = apps[appKey];
+
+      // Web apps are singletons: redirect to existing session if one is running
+      if (appConfig.type === 'web') {
+        const existing = findWebSession(appKey);
+        if (existing) {
+          ws.send(JSON.stringify({ type: 'redirect', session: existing.id }));
+          ws.close(4100, 'redirecting to existing session');
+          return;
+        }
+      }
+
+      effectiveConfig = appConfig;
+      if (appConfig.skill) {
+        const wsInput = url.searchParams.get('input') || '';
+        const wsMode = url.searchParams.get('mode') || '';
+        const useInline = wsMode === 'inline' && appConfig.inlineCommand;
+        effectiveConfig = {
+          ...appConfig,
+          ...(useInline ? { command: appConfig.inlineCommand! } : {}),
+          env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: wsInput, ...(wsMode ? { WSH_MODE: wsMode } : {}) },
+        };
+      }
+      sessionLabel = appKey;
     }
+
     if (effectiveConfig.type === 'web') {
       try {
         ws.send(JSON.stringify({ type: 'status', status: 'starting' }));
-        session = await spawnWebSession(id, appKey, effectiveConfig);
+        session = await spawnWebSession(id, sessionLabel, effectiveConfig);
       } catch (err) {
         console.error('Failed to spawn web app:', errorMessage(err));
         ws.close(1011, 'Failed to spawn web app');
@@ -2020,7 +2096,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       }
     } else {
       try {
-        session = spawnSession(id, appKey, effectiveConfig);
+        session = spawnSession(id, sessionLabel, effectiveConfig);
       } catch (err) {
         console.error('Failed to spawn PTY:', errorMessage(err));
         ws.close(1011, 'Failed to spawn PTY');

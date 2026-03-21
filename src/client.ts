@@ -3,6 +3,8 @@ import type { FitAddon as FitAddonType } from '@xterm/addon-fit';
 import { bindTouchScroll } from './touch-scroll.js';
 import './api.js';
 import { handleWshRpc, makeResponder } from './wsh-rpc.js';
+import { gatherAppSnapshot, checkAppHealth } from './app-snapshot.js';
+import type { AppHealth } from './app-snapshot.js';
 
 // These globals are injected by the CDN <script> tags in index.html.
 declare const Terminal: typeof TerminalType;
@@ -183,6 +185,29 @@ let appType: 'pty' | 'web' = 'pty';
 let sessionCwd = '';
 let showingLogs = false;
 
+// --- Health check (feeds button color + tooltip context) ---
+let healthTimer: ReturnType<typeof setInterval> | null = null;
+
+function updateHealthUI(): void {
+  let health: AppHealth | null = null;
+  try { health = checkAppHealth(); } catch {}
+  (window as any).__appHealth = health;
+
+  document.querySelectorAll('.app-avatar-btn').forEach(btn => {
+    if (btn.classList.contains('loading') || btn.classList.contains('click-error')) return;
+    btn.classList.remove('health-error', 'health-blank');
+    if (!health) return;
+    if (health.level === 'error') btn.classList.add('health-error');
+    else if (health.level === 'blank') btn.classList.add('health-blank');
+  });
+}
+
+function startHealthCheck(): void {
+  if (healthTimer) return;
+  setTimeout(updateHealthUI, 2000);
+  healthTimer = setInterval(updateHealthUI, 10000);
+}
+
 function connect(): void {
   const wsBase = new URL('./terminal', location.href);
   wsBase.protocol = proto + ':';
@@ -209,12 +234,6 @@ function connect(): void {
       try {
         const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; cwd?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string; session?: string };
         if (msg.type === 'role' && msg.role) {
-          if (msg.app && msg.app !== appName) {
-            appName = msg.app;
-            windowTitle.textContent = appName;
-            document.title = appName;
-            history.replaceState(null, '', `${appName}#${sessionId}`);
-          }
           if (msg.cwd) sessionCwd = msg.cwd;
           applyRole(msg.role, msg.credential);
           const desktop = document.getElementById('desktop')!;
@@ -225,7 +244,7 @@ function connect(): void {
               document.getElementById('web-container')!.removeAttribute('hidden');
               document.getElementById('clear-btn')!.setAttribute('hidden', '');
               document.getElementById('logs-btn')!.removeAttribute('hidden');
-              document.getElementById('debug-btn')!.closest('.agent-wrap')?.removeAttribute('hidden');
+              document.querySelectorAll('.agent-wrap').forEach(el => el.removeAttribute('hidden'));
               document.getElementById('share-btn')!.setAttribute('hidden', '');
               document.getElementById('shortcut-bar')!.classList.add('hidden');
               document.getElementById('input-toggle')!.setAttribute('hidden', '');
@@ -248,6 +267,7 @@ function connect(): void {
             iframe.addEventListener('load', () => {
               document.getElementById('web-loading')!.setAttribute('hidden', '');
               iframe.classList.add('loaded');
+              startHealthCheck();
             });
           }
         }
@@ -319,22 +339,45 @@ document.getElementById('logs-btn')!.addEventListener('click', () => {
   }
 });
 
-document.getElementById('debug-btn')!.addEventListener('click', () => {
-  const base = location.pathname.split('/').slice(0, -1).join('/') || '';
-  const input = `debug web app "${appName}" (session ${sessionId})`;
-  fetch(`${base}/api/sessions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ app: 'box', input, ...(sessionCwd ? { cwd: sessionCwd } : {}) }),
-  })
-    .then(r => r.json())
-    .then(data => {
-      if (data.url) {
-        try { const u = new URL(data.url); window.open(u.pathname + u.hash, '_blank'); }
-        catch { window.open(data.url, '_blank'); }
-      }
-    });
-});
+document.querySelectorAll('.app-avatar-btn').forEach(btn => btn.addEventListener('click', async () => {
+  if (btn.classList.contains('loading')) return;
+  const allBtns = document.querySelectorAll('.app-avatar-btn');
+  allBtns.forEach(b => b.classList.add('loading'));
+
+  try {
+    const base = location.pathname.split('/').slice(0, -1).join('/') || '';
+    let desc = gatherAppSnapshot({ appName, sessionId, sessionCwd, currentRole, appType });
+    const lastTip = (window as any).__lastBubbleTip as string | undefined;
+    const health = (window as any).__appHealth as AppHealth | null;
+    if (lastTip) {
+      const aware = health && health.level !== 'healthy';
+      desc += `\n\nLast tooltip shown to user: "${lastTip}"${aware ? ' (based on detected app state)' : ' (random)'}`;
+    }
+
+    const data = await fetch(`${base}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        skill: 'app',
+        mode: 'inline',
+        input: appName,
+        ...(sessionCwd ? { cwd: sessionCwd } : {}),
+        env: { TARGET_APP: appName, TARGET_SESSION: sessionId, TARGET_DESC: desc },
+      }),
+    }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+
+    if (data.url) {
+      try { const u = new URL(data.url); window.open(u.pathname + u.search + u.hash, '_blank'); }
+      catch { window.open(data.url, '_blank'); }
+    }
+  } catch {
+    allBtns.forEach(b => { b.classList.remove('loading'); b.classList.add('click-error'); });
+    setTimeout(() => allBtns.forEach(b => b.classList.remove('click-error')), 1500);
+    return;
+  }
+
+  allBtns.forEach(b => b.classList.remove('loading'));
+}));
 
 function sendAction(msg: Record<string, unknown>): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
