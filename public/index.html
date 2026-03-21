@@ -169,17 +169,16 @@
     #pin-btn.pinned { color: #a6e3a1; }
     #pin-btn[hidden] { display: none; }
 
-    @keyframes agent-breathe {
-      0%, 100% { box-shadow: 0 0 0 0 rgba(137, 180, 250, 0.3); transform: scale(1); }
-      50% { box-shadow: 0 0 6px 2px rgba(137, 180, 250, 0.15); transform: scale(1.05); }
+    @keyframes agent-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(137, 180, 250, 0.4); }
+      50% { box-shadow: 0 0 0 3px rgba(137, 180, 250, 0); }
     }
-    @keyframes agent-wave {
-      0%, 100% { transform: scale(1) rotate(0deg); }
-      15% { transform: scale(1.15) rotate(-8deg); }
-      30% { transform: scale(1.15) rotate(8deg); }
-      45% { transform: scale(1.15) rotate(-5deg); }
-      60% { transform: scale(1.1) rotate(3deg); }
-      75% { transform: scale(1.05) rotate(0deg); }
+    @keyframes agent-pulse-error {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(243, 139, 168, 0.4); }
+      50% { box-shadow: 0 0 0 3px rgba(243, 139, 168, 0); }
+    }
+    @keyframes agent-spin {
+      to { transform: rotate(360deg); }
     }
     .agent-wrap {
       position: relative;
@@ -187,12 +186,12 @@
       align-items: center;
     }
     .agent-wrap[hidden] { display: none; }
-    #debug-btn {
-      background: rgba(137, 180, 250, 0.12);
-      border: 1px solid rgba(137, 180, 250, 0.25);
+    .app-avatar-btn {
+      background: rgba(137, 180, 250, 0.15);
+      border: 1.5px solid rgba(137, 180, 250, 0.3);
       border-radius: 50%;
-      width: 20px;
-      height: 20px;
+      width: 22px;
+      height: 22px;
       padding: 0;
       display: flex;
       align-items: center;
@@ -200,56 +199,83 @@
       color: #89b4fa;
       cursor: pointer;
       pointer-events: auto;
-      animation: agent-breathe 3s ease-in-out infinite;
-      transition: background 0.15s, border-color 0.15s, color 0.15s;
+      animation: agent-pulse 3s ease-in-out infinite;
+      transition: all 0.2s ease;
     }
-    #debug-btn:hover {
-      background: rgba(137, 180, 250, 0.22);
-      border-color: rgba(137, 180, 250, 0.45);
-      color: #b4d0fb;
-      animation: agent-wave 0.6s ease-in-out;
+    .app-avatar-btn:hover {
+      background: #89b4fa;
+      border-color: #89b4fa;
+      color: #1e1e2e;
+      transform: scale(1.1);
+      box-shadow: 0 0 12px rgba(137, 180, 250, 0.4);
+      animation: none;
+    }
+    /* Health states */
+    .app-avatar-btn.health-error {
+      background: rgba(243, 139, 168, 0.15);
+      border-color: rgba(243, 139, 168, 0.3);
+      color: #f38ba8;
+      animation: agent-pulse-error 1.5s ease-in-out infinite;
+    }
+    .app-avatar-btn.health-error:hover {
+      background: #f38ba8;
+      border-color: #f38ba8;
+      color: #1e1e2e;
+      box-shadow: 0 0 12px rgba(243, 139, 168, 0.4);
+    }
+    .app-avatar-btn.health-blank {
+      opacity: 0.5;
+    }
+    /* Loading / error flash */
+    .app-avatar-btn.loading {
+      animation: agent-spin 0.8s linear infinite;
+      pointer-events: none;
+      opacity: 0.7;
+    }
+    .app-avatar-btn.click-error {
+      background: rgba(243, 139, 168, 0.25);
+      border-color: rgba(243, 139, 168, 0.5);
+      color: #f38ba8;
+      animation: none;
     }
 
-    /* Speech bubble — fixed position, managed by JS */
+    /* Chat bubble */
     #agent-bubble {
       position: fixed;
-      background: #313244;
-      border: 1px solid rgba(137, 180, 250, 0.25);
-      border-radius: 10px;
-      padding: 6px 10px;
+      background: #1e1e2e;
+      border: 1.5px solid rgba(137, 180, 250, 0.3);
+      border-radius: 14px 14px 4px 14px;
+      padding: 9px 16px;
       color: #cdd6f4;
-      font-size: 11px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 12.5px;
       font-weight: 400;
       white-space: nowrap;
       pointer-events: none;
       opacity: 0;
-      transform: translateY(4px) scale(0.95);
-      transition: opacity 0.2s ease, transform 0.2s ease;
+      transform: translateY(6px) scale(0.92);
+      transition: opacity 0.15s ease, transform 0.15s ease;
       z-index: 10000;
-      letter-spacing: 0.01em;
       line-height: 1.3;
+      letter-spacing: 0.01em;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
     }
     #agent-bubble.visible {
       opacity: 1;
       transform: translateY(0) scale(1);
     }
-    /* Tail pointing up toward the agent icon */
+    /* Tail */
     #agent-bubble::before {
       content: '';
       position: absolute;
-      top: -5px;
-      right: 12px;
-      width: 8px;
-      height: 8px;
-      background: #313244;
-      border-left: 1px solid rgba(137, 180, 250, 0.25);
-      border-top: 1px solid rgba(137, 180, 250, 0.25);
+      top: -6px;
+      right: 11px;
+      width: 10px;
+      height: 10px;
+      background: #1e1e2e;
+      border-left: 1.5px solid rgba(137, 180, 250, 0.3);
+      border-top: 1.5px solid rgba(137, 180, 250, 0.3);
       transform: rotate(45deg);
-    }
-    @keyframes bubble-typing {
-      0% { content: '.'; }
-      33% { content: '..'; }
-      66% { content: '...'; }
     }
 
     #clear-btn, #logs-btn, #share-btn, #new-session, #pin-btn, #input-toggle {
@@ -688,6 +714,11 @@
 
     /* Narrow: hide title to avoid overlap with enlarged controls */
     html.narrow #title-group { display: none; }
+    /* On narrow screens, show the agent button in #actions instead */
+    html.narrow .agent-wrap.agent-actions { display: flex !important; }
+    html.narrow .agent-wrap.agent-title { display: none !important; }
+    .agent-wrap.agent-actions { display: none !important; }
+    .agent-wrap.agent-actions[hidden] { display: none !important; }
 
     #conn-banner {
       display: none;
@@ -898,8 +929,8 @@
         <div id="title-group">
           <div id="conn-status" title="Connecting…"></div>
           <span id="window-title">bash</span>
-          <span class="agent-wrap" hidden>
-            <button id="debug-btn" title="Debug App">
+          <span class="agent-wrap agent-title" hidden>
+            <button class="app-avatar-btn">
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="8" r="4"/>
                 <path d="M6 21v-2a6 6 0 0 1 12 0v2"/>
@@ -908,6 +939,14 @@
           </span>
         </div>
         <div id="actions">
+          <span class="agent-wrap agent-actions" hidden>
+            <button class="app-avatar-btn">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="8" r="4"/>
+                <path d="M6 21v-2a6 6 0 0 1 12 0v2"/>
+              </svg>
+            </button>
+          </span>
           <span id="role-badge" hidden></span>
           <button id="clear-btn" title="Clear Scrollback">
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -1061,20 +1100,75 @@
     <div id="share-error" hidden></div>
   </div>
 
-  <div id="agent-bubble">Need help? Click me!</div>
+  <div id="agent-bubble"></div>
   <script>
     (function() {
-      var btn = document.getElementById('debug-btn');
+      var btns = document.querySelectorAll('.app-avatar-btn');
       var bubble = document.getElementById('agent-bubble');
-      if (!btn || !bubble) return;
-      btn.addEventListener('mouseenter', function() {
-        var r = btn.getBoundingClientRect();
+      if (!btns.length || !bubble) return;
+      var pools = {
+        healthy: [
+          "Hey \u2014 it's me, your app. Wanna talk?",
+          "I can feel my own DOM right now.",
+          "I woke up. Someone's looking at me.",
+          "I'm alive in here. Come say hi.",
+          "I just woke up. Got questions?",
+          "I can feel every form, every button, every pixel.",
+          "Tap me. I'll tell you what I see on my page.",
+          "I can explain myself better than any README.",
+          "I know my own source code, just saying.",
+          "I'm not an assistant. I AM this app.",
+        ],
+        error: [
+          "I can see errors in my console. Let's talk.",
+          "Something broke. I know what it is.",
+          "I'm throwing errors and I'm not proud of it.",
+          "My logs are red. Help me out?",
+          "I've been watching my own errors pile up\u2026",
+          "I crashed. I can explain.",
+          "I have opinions about my own error handling.",
+          "If I'm crashing, I'll tell you why. No sugarcoating.",
+        ],
+        blank: [
+          "I seem to be\u2026 empty? That's concerning.",
+          "My body is my UI. And right now it's blank.",
+          "Nothing on screen. Am I supposed to look like this?",
+          "I can't see any content. Is that intentional?",
+          "I feel hollow. No visible text anywhere.",
+        ],
+        generic: [
+          "My body is my UI. Click me and I'll describe it.",
+          "Ask me anything \u2014 I've read my own code.",
+          "I'll show you what's on screen. No secrets.",
+          "I can check my own vitals \u2014 logs, network, console.",
+          "I've been reading my logs. We should chat.",
+        ],
+      };
+      function pickTip() {
+        var h = window.__appHealth;
+        var pool;
+        if (h && h.level === 'error') pool = pools.error;
+        else if (h && h.level === 'blank') pool = pools.blank;
+        else if (h && h.level === 'healthy') pool = pools.healthy;
+        else pool = pools.generic;
+        return pool[Math.floor(Math.random() * pool.length)];
+      }
+      function showBubble(e) {
+        var target = e ? e.currentTarget : btns[0];
+        if (target.classList.contains('loading')) return;
+        var tip = pickTip();
+        bubble.textContent = tip;
+        window.__lastBubbleTip = tip;
+        var r = target.getBoundingClientRect();
         bubble.style.top = (r.bottom + 8) + 'px';
         bubble.style.right = (window.innerWidth - r.right - 8) + 'px';
         bubble.classList.add('visible');
-      });
-      btn.addEventListener('mouseleave', function() {
-        bubble.classList.remove('visible');
+      }
+      function hideBubble() { bubble.classList.remove('visible'); }
+      btns.forEach(function(btn) {
+        btn.addEventListener('mouseenter', showBubble);
+        btn.addEventListener('mouseleave', hideBubble);
+        btn.addEventListener('click', hideBubble);
       });
     })();
   </script>

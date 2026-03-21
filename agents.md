@@ -1,0 +1,1 @@
+- TypeScript project. Edit `src/`, not built files in `public/`.
