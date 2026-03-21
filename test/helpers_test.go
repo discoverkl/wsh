@@ -69,6 +69,7 @@ import (
 type server struct {
 	port int
 	cmd  *exec.Cmd
+	base string // URL base path, e.g. "/leo/"
 }
 
 // startServer launches `node dist/server.js` on a free port, waits for it to
@@ -88,6 +89,11 @@ func startServer(t *testing.T) *server {
 	cmd.Dir = root
 	cmd.Stdout = os.Stderr // forward server logs for debugging
 	cmd.Stderr = os.Stderr
+	// Determine base path from ABOX_USER (server uses /<user>/ as base)
+	base := "/"
+	if u := os.Getenv("ABOX_USER"); u != "" {
+		base = "/" + u + "/"
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
@@ -97,7 +103,7 @@ func startServer(t *testing.T) *server {
 		cmd.Wait()
 	})
 
-	srv := &server{port: port, cmd: cmd}
+	srv := &server{port: port, cmd: cmd, base: base}
 	srv.waitReady(t, 10*time.Second)
 	return srv
 }
@@ -105,7 +111,7 @@ func startServer(t *testing.T) *server {
 func (s *server) waitReady(t *testing.T, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	url := fmt.Sprintf("http://127.0.0.1:%d/api/sessions", s.port)
+	url := fmt.Sprintf("http://127.0.0.1:%d%sapi/sessions", s.port, s.base)
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(url)
 		if err == nil {
@@ -124,7 +130,12 @@ func (s *server) waitReady(t *testing.T, timeout time.Duration) {
 // ---------------------------------------------------------------------------
 
 func (s *server) url(path string) string {
-	return fmt.Sprintf("http://127.0.0.1:%d%s", s.port, path)
+	// path is like "/api/sessions" — prepend base (e.g. "/leo/")
+	// Strip leading slash from path to avoid double slash
+	if len(path) > 0 && path[0] == '/' {
+		path = path[1:]
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d%s%s", s.port, s.base, path)
 }
 
 func (s *server) getJSON(t *testing.T, path string) map[string]any {
@@ -181,9 +192,10 @@ func (s *server) deleteJSONRaw(t *testing.T, path string) (int, map[string]any) 
 // ---------------------------------------------------------------------------
 
 type termConn struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
-	id   string // session ID, resolved after connect
+	conn  *websocket.Conn
+	mu    sync.Mutex
+	id    string // session ID, resolved after connect
+	accum string // accumulated output from readUntilAccum
 }
 
 type roleMessage struct {
@@ -192,6 +204,7 @@ type roleMessage struct {
 	Credential string
 	App        string
 	AppType    string
+	Cwd        string
 }
 
 // connectTerminal creates a session (if sessionID is empty) and connects a
@@ -208,7 +221,7 @@ func (s *server) connectTerminal(t *testing.T, sessionID string) *termConn {
 		sessionID = id
 	}
 
-	url := fmt.Sprintf("ws://127.0.0.1:%d/terminal?session=%s", s.port, sessionID)
+	url := fmt.Sprintf("ws://127.0.0.1:%d%sterminal?session=%s", s.port, s.base, sessionID)
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("ws connect: %v", err)
@@ -239,6 +252,7 @@ func (tc *termConn) readRole(t *testing.T) roleMessage {
 				Credential: str(msg["credential"]),
 				App:        str(msg["app"]),
 				AppType:    str(msg["appType"]),
+				Cwd:        str(msg["cwd"]),
 			}
 		}
 	}
@@ -259,6 +273,25 @@ func (tc *termConn) sendBinary(t *testing.T, data []byte) {
 	defer tc.mu.Unlock()
 	if err := tc.conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		t.Fatalf("ws send binary: %v", err)
+	}
+}
+
+// readUntilAccum reads messages, accumulating all data into tc.accum,
+// until the given substring appears in the accumulated buffer.
+func (tc *termConn) readUntilAccum(t *testing.T, substr string, timeout time.Duration) bool {
+	t.Helper()
+	tc.accum = ""
+	tc.conn.SetReadDeadline(time.Now().Add(timeout))
+	defer tc.conn.SetReadDeadline(time.Time{})
+	for {
+		_, data, err := tc.conn.ReadMessage()
+		if err != nil {
+			return false
+		}
+		tc.accum += string(data)
+		if strings.Contains(tc.accum, substr) {
+			return true
+		}
 	}
 }
 
@@ -336,7 +369,7 @@ type rpcResult struct {
 
 func (s *server) connectRPCClient(t *testing.T) *rpcClient {
 	t.Helper()
-	url := fmt.Sprintf("ws://127.0.0.1:%d/terminal?session=_rpc", s.port)
+	url := fmt.Sprintf("ws://127.0.0.1:%d%sterminal?session=_rpc", s.port, s.base)
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("ws connect _rpc: %v", err)

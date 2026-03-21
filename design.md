@@ -10,6 +10,8 @@ Web:  Browser (iframe)     <--HTTP/WS-->  server.ts (reverse proxy)  <--HTTP/WS-
       Browser (xterm.js)   <--WS-->  server.ts  <--log stream-->  child stdout/stderr
 ```
 
+Both PTY and web app processes are spawned via `/bin/sh -c` (not `$SHELL`). The wrapper shell is a trampoline that immediately `exec`s the real command — using `/bin/sh` avoids profile scripts that could override `cwd` or env. The app's own command decides whether to be a login shell (e.g. `bash -l`).
+
 **Shared-session model**: URLs have the form `{BASE}{appName}#{sessionId}`. The app name selects which program to run; the session ID (6-char base-36) identifies the process. Multiple browser tabs can connect to the same session — one active writer, any number of viewers.
 
 ## Message Protocol
