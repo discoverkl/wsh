@@ -1162,7 +1162,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       if (apps.length) parts.push(apps.length + (apps.length === 1 ? ' app' : ' apps'));
       if (skills.length) parts.push(skills.length + (skills.length === 1 ? ' skill' : ' skills'));
       countsEl.innerHTML = parts.join(' \u00b7 ');
-      var hiddenTotal = (hiddenApps || []).length + (hiddenSkills || []).length;
+      var hiddenTotal = (hiddenApps || []).length;
       if (hiddenTotal) {
         countsEl.insertAdjacentHTML('beforeend',
           ' \u00b7 <span class="hidden-toggle" id="hidden-toggle">' + hiddenTotal + ' hidden</span>');
