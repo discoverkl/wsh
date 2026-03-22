@@ -209,6 +209,25 @@ function startHealthCheck(): void {
   healthTimer = setInterval(updateHealthUI, 10000);
 }
 
+let webReconnectDelay = 1000;
+const MAX_WEB_RECONNECT_DELAY = 10000;
+const MAX_WEB_RECONNECT_ATTEMPTS = 10;
+let webReconnectAttempts = 0;
+
+function scheduleWebReconnect(): void {
+  if (webReconnectAttempts >= MAX_WEB_RECONNECT_ATTEMPTS) {
+    sessionDead = true;
+    term.write(`\r\n[Could not reconnect after ${MAX_WEB_RECONNECT_ATTEMPTS} attempts. Refresh to try again.]\r\n`);
+    return;
+  }
+  webReconnectAttempts++;
+  setTimeout(() => {
+    term.write(`\r\n[Reconnecting (${webReconnectAttempts}/${MAX_WEB_RECONNECT_ATTEMPTS})...]\r\n`);
+    connect();
+    webReconnectDelay = Math.min(webReconnectDelay * 2, MAX_WEB_RECONNECT_DELAY);
+  }, webReconnectDelay);
+}
+
 function connect(): void {
   const wsBase = new URL('./terminal', location.href);
   wsBase.protocol = proto + ':';
@@ -218,6 +237,9 @@ function connect(): void {
 
   ws.addEventListener('open', () => {
     setConnStatus('connected');
+    webReconnectDelay = 1000;
+    webReconnectAttempts = 0;
+    sessionDead = false;
     if (!document.getElementById('desktop')!.hasAttribute('hidden') && appType !== 'web') {
       requestAnimationFrame(() => {
         fitAddon.fit();
@@ -265,13 +287,17 @@ function connect(): void {
         }
         if (msg.type === 'ready' && appType === 'web') {
           const iframe = document.getElementById('web-frame') as HTMLIFrameElement;
+          const targetSrc = `./_a/${appName}/`;
           if (!iframe.src || iframe.src === 'about:blank') {
-            iframe.src = `./_p/${sessionId}/`;
+            iframe.src = targetSrc;
             iframe.addEventListener('load', () => {
               document.getElementById('web-loading')!.setAttribute('hidden', '');
               iframe.classList.add('loaded');
               startHealthCheck();
             });
+          } else {
+            // Reconnect after server restart — reload the iframe
+            iframe.contentWindow?.location.reload();
           }
         }
         if (msg.type === 'pin' && typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
@@ -289,6 +315,27 @@ function connect(): void {
     if (intentionalReconnect) { intentionalReconnect = false; return; }
     setConnStatus('disconnected');
     term.options.disableStdin = true;
+
+    // Web apps: auto-reconnect on process exit, session replacement (wsh new -s),
+    // or session not yet available (4003). This lets the browser page survive
+    // server restarts without manual refresh.
+    if (appType === 'web' && !userRequestedClose && !sessionDead) {
+      const isReconnectable = (
+        (event.code === 1000 && (
+          event.reason === 'Process exited' || event.reason === 'PTY process exited' ||
+          event.reason === 'Session replaced'
+        )) ||
+        event.code === 4003  // session not found — may still be starting
+      );
+      if (isReconnectable) {
+        if (webReconnectAttempts === 0) {
+          term.write('\r\n[Server restarting… reconnecting]\r\n');
+        }
+        scheduleWebReconnect();
+        return;
+      }
+    }
+
     sessionDead = true;
     sharePopover.classList.remove('visible');
 
