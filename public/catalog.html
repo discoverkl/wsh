@@ -1268,7 +1268,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
 
   function updateHiddenToggle() {
     var toggle = document.getElementById('hidden-toggle');
-    var remaining = document.querySelectorAll('[data-hidden="1"]').length;
+    var remaining = document.querySelectorAll('.skill-card[data-hidden="1"], .card-swipe-wrap[data-hidden="1"]').length;
     if (toggle) {
       if (remaining) {
         toggle.textContent = remaining + ' hidden' + (showingHidden ? ' \u2715' : '');
@@ -1291,7 +1291,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     var toggle = e.target.closest('#hidden-toggle');
     if (!toggle) return;
     showingHidden = !showingHidden;
-    var hiddenCards = document.querySelectorAll('[data-hidden="1"]');
+    var hiddenCards = document.querySelectorAll('.skill-card[data-hidden="1"], .card-swipe-wrap[data-hidden="1"]');
     for (var i = 0; i < hiddenCards.length; i++) {
       hiddenCards[i].style.display = showingHidden ? '' : 'none';
     }
@@ -1547,6 +1547,15 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
             card.style.borderStyle = 'dashed';
             card.dataset.hidden = '1';
             if (target !== card) target.dataset.hidden = '1';
+            // Inject hidden badge + unhide button if not already present
+            if (!card.querySelector('.hidden-badge')) {
+              var titleEl = card.querySelector('.card-title');
+              if (titleEl) {
+                var onclickAttr = card.tagName === 'A' ? ' onclick="event.preventDefault()"' : '';
+                titleEl.insertAdjacentHTML('afterend',
+                  ' <span class="hidden-badge">Hidden</span> <button class="unhide-btn" data-unhide="' + escapeAttr(diff.key) + '"' + onclickAttr + '>Unhide</button>');
+              }
+            }
             // Fade out then hide
             card.classList.add('removing');
             setTimeout(function() {
