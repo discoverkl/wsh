@@ -1060,7 +1060,6 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     var a = document.createElement('a');
     a.href = './' + app.key;
     a.className = 'card' + (isHidden ? ' hidden-app' : '');
-    if (isHidden) a.style.display = 'none';
     a.target = '_blank';
     a.dataset.app = app.key;
     a.dataset.title = app.title;
@@ -1178,6 +1177,15 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       }
       return visible;
     }
+
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && input.value) {
+        e.preventDefault();
+        e.stopPropagation();
+        input.value = '';
+        input.dispatchEvent(new Event('input'));
+      }
+    });
 
     input.addEventListener('input', function() {
       var skillsVisible = filterCards('#skills-content .skill-card');

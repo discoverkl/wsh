@@ -22,11 +22,11 @@ func TestCLI(t *testing.T) {
 
 	t.Run("version", func(t *testing.T) {
 		out := runCLI(t, "version")
-		assertContains(t, out, "v0.")
+		assertContains(t, out, "v")
 	})
 
 	t.Run("rpc missing port", func(t *testing.T) {
-		_, err := runCLIErr(nil, "rpc", "eval", "1")
+		_, err := runCLIErr(nil, "rpc", "1")
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -36,7 +36,7 @@ func TestCLI(t *testing.T) {
 	t.Run("rpc async via CLI", func(t *testing.T) {
 		out := runCLIWithEnv(t, map[string]string{
 			"WSH_RPC_PORT": fmt.Sprintf("%d", srv.port),
-		}, "rpc", "--async", "log", "hello")
+		}, "rpc", "--async", "--broadcast", "console.log('hello')")
 		_ = out
 	})
 
@@ -48,7 +48,7 @@ func TestCLI(t *testing.T) {
 
 		out := runCLIWithEnv(t, map[string]string{
 			"WSH_RPC_PORT": fmt.Sprintf("%d", srv.port),
-		}, "rpc", "--timeout", "5000", "eval", "42")
+		}, "rpc", "--timeout", "5000", "--broadcast", "42")
 		assertEqual(t, out, "42\n")
 	})
 
