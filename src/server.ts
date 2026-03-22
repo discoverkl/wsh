@@ -1135,7 +1135,7 @@ const SITE_TITLE = values.title!;
 const SITE_TAGLINE = values.tagline!;
 
 const PORT = parseInt(values.port!, 10);
-const CUSTOM_URL = process.env.WSH_URL || null;
+const CUSTOM_URL = process.env.WSH_URL?.replace(/\/+$/, '') || null;
 const BIND_ADDR  = values.bind || null;
 const TRUST_PROXY = values['trust-proxy']!;
 const NO_TLS = values['no-tls']!;
@@ -1425,6 +1425,7 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
 
 const advertiseIP  = (BIND_ADDR && BIND_ADDR !== '0.0.0.0') ? BIND_ADDR : primaryLanIP;
 const networkBase  = CUSTOM_URL ?? (advertiseIP ? `${NO_TLS ? 'http' : 'https'}://${advertiseIP}:${PORT}` : null);
+let clientOrigin: string | null = null;
 
 // --- Express app + server ---
 
@@ -1775,7 +1776,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     if (appConfig.type === 'web' && !requestedSession) {
       const existing = findWebSession(appKey);
       if (existing) {
-        const base = networkBase ?? `http://localhost:${PORT}`;
+        const base = CUSTOM_URL ?? clientOrigin ?? networkBase ?? `http://localhost:${PORT}`;
         res.json({ id: existing.id, url: `${base}${BASE}${appKey}#${existing.id}` });
         return;
       }
@@ -1823,7 +1824,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     }
   }
 
-  const base = networkBase ?? `http://localhost:${PORT}`;
+  const base = CUSTOM_URL ?? clientOrigin ?? networkBase ?? `http://localhost:${PORT}`;
   const urlPath = skillName ? 'skill' : sessionLabel;
   res.json({ id, url: `${base}${BASE}${urlPath}#${id}` });
 });
@@ -1871,7 +1872,7 @@ function sendRoleMessage(ws: WebSocket, sessionId: string, session: Session, rol
   const pinnedOther = role === 'owner'
     ? [...sessions.entries()].filter(([sid, s]) => sid !== sessionId && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
     : undefined;
-  ws.send(JSON.stringify({ type: 'role', role, credential, app: session.app, appType: session.appType, cwd: session.cwd, ...(role === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
+  ws.send(JSON.stringify({ type: 'role', role, credential, app: session.app, appType: session.appType, cwd: session.cwd, base: BASE, ...(role === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
 }
 
 function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -2112,6 +2113,15 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
   const currentSession = session;
 
   ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+    if (!isBinary) {
+      try {
+        const parsed = JSON.parse((data as Buffer).toString());
+        if (parsed.type === 'origin' && typeof parsed.origin === 'string') {
+          if (!clientOrigin) clientOrigin = parsed.origin.replace(/\/+$/, '');
+          return;
+        }
+      } catch {}
+    }
     if (currentSession.writer !== ws) return; // only the active writer may send input
     if (isBinary) {
       if (currentSession.appType === 'web') return; // no PTY input for web apps
@@ -2192,6 +2202,10 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
         scheduleCleanup(id, currentSession);
         console.log(`[session ${id}] writer detached, ${currentSession.pinned ? 'session pinned (no timeout)' : `cleanup in ${SESSION_TTL / 1000}s`}`);
       }
+    } else if (currentSession.peers.size === 0 && currentSession.writer === null) {
+      // Last viewer left and no writer — ensure cleanup is scheduled.
+      scheduleCleanup(id, currentSession);
+      console.log(`[session ${id}] last peer left, ${currentSession.pinned ? 'session pinned (no timeout)' : `cleanup in ${SESSION_TTL / 1000}s`}`);
     }
   });
 
