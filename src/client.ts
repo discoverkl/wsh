@@ -141,6 +141,19 @@ document.querySelector('.dot.close')!.addEventListener('click', () => {
 
 const isTouchDevice = document.documentElement.classList.contains('touch');
 
+/** Focus the web app iframe so keyboard input reaches it immediately. */
+function focusWebFrame(): void {
+  const iframe = document.getElementById('web-frame') as HTMLIFrameElement | null;
+  if (!iframe) return;
+  requestAnimationFrame(() => {
+    iframe.focus();
+    try {
+      const el = iframe.contentDocument?.querySelector('[autofocus]') as HTMLElement | null;
+      if (el) el.focus();
+    } catch (_) { /* cross-origin — ignore */ }
+  });
+}
+
 document.getElementById('clear-btn')!.addEventListener('click', () => {
   if (sessionDead) return;
   term.clear();
@@ -293,11 +306,13 @@ function connect(): void {
             iframe.addEventListener('load', () => {
               document.getElementById('web-loading')!.setAttribute('hidden', '');
               iframe.classList.add('loaded');
+              focusWebFrame();
               startHealthCheck();
             });
           } else {
             // Reconnect after server restart — reload the iframe
             iframe.contentWindow?.location.reload();
+            iframe.addEventListener('load', () => { focusWebFrame(); }, { once: true });
           }
         }
         if (msg.type === 'pin' && typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
@@ -386,6 +401,7 @@ document.getElementById('logs-btn')!.addEventListener('click', () => {
   } else {
     termContainer.setAttribute('hidden', '');
     webContainer.removeAttribute('hidden');
+    focusWebFrame();
   }
 });
 
