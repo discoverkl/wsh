@@ -108,9 +108,9 @@ document.getElementById('titlebar')!.addEventListener('mousedown', e => e.preven
 document.getElementById('new-session')!.addEventListener('click', () => {
   if (appType === 'web') {
     // Web apps: open another tab to the same session
-    window.open(`${appName}#${sessionId}`, '_blank');
+    window.open(`${location.origin}${serverBase}/${appName}#${sessionId}`, '_blank');
   } else {
-    window.open(appName, '_blank');
+    window.open(`${location.origin}${serverBase}/${appName}`, '_blank');
   }
 });
 
@@ -183,6 +183,7 @@ let currentRole = '';
 let sessionDead = false;
 let appType: 'pty' | 'web' = 'pty';
 let sessionCwd = '';
+let serverBase = '';
 let showingLogs = false;
 
 // --- Health check (feeds button color + tooltip context) ---
@@ -232,9 +233,11 @@ function connect(): void {
     } else if (typeof event.data === 'string') {
       if (handleWshRpc(event, document, makeResponder(ws))) return;
       try {
-        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; cwd?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string; session?: string };
+        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; cwd?: string; base?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string; session?: string };
         if (msg.type === 'role' && msg.role) {
           if (msg.cwd) sessionCwd = msg.cwd;
+          if (msg.base) serverBase = msg.base.replace(/\/+$/, '');
+          ws.send(JSON.stringify({ type: 'origin', origin: location.origin }));
           applyRole(msg.role, msg.credential);
           const desktop = document.getElementById('desktop')!;
           if (desktop.hasAttribute('hidden')) {
@@ -345,7 +348,6 @@ document.querySelectorAll('.app-avatar-btn').forEach(btn => btn.addEventListener
   allBtns.forEach(b => b.classList.add('loading'));
 
   try {
-    const base = location.pathname.split('/').slice(0, -1).join('/') || '';
     let desc = gatherAppSnapshot({ appName, sessionId, sessionCwd, currentRole, appType });
     const lastTip = (window as any).__lastBubbleTip as string | undefined;
     const health = (window as any).__appHealth as AppHealth | null;
@@ -354,7 +356,7 @@ document.querySelectorAll('.app-avatar-btn').forEach(btn => btn.addEventListener
       desc += `\n\nLast tooltip shown to user: "${lastTip}"${aware ? ' (based on detected app state)' : ' (random)'}`;
     }
 
-    const data = await fetch(`${base}/api/sessions`, {
+    const data = await fetch(`${serverBase}/api/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -366,9 +368,8 @@ document.querySelectorAll('.app-avatar-btn').forEach(btn => btn.addEventListener
       }),
     }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 
-    if (data.url) {
-      try { const u = new URL(data.url); window.open(u.pathname + u.search + u.hash, '_blank'); }
-      catch { window.open(data.url, '_blank'); }
+    if (data.id) {
+      window.open(`${location.origin}${serverBase}/skill#${data.id}`, '_blank');
     }
   } catch {
     allBtns.forEach(b => { b.classList.remove('loading'); b.classList.add('click-error'); });
@@ -802,7 +803,7 @@ function showPinnedToast(sessions: { id: string; title: string; app?: string }[]
   for (const s of visible) {
     const a = document.createElement('a');
     a.className = 'toast-chip';
-    a.href = `${s.app ?? 'bash'}#${s.id}`;
+    a.href = `${location.origin}${serverBase}/${s.app ?? 'bash'}#${s.id}`;
     a.target = '_blank';
     a.rel = 'noopener';
     if (s.title && s.title !== 'bash') {
