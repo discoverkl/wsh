@@ -205,6 +205,7 @@ type roleMessage struct {
 	App        string
 	AppType    string
 	Cwd        string
+	Base       string
 }
 
 // connectTerminal creates a session (if sessionID is empty) and connects a
@@ -253,6 +254,7 @@ func (tc *termConn) readRole(t *testing.T) roleMessage {
 				App:        str(msg["app"]),
 				AppType:    str(msg["appType"]),
 				Cwd:        str(msg["cwd"]),
+				Base:       str(msg["base"]),
 			}
 		}
 	}
