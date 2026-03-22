@@ -440,7 +440,7 @@ header {
   max-width: 340px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
-.config-popover.open { display: block; }
+.config-popover.open { display: block; cursor: default; user-select: text; }
 .card:has(.config-popover.open) { z-index: 10; }
 .config-row {
   display: flex;
@@ -741,6 +741,7 @@ html.narrow .search-wrapper svg { left: 12px; }
 html.touch .config-gear { opacity: 0.5; width: 44px; height: 44px; top: 6px; right: 6px; }
 html.touch .card:active { transform: scale(0.98); background: var(--bg-card-hover); transition: none; }
 html.touch .skill-card:active { transform: scale(0.99); background: var(--bg-card-hover); transition: none; }
+html.touch .skill-submit { width: 44px; height: 44px; right: 2px; bottom: 2px; }
 
 /* ── Swipe cards base (always present, actions hidden until narrow+touch) ── */
 .card-swipe-wrap {
@@ -815,6 +816,7 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
     <div class="section-label">Apps</div>
     <div id="apps-content" class="grid"></div>
   </div>
+  <div id="search-empty" class="message" hidden>No results</div>
   <div id="loading-content" class="grid">
     <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-line title"></div><div class="skeleton-line desc"></div><div class="skeleton-line desc2"></div></div>
     <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-line title"></div><div class="skeleton-line desc"></div><div class="skeleton-line desc2"></div></div>
@@ -999,7 +1001,9 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     if (defaultDescriptions[app.key]) return defaultDescriptions[app.key];
     var basename = app.command.split('/').pop();
     if (defaultDescriptions[basename]) return defaultDescriptions[basename];
-    return app.command;
+    if (app.skill) return 'Skill';
+    if (app.type === 'web') return 'Web app';
+    return 'Terminal app';
   }
 
   function buildSkillCard(app, isHidden) {
@@ -1134,6 +1138,8 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       var parts = [];
       if (apps.length) parts.push(apps.length + (apps.length === 1 ? ' app' : ' apps'));
       if (skills.length) parts.push(skills.length + (skills.length === 1 ? ' skill' : ' skills'));
+      var hiddenTotal = (hiddenApps || []).length + (hiddenSkills || []).length;
+      if (hiddenTotal) parts.push(hiddenTotal + ' hidden');
       countsEl.textContent = parts.join(' \u00b7 ');
     }
 
@@ -1170,7 +1176,8 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
         var isHidden = target.dataset.hidden === '1';
         var title = (target.getAttribute('data-title') || card.getAttribute('data-title') || '').toLowerCase();
         var desc = (target.getAttribute('data-desc') || card.getAttribute('data-desc') || '').toLowerCase();
-        var matchesQuery = title.indexOf(q) !== -1 || desc.indexOf(q) !== -1;
+        var appKey = (target.getAttribute('data-app') || card.getAttribute('data-app') || '').toLowerCase();
+        var matchesQuery = title.indexOf(q) !== -1 || desc.indexOf(q) !== -1 || appKey.indexOf(q) !== -1;
         var show = isHidden ? (q && matchesQuery) : (!q || matchesQuery);
         target.style.display = show ? '' : 'none';
         if (show) visible++;
@@ -1197,6 +1204,11 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       }
       if (appsSection && !appsSection.hidden) {
         appsSection.style.display = appsVisible ? '' : 'none';
+      }
+      var emptyEl = document.getElementById('search-empty');
+      if (emptyEl) {
+        var q = input.value.trim();
+        emptyEl.hidden = !q || skillsVisible || appsVisible;
       }
     });
 
@@ -1562,6 +1574,11 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       // Close all open popovers
       document.querySelectorAll('.config-popover.open').forEach(function(p) { p.classList.remove('open'); });
       if (!wasOpen) popover.classList.add('open');
+      return;
+    }
+    // Click inside popover — prevent navigating the parent <a>
+    if (e.target.closest('.config-popover')) {
+      e.preventDefault();
       return;
     }
     // Click outside closes all
