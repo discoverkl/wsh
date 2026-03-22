@@ -84,6 +84,17 @@ header {
 .header-counts:empty {
   display: none;
 }
+.hidden-toggle {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--text-tertiary);
+  text-underline-offset: 3px;
+  transition: color 0.2s, text-decoration-color 0.2s;
+}
+.hidden-toggle:hover {
+  color: var(--text-secondary);
+  text-decoration-color: var(--text-secondary);
+}
 
 .header-sessions {
   font-size: 12px;
@@ -460,6 +471,18 @@ header {
   font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
   word-break: break-all;
 }
+
+.config-hide-btn {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 2px 0;
+  transition: color 0.2s;
+}
+.config-hide-btn:hover { color: #f59e0b; }
 
 /* Skeleton loading */
 .skeleton-card {
@@ -1072,7 +1095,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     var r = parseInt(color.slice(1,3), 16), g = parseInt(color.slice(3,5), 16), b = parseInt(color.slice(5,7), 16);
     a.style.setProperty('--card-glow', 'rgba(' + r + ',' + g + ',' + b + ',0.2)');
     var badges = isHidden
-      ? '<span class="hidden-badge">Hidden</span> <button class="unhide-btn" data-unhide="' + escapeAttr(app.key) + '" onclick="event.preventDefault();event.stopPropagation()">Unhide</button>'
+      ? '<span class="hidden-badge">Hidden</span> <button class="unhide-btn" data-unhide="' + escapeAttr(app.key) + '" onclick="event.preventDefault()">Unhide</button>'
       : '';
     a.innerHTML =
       buildConfigPopover(app) +
@@ -1138,9 +1161,12 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       var parts = [];
       if (apps.length) parts.push(apps.length + (apps.length === 1 ? ' app' : ' apps'));
       if (skills.length) parts.push(skills.length + (skills.length === 1 ? ' skill' : ' skills'));
+      countsEl.innerHTML = parts.join(' \u00b7 ');
       var hiddenTotal = (hiddenApps || []).length + (hiddenSkills || []).length;
-      if (hiddenTotal) parts.push(hiddenTotal + ' hidden');
-      countsEl.textContent = parts.join(' \u00b7 ');
+      if (hiddenTotal) {
+        countsEl.insertAdjacentHTML('beforeend',
+          ' \u00b7 <span class="hidden-toggle" id="hidden-toggle">' + hiddenTotal + ' hidden</span>');
+      }
     }
 
     // Hide section labels when only one type exists
@@ -1178,7 +1204,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
         var desc = (target.getAttribute('data-desc') || card.getAttribute('data-desc') || '').toLowerCase();
         var appKey = (target.getAttribute('data-app') || card.getAttribute('data-app') || '').toLowerCase();
         var matchesQuery = title.indexOf(q) !== -1 || desc.indexOf(q) !== -1 || appKey.indexOf(q) !== -1;
-        var show = isHidden ? (q && matchesQuery) : (!q || matchesQuery);
+        var show = isHidden ? ((showingHidden || q) && matchesQuery) : (!q || matchesQuery);
         target.style.display = show ? '' : 'none';
         if (show) visible++;
       }
@@ -1227,15 +1253,58 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
           if (card) {
             card.classList.remove('hidden-app');
             delete card.dataset.hidden;
+            var wrap = card.closest('.card-swipe-wrap');
+            if (wrap) delete wrap.dataset.hidden;
             card.style.borderStyle = '';
             var badge = card.querySelector('.hidden-badge');
             if (badge) badge.remove();
             btn.remove();
+            updateHiddenToggle();
           }
         })
         .catch(function() { btn.textContent = 'Unhide'; });
     });
   }
+
+  function updateHiddenToggle() {
+    var toggle = document.getElementById('hidden-toggle');
+    var remaining = document.querySelectorAll('[data-hidden="1"]').length;
+    if (toggle) {
+      if (remaining) {
+        toggle.textContent = remaining + ' hidden' + (showingHidden ? ' \u2715' : '');
+      } else {
+        toggle.remove();
+        showingHidden = false;
+      }
+    } else if (remaining) {
+      var countsEl = document.getElementById('header-counts');
+      if (countsEl) {
+        countsEl.insertAdjacentHTML('beforeend',
+          ' \u00b7 <span class="hidden-toggle" id="hidden-toggle">' + remaining + ' hidden</span>');
+      }
+    }
+  }
+
+  // Hidden apps toggle
+  var showingHidden = false;
+  document.addEventListener('click', function(e) {
+    var toggle = e.target.closest('#hidden-toggle');
+    if (!toggle) return;
+    showingHidden = !showingHidden;
+    var hiddenCards = document.querySelectorAll('[data-hidden="1"]');
+    for (var i = 0; i < hiddenCards.length; i++) {
+      hiddenCards[i].style.display = showingHidden ? '' : 'none';
+    }
+    var count = hiddenCards.length;
+    toggle.textContent = showingHidden ? count + ' hidden \u2715' : count + ' hidden';
+    // Ensure sections are visible when showing hidden items
+    if (showingHidden) {
+      var ss = document.getElementById('skills-section');
+      var as = document.getElementById('apps-section');
+      if (ss && !ss.hidden) ss.style.display = '';
+      if (as && !as.hidden) as.style.display = '';
+    }
+  });
 
   function fetchSessions() {
     fetch('./api/sessions')
@@ -1297,6 +1366,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       var display = (typeof v === 'object' && v !== null) ? JSON.stringify(v) : String(v);
       html += '<div class="config-row"><span class="config-label">' + escapeHtml(k) + '</span><span class="config-value">' + escapeHtml(display) + '</span></div>';
     });
+    html += '<div class="config-row" style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px"><button class="config-hide-btn" data-hide-app="' + escapeAttr(app.key) + '">Hide</button></div>';
     return '<button class="config-gear" data-config-toggle tabindex="-1">' + gearSvg + '</button>' +
            '<div class="config-popover">' + html + '</div>';
   }
@@ -1475,7 +1545,8 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
             var target = card.closest('.card-swipe-wrap') || card;
             card.classList.add('hidden-app');
             card.style.borderStyle = 'dashed';
-            target.dataset.hidden = '1';
+            card.dataset.hidden = '1';
+            if (target !== card) target.dataset.hidden = '1';
             // Fade out then hide
             card.classList.add('removing');
             setTimeout(function() {
@@ -1483,13 +1554,15 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
               card.classList.remove('removing');
             }, 350);
           }
+          updateHiddenToggle();
 
         } else if (diff.type === 'unhide') {
           if (card) {
             var target = card.closest('.card-swipe-wrap') || card;
             card.classList.remove('hidden-app');
             card.style.borderStyle = '';
-            delete target.dataset.hidden;
+            delete card.dataset.hidden;
+            if (target !== card) delete target.dataset.hidden;
             var badge = card.querySelector('.hidden-badge');
             if (badge) badge.remove();
             var btn = card.querySelector('.unhide-btn');
@@ -1499,6 +1572,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
             target.style.display = '';
             requestAnimationFrame(function() { card.classList.add('visible'); });
           }
+          updateHiddenToggle();
 
         } else if (diff.type === 'updated') {
           if (card && !inlineTerminals[diff.key]) {
@@ -1574,6 +1648,30 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       // Close all open popovers
       document.querySelectorAll('.config-popover.open').forEach(function(p) { p.classList.remove('open'); });
       if (!wasOpen) popover.classList.add('open');
+      return;
+    }
+    // Hide button inside popover
+    var hideBtn = e.target.closest('[data-hide-app]');
+    if (hideBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      var appKey = hideBtn.getAttribute('data-hide-app');
+      hideBtn.textContent = '...';
+      fetch('./api/apps/' + encodeURIComponent(appKey) + '/hide', { method: 'POST' })
+        .then(function(res) { return res.json(); })
+        .then(function() {
+          var card = hideBtn.closest('.card, .skill-card');
+          if (card) {
+            document.querySelectorAll('.config-popover.open').forEach(function(p) { p.classList.remove('open'); });
+            card.classList.add('hidden-app', 'removing');
+            var target = card.closest('.card-swipe-wrap') || card;
+            setTimeout(function() { target.style.display = 'none'; card.classList.remove('removing'); }, 350);
+            card.dataset.hidden = '1';
+            if (target !== card) target.dataset.hidden = '1';
+            updateHiddenToggle();
+          }
+        })
+        .catch(function() { hideBtn.textContent = 'Hide'; });
       return;
     }
     // Click inside popover — prevent navigating the parent <a>
