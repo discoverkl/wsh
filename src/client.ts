@@ -743,8 +743,8 @@ shortcutInput?.addEventListener('input', () => {
   autoResizeInput();
 });
 shortcutInput?.addEventListener('keydown', (e: KeyboardEvent) => {
-  // Desktop: Enter submits, Shift+Enter newline. Touch: Enter is newline (use Send button to submit).
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isTouchDevice) {
+  // Enter submits, Shift+Enter newline.
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     sendShortcutInput();
   }

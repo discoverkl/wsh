@@ -1735,7 +1735,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
 
   document.getElementById('skills-content').addEventListener('keydown', function(e) {
     if (!e.target.classList.contains('skill-input')) return;
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !d.classList.contains('touch')) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       var form = e.target.closest('form');
       if (!form) return;
@@ -1779,8 +1779,9 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     // If there's a live inline session, send input to it instead of creating a new one
     var existing = inlineTerminals[appKey];
     if (existing && existing.isAlive() && !newTabFlag) {
-      var raw = input && (input[0] === '/' || input[0] === '?' || input[0] === '!');
-      existing.send(raw ? input + '\r' : '/' + appKey + (input ? ' ' + input : '') + '\r');
+      if (!input) { existing.send('\r'); ta.value = ''; ta.style.height = 'auto'; saveDraft(appKey, ''); return; }
+      var raw = input[0] === '/' || input[0] === '?' || input[0] === '!';
+      existing.send(raw ? input + '\r' : '/' + appKey + ' ' + input + '\r');
       ta.value = '';
       ta.style.height = 'auto';
       saveDraft(appKey, '');
