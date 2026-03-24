@@ -2,17 +2,20 @@
 
 ## Architecture
 
-wsh has two modes: **TUI apps** (terminal programs) and **web apps** (HTTP servers in iframes).
+wsh has three session types: **TUI apps** (terminal programs), **web apps** (HTTP servers in iframes), and **job sessions** (non-interactive processes that run to completion).
 
 ```
 TUI:  Browser (xterm.js)  <--WS-->  server.ts  <--bytes-->  node-pty (bash/python/etc.)
 Web:  Browser (iframe)     <--HTTP/WS-->  server.ts (reverse proxy)  <--HTTP/WS-->  child process
       Browser (xterm.js)   <--WS-->  server.ts  <--log stream-->  child stdout/stderr
+Job:  (no UI required)     <--WS-->  server.ts  <--stdout/stderr-->  child process (runs to completion)
 ```
 
 Both PTY and web app processes are spawned via `/bin/sh -c` (not `$SHELL`). The wrapper shell is a trampoline that immediately `exec`s the real command — using `/bin/sh` avoids profile scripts that could override `cwd` or env. The app's own command decides whether to be a login shell (e.g. `bash -l`).
 
 **Shared-session model**: URLs have the form `{BASE}{appName}#{sessionId}`. The app name selects which program to run; the session ID (6-char base-36) identifies the process. Multiple browser tabs can connect to the same session — one active writer, any number of viewers.
+
+**Hash passthrough**: The hash supports a compound format `#{sessionId}/{appHash}` — everything after the first `/` is relayed to/from web app iframes (bidirectional sync via direct `location.hash` set for same-origin, `postMessage` with `{ type: 'wsh:hash', hash }` for cross-origin). Existing `#sessionId` URLs (no `/`) are unaffected.
 
 ## Message Protocol
 
@@ -49,12 +52,25 @@ writer disconnects --> same promotion logic as TUI
 child exits      --> all peers closed, session deleted immediately
 ```
 
+### Job Sessions
+
+```
+created via API  --> child process spawned, stdout/stderr captured to scrollback
+                     no port, no health check, no keyboard input
+WS peers connect --> receive scrollback replay + live output (read-only)
+child exits      --> { type: 'job-exit', code, signal } sent to peers
+                     session lingers for JOB_LINGER_TTL (5 min) for log retrieval
+                     then auto-deleted
+```
+
+Jobs are non-interactive background tasks (cron runs, chat agent invocations). They are visible in `wsh ls` with `appType: 'job'` and provide box-level activity tracking for idle detection and graceful upgrades.
+
 The cleanup timer starts from the moment of disconnect, not from last activity.
 
 ### Common Rules
 
 - Only owners can create sessions; non-owners get rejected with WS close code 4003
-- On reconnect, the full scrollback buffer is replayed (up to 5 MB for TUI, 512 KB for web)
+- On reconnect, the full scrollback buffer is replayed (up to 5 MB for TUI, 512 KB for web, 1 MB for job)
 - Only one active writer at a time; a new writer demotes the current one to viewer
 - Only owners can close sessions or toggle pin state; writers can resize and clear
 - Pin state is in-memory only; a server restart resets it (processes die anyway)

@@ -70,21 +70,84 @@ fetch('./').then(r => {
 // Check if a session ID is already in the URL before parsing (used below).
 const hadSession = location.hash.length > 1;
 
-// Writer share links embed the token in the hash: /#id?wt=...
-// Viewer share links are just /#id — the session ID alone is the viewer secret.
+// Compound hash format: #sessionId/app/hash/here?wt=token
+// The first segment (before the first /) is the session ID.
+// Everything after it is the app hash, passed through to web app iframes.
+// Writer share links embed the token as a query param: #id?wt=...
+// Viewer share links are just #id — the session ID alone is the viewer secret.
 function getSessionParams(): { sessionId: string; wtoken: string | null } {
   const hash = location.hash.slice(1);
+  // Split off the wtoken query param (always at the end of the session ID segment).
   const q = hash.indexOf('?');
-  let id = q >= 0 ? hash.slice(0, q) : hash;
+  const beforeQuery = q >= 0 ? hash.slice(0, q) : hash;
   const params = q >= 0 ? new URLSearchParams(hash.slice(q + 1)) : null;
+  // Split session ID from app hash at the first '/'.
+  const slash = beforeQuery.indexOf('/');
+  let id = slash >= 0 ? beforeQuery.slice(0, slash) : beforeQuery;
+  const appHash = slash >= 0 ? beforeQuery.slice(slash + 1) : '';
   if (!id) {
     id = (crypto.getRandomValues(new Uint32Array(1))[0] % 2176782336).toString(36).padStart(6, '0');
-    history.replaceState(null, '', `#${id}`);
   }
+  // Always rewrite the hash to strip ?wt= (if present) so it doesn't leak
+  // into getAppHash() or become visible to embedded web apps.
+  history.replaceState(null, '', `#${id}${appHash ? '/' + appHash : ''}`);
   return { sessionId: id, wtoken: params?.get('wt') ?? null };
 }
 
 const { sessionId, wtoken } = getSessionParams();
+
+// --- Hash passthrough for web apps ---
+// The parent URL hash has the form #sessionId/app/path. The part after the
+// first '/' is the "app hash" which is relayed to/from the web app iframe.
+
+/** Read the current app hash from location.hash (everything after sessionId + first '/'). */
+function getAppHash(): string {
+  const hash = location.hash.slice(1);
+  const slash = hash.indexOf('/');
+  return slash >= 0 ? hash.slice(slash + 1) : '';
+}
+
+/** Update the parent URL hash, preserving the session ID prefix. */
+function setParentHash(appHash: string): void {
+  const newHash = appHash ? `${sessionId}/${appHash}` : sessionId;
+  history.replaceState(null, '', `#${newHash}`);
+}
+
+let hashSyncActive = false;
+
+/** Set up bidirectional hash sync between parent URL and web app iframe. */
+function setupHashSync(iframe: HTMLIFrameElement): void {
+  if (hashSyncActive) return;
+  hashSyncActive = true;
+
+  // Parent → iframe: when the parent hash changes, push the app portion to the iframe.
+  window.addEventListener('hashchange', () => {
+    const appHash = getAppHash();
+    try {
+      // Same-origin: directly set the hash.
+      if (iframe.contentWindow) {
+        const current = iframe.contentWindow.location.hash.slice(1);
+        if (current !== appHash) {
+          iframe.contentWindow.location.hash = appHash ? '#' + appHash : '';
+        }
+      }
+    } catch (_) {
+      // Cross-origin: use postMessage.
+      iframe.contentWindow?.postMessage({ type: 'wsh:hash', hash: appHash }, '*');
+    }
+  });
+
+  // Iframe → parent: listen for postMessage from the app.
+  window.addEventListener('message', (e: MessageEvent) => {
+    if (e.source !== iframe.contentWindow) return;
+    if (e.data?.type === 'wsh:hash' && typeof e.data.hash === 'string') {
+      const appHash = e.data.hash.replace(/^#/, '');
+      if (appHash !== getAppHash()) {
+        setParentHash(appHash);
+      }
+    }
+  });
+}
 
 // Extract app name from pathname (e.g., /python3 → "python3").
 const pathParts = location.pathname.replace(/\/+$/g, '').split('/');
@@ -122,7 +185,7 @@ document.querySelector('.dot.close')!.addEventListener('click', () => {
   }
   const closeEl = document.querySelector('.dot.close') as HTMLElement;
   if (closeEl?.classList.contains('disabled')) {
-    showViewonlyToast(false);
+    if (appType !== 'web') showViewonlyToast(false);
     return;
   }
   userRequestedClose = true;
@@ -272,12 +335,12 @@ function connect(): void {
         if (msg.type === 'role' && msg.role) {
           if (msg.cwd) sessionCwd = msg.cwd;
           if (msg.base) serverBase = msg.base.replace(/\/+$/, '');
+          if (msg.appType === 'web') appType = 'web';
           ws.send(JSON.stringify({ type: 'origin', origin: location.origin }));
           applyRole(msg.role, msg.credential);
           const desktop = document.getElementById('desktop')!;
           if (desktop.hasAttribute('hidden')) {
-            if (msg.appType === 'web') {
-              appType = 'web';
+            if (appType === 'web') {
               document.documentElement.classList.add('web', 'compact');
               document.getElementById('web-container')!.removeAttribute('hidden');
               document.getElementById('clear-btn')!.setAttribute('hidden', '');
@@ -300,7 +363,8 @@ function connect(): void {
         }
         if (msg.type === 'ready' && appType === 'web') {
           const iframe = document.getElementById('web-frame') as HTMLIFrameElement;
-          const targetSrc = `./_a/${appName}/`;
+          const currentAppHash = getAppHash();
+          const targetSrc = `./_a/${appName}/${currentAppHash ? '#' + currentAppHash : ''}`;
           if (!iframe.src || iframe.src === 'about:blank') {
             iframe.src = targetSrc;
             iframe.addEventListener('load', () => {
@@ -308,6 +372,7 @@ function connect(): void {
               iframe.classList.add('loaded');
               focusWebFrame();
               startHealthCheck();
+              setupHashSync(iframe);
             });
           } else {
             // Reconnect after server restart — reload the iframe
@@ -317,8 +382,9 @@ function connect(): void {
         }
         if (msg.type === 'pin' && typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
         if (msg.type === 'redirect' && msg.session) {
-          // Server is redirecting us to an existing singleton web session
-          history.replaceState(null, '', `#${msg.session}`);
+          // Server is redirecting us to an existing singleton web session; preserve app hash.
+          const redirectAppHash = getAppHash();
+          history.replaceState(null, '', `#${msg.session}${redirectAppHash ? '/' + redirectAppHash : ''}`);
           location.reload();
           return;
         }
@@ -362,6 +428,16 @@ function connect(): void {
       shareBtn.setAttribute('hidden', '');
       document.getElementById('clear-btn')!.setAttribute('hidden', '');
       // Keep close button active so user can close the tab
+    }
+
+    // If the desktop/terminal are still hidden (WebSocket closed before the
+    // server sent a role message), make them visible so the user sees the
+    // error message instead of a blank page.
+    const desktop = document.getElementById('desktop')!;
+    if (desktop.hasAttribute('hidden')) {
+      document.getElementById('terminal-container')!.removeAttribute('hidden');
+      desktop.removeAttribute('hidden');
+      requestAnimationFrame(() => fitAddon.fit());
     }
 
     if (event.code === 1000 && (event.reason === 'PTY process exited' || event.reason === 'Process exited')) {
@@ -507,6 +583,21 @@ function applyRole(role: string, credential?: string): void {
   currentRole = role;
   if (credential === 'owner') isOwner = true;
 
+  // Web apps have no reader/writer distinction — the iframe is always interactive.
+  // Only show pin button for owners; hide all role UI.
+  if (appType === 'web') {
+    roleBadge.setAttribute('hidden', '');
+    hideViewonlyToast();
+    if (role === 'owner') {
+      pinBtn.removeAttribute('hidden');
+    } else {
+      pinBtn.setAttribute('hidden', '');
+      const closeBtn = document.querySelector('.dot.close') as HTMLElement;
+      if (closeBtn) closeBtn.classList.toggle('disabled', !isOwner);
+    }
+    return;
+  }
+
   if (role === 'owner') {
     roleBadge.setAttribute('hidden', '');
     term.options.disableStdin = false;
@@ -568,8 +659,8 @@ term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
     if (e.type === 'keydown' && ws.readyState === WebSocket.OPEN) ws.send('\x1b[13;2u');
     return false;
   }
-  // Flash toast when viewer tries to type
-  if (e.type === 'keydown' && currentRole === 'viewer' && !e.metaKey && !e.ctrlKey && e.key.length === 1) {
+  // Flash toast when viewer tries to type (TUI only — web apps have no view-only concept)
+  if (e.type === 'keydown' && currentRole === 'viewer' && appType !== 'web' && !e.metaKey && !e.ctrlKey && e.key.length === 1) {
     viewonlyToast.classList.add('visible', 'flash');
     if (flashTimer !== null) clearTimeout(flashTimer);
     flashTimer = setTimeout(() => {
