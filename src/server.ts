@@ -544,10 +544,11 @@ python3:
     tryConnect('ws');
     (globalThis as any).__wshFollowMode = true;
   }
-} else if (process.argv[2] === 'ls' || process.argv[2] === 'kill') {
+} else if (process.argv[2] === 'ls' || process.argv[2] === 'kill' || process.argv[2] === 'port') {
   const subcommand = process.argv[2];
   if (wantsHelp) {
     if (subcommand === 'ls') subHelp('Usage: wsh ls [-p <port>]', ['', 'List active sessions.', '', 'Options:', '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)']);
+    else if (subcommand === 'port') subHelp('Usage: wsh port [-p <port>] <app>', ['', 'Print the port of a running web app.', '', 'Options:', '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)']);
     else subHelp('Usage: wsh kill [-p <port>] <session-id>', ['', 'Close a session by ID.', '', 'Options:', '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)']);
   }
   const subArgs = process.argv.slice(3);
@@ -634,6 +635,14 @@ python3:
     const widths = headers.map((h, i) => Math.max(h.length, ...rows.map(r => r[i].length)));
     console.log(headers.map((h, i) => padRight(h, widths[i])).join('  '));
     for (const row of rows) console.log(row.map((c, i) => padRight(c, widths[i])).join('  '));
+  } else if (subcommand === 'port') {
+    const appName = subArgs.find(a => !a.startsWith('-'));
+    if (!appName) { console.error('Usage: wsh port <app>'); process.exit(1); }
+    const { body } = curlRequest('GET', basePath + 'api/sessions');
+    const data = JSON.parse(body) as { sessions: any[] };
+    const session = data.sessions.find((s: any) => s.app === appName && s.appType === 'web' && s.port);
+    if (!session) { console.error(`No running web app "${appName}" found.`); process.exit(1); }
+    console.log(session.port);
   } else {
     // kill
     const sessionId = subArgs.find(a => !a.startsWith('-'));
@@ -651,8 +660,10 @@ if ((globalThis as any).__wshFollowMode) { /* event loop stays alive */ } else {
 
 const MAX_SCROLLBACK     = 5 * 1024 * 1024; // 5 MB
 const MAX_SCROLLBACK_WEB = 512 * 1024;      // 512 KB (web app logs)
+const MAX_SCROLLBACK_JOB = 1 * 1024 * 1024; // 1 MB (job output)
 const SESSION_TTL     = 10 * 60 * 1000;     // 10 minutes
 const WEB_SESSION_TTL = 60 * 60 * 1000;     // 1 hour
+const JOB_LINGER_TTL  = 5 * 60 * 1000;      // 5 minutes — keep finished job session for log retrieval
 const PING_INTERVAL = 30_000;           // 30 seconds
 const PONG_TIMEOUT  = 10_000;           // 10 seconds
 const RATE_WINDOW   = 60_000;           // 1 minute
@@ -673,13 +684,14 @@ interface Session {
   createdAt: number;
   lastInput: number;
   lastOutput: number;
-  appType: 'pty' | 'web';
+  appType: 'pty' | 'web' | 'job';
   child: ChildProcess | null;
   port?: number;
   ready?: boolean;
   timeoutMs?: number;
   access?: 'public' | 'private';
   stripPrefix?: boolean;
+  exitCode?: number | null;
   /** When set, PTY spawn is deferred until the first resize message. */
   pendingConfig?: AppConfig;
 }
@@ -760,7 +772,7 @@ function stripEphemeralSequences(buf: Buffer): Buffer {
 }
 
 function appendScrollback(session: Session, data: Buffer): void {
-  const limit = session.appType === 'web' ? MAX_SCROLLBACK_WEB : MAX_SCROLLBACK;
+  const limit = session.appType === 'web' ? MAX_SCROLLBACK_WEB : session.appType === 'job' ? MAX_SCROLLBACK_JOB : MAX_SCROLLBACK;
   session.scrollback = Buffer.concat([session.scrollback, data]);
   if (session.scrollback.length > limit) {
     session.scrollback = session.scrollback.slice(
@@ -1023,6 +1035,81 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   return session;
 }
 
+function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Session {
+  const session: Session = {
+    ...baseSession(appKey, appConfig),
+    appType: 'job',
+  };
+
+  sessions.set(id, session);
+
+  const env = {
+    ...process.env,
+    PATH: appPath(),
+    ...(appConfig.env ?? {}),
+    WSH_SESSION: id,
+    WSH_RPC_PORT: String(PORT),
+    WSH_RPC_BASE: BASE,
+  };
+
+  const child = spawn(appConfig.command, appConfig.args ?? [], {
+    shell: '/bin/sh',
+    detached: true,
+    env: env as Record<string, string>,
+    cwd: resolveCwd(appConfig),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  session.child = child;
+
+  // Banner showing the command being run
+  const cmdLine = appConfig.args?.length
+    ? `${appConfig.command} ${appConfig.args.join(' ')}`
+    : appConfig.command;
+  const cwd = resolveCwd(appConfig);
+  const banner = `\x1b[90m$ cd ${cwd} && ${cmdLine}\x1b[0m\r\n`;
+  const bannerBuf = Buffer.from(banner);
+  appendScrollback(session, bannerBuf);
+  for (const ws of session.peers.keys()) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(bannerBuf, { binary: true });
+  }
+
+  const appendOutput = (data: Buffer) => {
+    session.lastOutput = Date.now();
+    appendScrollback(session, data);
+    for (const ws of session.peers.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: true });
+    }
+  };
+
+  child.stdout!.on('data', appendOutput);
+  child.stderr!.on('data', appendOutput);
+
+  child.on('exit', (code, signal) => {
+    console.log(`[session ${id}] job exited (code ${code}, signal ${signal})`);
+    session.exitCode = code;
+    session.child = null;
+
+    // Notify connected peers that the job finished
+    const exitMsg = JSON.stringify({ type: 'job-exit', code, signal });
+    for (const ws of session.peers.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(exitMsg);
+    }
+
+    // Linger briefly so clients can retrieve scrollback, then auto-delete
+    if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
+    session.cleanupTimer = setTimeout(() => {
+      if (sessions.get(id) === session) {
+        sessions.delete(id);
+        console.log(`[session ${id}] job session cleaned up`);
+      }
+    }, JOB_LINGER_TTL);
+  });
+
+  console.log(`[session ${id}] job spawned: ${cmdLine}`);
+  return session;
+}
+
 function parseTimeout(str: string): number {
   const m = str.match(/^(\d+)\s*(ms|s|m|h|d)$/);
   if (!m) return NaN;
@@ -1043,6 +1130,7 @@ function scheduleCleanup(id: string, session: Session): void {
   }
   session.cleanupTimer = null;
   if (session.pinned) return;
+  if (session.appType === 'job') return; // jobs manage their own cleanup via exit handler
   const ttl = session.timeoutMs ?? (session.appType === 'web' ? WEB_SESSION_TTL : SESSION_TTL);
   session.cleanupTimer = setTimeout(() => {
     console.log(`[session ${id}] TTL expired, killing process`);
@@ -1164,7 +1252,7 @@ interface AppConfig {
   description?: string;
   hidden?: boolean;
   skill?: string;
-  type?: 'pty' | 'web';
+  type?: 'pty' | 'web' | 'job';
   timeout?: string;
   access?: 'public' | 'private';
   stripPrefix?: boolean;
@@ -1556,6 +1644,7 @@ router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
     process: s.pty?.process ?? null,
     port: s.port ?? null,
     ready: s.ready ?? null,
+    exitCode: s.exitCode ?? null,
     cwd: s.cwd ?? null,
   }));
   res.json({ sessions: list });
@@ -1566,6 +1655,66 @@ router.get('/api/sessions/:id/logs', (req: express.Request, res: express.Respons
   if (!session) { res.status(404).json({ error: 'session not found' }); return; }
   res.setHeader('Content-Type', 'application/octet-stream');
   res.send(stripEphemeralSequences(session.scrollback));
+});
+
+router.get('/api/sessions/:id/stream', (req: express.Request, res: express.Response) => {
+  const session = sessions.get(req.params.id);
+  if (!session) { res.status(404).json({ error: 'session not found' }); return; }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  // Send existing scrollback
+  if (session.scrollback.length > 0) {
+    const text = stripEphemeralSequences(session.scrollback).toString('utf8');
+    res.write(`data: ${JSON.stringify({ text })}\n\n`);
+  }
+
+  // If the process already exited, send done and close
+  if (session.appType === 'job' && session.child === null) {
+    res.write(`data: ${JSON.stringify({ exit: session.exitCode ?? null })}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+    return;
+  }
+
+  // Create a fake WebSocket-like peer to receive live output
+  const fakeWs = {
+    readyState: WebSocket.OPEN,
+    send(data: Buffer | string, _opts?: any) {
+      if (res.destroyed) return;
+      const text = Buffer.isBuffer(data) ? data.toString('utf8') : typeof data === 'string' ? data : '';
+      // Skip JSON control messages (role, ready, job-exit, etc.)
+      if (text.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed.type === 'job-exit') {
+            res.write(`data: ${JSON.stringify({ exit: parsed.code ?? null })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+          }
+          // Skip other control messages
+          if (parsed.type) return;
+        } catch {}
+      }
+      if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
+    },
+    close() {
+      if (!res.destroyed) {
+        res.write('data: [DONE]\n\n');
+        res.end();
+      }
+    },
+  } as unknown as WebSocket;
+
+  session.peers.set(fakeWs, 'viewer');
+
+  req.on('close', () => {
+    session.peers.delete(fakeWs);
+  });
 });
 
 router.delete('/api/sessions/:id', (req: express.Request, res: express.Response) => {
@@ -1744,11 +1893,24 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   const requestedSession = (req.body?.session as string) || '';
   const cwdOverride = (req.body?.cwd as string) || '';
   const envOverride: Record<string, string> = (req.body?.env as Record<string, string>) ?? {};
+  const adHocCommand = (req.body?.command as string) || '';
+  const adHocType = (req.body?.type as string) || '';
+  const adHocTitle = (req.body?.title as string) || '';
 
   let effectiveConfig: AppConfig;
   let sessionLabel: string;  // used for the URL and session metadata
 
-  if (skillName) {
+  if (adHocType === 'job' && adHocCommand) {
+    // --- Ad-hoc job: raw command, no app config lookup ---
+    effectiveConfig = {
+      command: adHocCommand,
+      type: 'job',
+      title: adHocTitle || adHocCommand.slice(0, 40),
+      ...(cwdOverride ? { cwd: cwdOverride } : {}),
+      ...(Object.keys(envOverride).length ? { env: envOverride } : {}),
+    };
+    sessionLabel = appKey || 'job';
+  } else if (skillName) {
     // --- Skill path: build config from _skills defaults, agent tool resolves the skill ---
     effectiveConfig = buildSkillConfig(skillName, input, mode, cwdOverride || undefined, Object.keys(envOverride).length ? envOverride : undefined);
     sessionLabel = 'skill';
@@ -1802,7 +1964,14 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   }
   const id = requestedSession || crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
 
-  if (effectiveConfig.type === 'web') {
+  if (effectiveConfig.type === 'job') {
+    try {
+      spawnJobSession(id, sessionLabel, effectiveConfig);
+    } catch (err) {
+      console.error('Failed to spawn job:', errorMessage(err));
+      res.status(500).json({ error: 'Failed to spawn session' }); return;
+    }
+  } else if (effectiveConfig.type === 'web') {
     try {
       await spawnWebSession(id, sessionLabel, effectiveConfig, { notify });
     } catch (err) {
@@ -2020,6 +2189,9 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     if (session.appType === 'web' && session.ready) {
       ws.send(JSON.stringify({ type: 'ready' }));
     }
+    if (session.appType === 'job' && session.child === null && session.exitCode !== undefined) {
+      ws.send(JSON.stringify({ type: 'job-exit', code: session.exitCode }));
+    }
     if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
   } else {
     // reconnect=1 means "only attach to existing session, don't create a new one"
@@ -2047,6 +2219,14 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     const wsSkillName = url.searchParams.get('skill') || '';
     const apps = loadApps();
     const requestedApp = url.searchParams.get('app') || (wsSkillName ? '' : 'bash');
+
+    // Reserved paths (e.g. "skill") are not real apps — if the session is gone,
+    // don't silently fall back to bash.  Close with 4003 so the client shows
+    // "Session not found" instead of spawning an unexpected shell.
+    if (!wsSkillName && RESERVED_PATHS.has(requestedApp) && !apps[requestedApp]) {
+      ws.close(4003, 'session not found');
+      return;
+    }
 
     let effectiveConfig: AppConfig;
     let sessionLabel: string;
@@ -2086,7 +2266,15 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       sessionLabel = appKey;
     }
 
-    if (effectiveConfig.type === 'web') {
+    if (effectiveConfig.type === 'job') {
+      try {
+        session = spawnJobSession(id, sessionLabel, effectiveConfig);
+      } catch (err) {
+        console.error('Failed to spawn job:', errorMessage(err));
+        ws.close(1011, 'Failed to spawn job');
+        return;
+      }
+    } else if (effectiveConfig.type === 'web') {
       try {
         ws.send(JSON.stringify({ type: 'status', status: 'starting' }));
         session = await spawnWebSession(id, sessionLabel, effectiveConfig);
@@ -2124,7 +2312,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     }
     if (currentSession.writer !== ws) return; // only the active writer may send input
     if (isBinary) {
-      if (currentSession.appType === 'web') return; // no PTY input for web apps
+      if (currentSession.appType === 'web' || currentSession.appType === 'job') return; // no PTY input for web/job sessions
       currentSession.lastInput = Date.now();
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
       currentSession.pty!.write(buf.toString('binary'));
