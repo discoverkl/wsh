@@ -39,6 +39,19 @@ process.on('unhandledRejection', (reason) => {
 /** Session IDs are 6 lowercase alphanumeric characters. */
 function isSessionId(s: string): boolean { return /^[a-z0-9]{6}$/.test(s); }
 
+/** Port file path — the server writes its port here on startup; CLI reads it for discovery. */
+const PORT_FILE = path.join(os.homedir(), '.wsh', 'port');
+
+/** Resolve the wsh server port for CLI subcommands. Priority: --port flag > port file > 7681 default. */
+function resolveServerPort(): number {
+  try {
+    const content = fs.readFileSync(PORT_FILE, 'utf8').trim();
+    const p = parseInt(content, 10);
+    if (p > 0) return p;
+  } catch {}
+  return 7681;
+}
+
 // --- Subcommands (handled before server startup) ---
 
 const wantsHelp = process.argv.slice(3).includes('-h') || process.argv.slice(3).includes('--help');
@@ -91,7 +104,7 @@ if (process.argv[2] === 'version') {
     '  --broadcast      Send to all sessions (ignore $WSH_SESSION)',
     '  -                Read argument from stdin',
     '', 'Environment:',
-    '  WSH_RPC_PORT     Port of the wsh server (required)',
+    '  (Server port is auto-discovered from ~/.wsh/port)',
     '  WSH_SESSION      Session ID for the RPC call (overridden by --session)',
     '', 'Examples:',
     '  wsh rpc \'api.toast("hello")\'',
@@ -128,11 +141,7 @@ if (process.argv[2] === 'version') {
   }
   const action = 'eval';
   const args = rpcArgs;
-  const rpcPort = process.env.WSH_RPC_PORT;
-  if (!rpcPort) {
-    console.error('wsh rpc: WSH_RPC_PORT environment variable is required');
-    process.exit(1);
-  }
+  const rpcPort = resolveServerPort();
   // HTTP mode: POST to the wsh server directly (bypasses stdout capture by agent tools)
   const session = rpcBroadcast ? undefined : (rpcSession ?? process.env.WSH_SESSION);
   if (!session && !rpcBroadcast) {
@@ -140,7 +149,7 @@ if (process.argv[2] === 'version') {
     process.exit(1);
   }
   const body = JSON.stringify({ action, args, session, ...(isAsync ? { async: true } : {}), ...(rpcTimeout ? { timeout: rpcTimeout } : {}) });
-  const basePath = process.env.WSH_RPC_BASE || '/';
+  const basePath = process.env.WSH_BASE_PATH || '/';
   try {
     const proxySecret = process.env.WSH_PROXY_SECRET;
     const aboxUser = process.env.ABOX_USER;
@@ -305,19 +314,24 @@ python3:
   console.log('Run "wsh apps init" to create a starter user config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
-  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [--cwd <dir>] [--env KEY=VALUE] [--skill <name>] [app-key] [input...]', [
+  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [--cwd <dir>] [--env KEY=VALUE] [--skill <name>] [--type <type>] [--command <cmd>] [--title <title>] [app-key] [input...]', [
     '', 'Create a new session and print its URL.',
     '', 'Options:',
-    '  -p, --port <port>       Server port (default: $WSH_PORT or 7681)',
+    '  -p, --port <port>       Server port (default: auto from ~/.wsh/port)',
     '  -s, --session <id>      Reuse a specific session ID',
     '  --notify                Show a toast on the catalog page when the app is ready',
     '  --cwd <dir>             Override working directory for the session',
     '  --env KEY=VALUE         Set environment variable (repeatable)',
     '  --skill <name>          Run a skill instead of an app',
+    '  --type <type>           Session type: pty, web, or job',
+    '  --command <cmd>         Ad-hoc command to run (used with --type job)',
+    '  --title <title>         Session title',
+    '  --id-only               Print only the session ID (no URL)',
+    '  --no-banner             Suppress command banner in job output',
   ]);
   const subArgs = process.argv.slice(3);
 
-  let port = parseInt(process.env.WSH_PORT || '', 10) || 7681;
+  let port = resolveServerPort();
   const portIdx = subArgs.findIndex(a => a === '--port' || a === '-p');
   if (portIdx !== -1 && subArgs[portIdx + 1]) {
     port = parseInt(subArgs[portIdx + 1], 10);
@@ -355,11 +369,38 @@ python3:
     subArgs.splice(skillIdx, 2);
   }
 
+  let typeFlag = '';
+  const typeIdx = subArgs.findIndex(a => a === '--type');
+  if (typeIdx !== -1 && subArgs[typeIdx + 1]) {
+    typeFlag = subArgs[typeIdx + 1];
+    subArgs.splice(typeIdx, 2);
+  }
+
+  let commandFlag = '';
+  const commandIdx = subArgs.findIndex(a => a === '--command');
+  if (commandIdx !== -1 && subArgs[commandIdx + 1]) {
+    commandFlag = subArgs[commandIdx + 1];
+    subArgs.splice(commandIdx, 2);
+  }
+
+  let titleFlag = '';
+  const titleIdx = subArgs.findIndex(a => a === '--title');
+  if (titleIdx !== -1 && subArgs[titleIdx + 1]) {
+    titleFlag = subArgs[titleIdx + 1];
+    subArgs.splice(titleIdx, 2);
+  }
+
+  const idOnly = subArgs.includes('--id-only');
+  if (idOnly) subArgs.splice(subArgs.indexOf('--id-only'), 1);
+
+  const noBanner = subArgs.includes('--no-banner');
+  if (noBanner) subArgs.splice(subArgs.indexOf('--no-banner'), 1);
+
   const notifyIdx = subArgs.indexOf('--notify');
   const notify = notifyIdx !== -1;
   if (notifyIdx !== -1) subArgs.splice(notifyIdx, 1);
   const positionalArgs = subArgs.filter(a => !a.startsWith('-'));
-  const appKey = positionalArgs[0] || (skillFlag ? '' : 'bash');
+  const appKey = positionalArgs[0] || (skillFlag ? '' : (commandFlag ? '' : 'bash'));
   const input = skillFlag ? positionalArgs.join(' ') : positionalArgs.slice(1).join(' ');
   let basePath = process.env.WSH_BASE_PATH || '/';
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
@@ -375,6 +416,10 @@ python3:
   if (notify) payload.notify = true;
   if (cwdFlag) payload.cwd = cwdFlag;
   if (Object.keys(envFlags).length) payload.env = envFlags;
+  if (typeFlag) payload.type = typeFlag;
+  if (commandFlag) payload.command = commandFlag;
+  if (titleFlag) payload.title = titleFlag;
+  if (noBanner) payload.noBanner = true;
   const jsonData = JSON.stringify(payload);
   let lastErr: any;
   for (const scheme of ['http', 'https'] as const) {
@@ -394,7 +439,9 @@ python3:
         process.exit(1);
       }
       const parsed = JSON.parse(responseBody);
-      if (process.env.WSH_URL) {
+      if (idOnly) {
+        console.log(parsed.id);
+      } else if (process.env.WSH_URL) {
         // Behind a proxy: construct URL from external origin + relative path
         try { const u = new URL(parsed.url); console.log(`${process.env.WSH_URL}${u.pathname}${u.hash}`); }
         catch { console.log(parsed.url); }
@@ -417,12 +464,12 @@ python3:
   if (wantsHelp) subHelp('Usage: wsh logs [-p <port>] [-f] <session-id>', [
     '', 'Print session scrollback (stdout/stderr output).',
     '', 'Options:',
-    '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)',
+    '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)',
     '  -f, --follow       Stream new output after printing scrollback',
   ]);
   const subArgs = process.argv.slice(3);
 
-  let port = parseInt(process.env.WSH_PORT || '', 10) || 7681;
+  let port = resolveServerPort();
   const portIdx = subArgs.findIndex(a => a === '--port' || a === '-p');
   if (portIdx !== -1 && subArgs[portIdx + 1]) {
     port = parseInt(subArgs[portIdx + 1], 10);
@@ -547,14 +594,14 @@ python3:
 } else if (process.argv[2] === 'ls' || process.argv[2] === 'kill' || process.argv[2] === 'port') {
   const subcommand = process.argv[2];
   if (wantsHelp) {
-    if (subcommand === 'ls') subHelp('Usage: wsh ls [-p <port>]', ['', 'List active sessions.', '', 'Options:', '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)']);
-    else if (subcommand === 'port') subHelp('Usage: wsh port [-p <port>] <app>', ['', 'Print the port of a running web app.', '', 'Options:', '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)']);
-    else subHelp('Usage: wsh kill [-p <port>] <session-id>', ['', 'Close a session by ID.', '', 'Options:', '  -p, --port <port>  Server port (default: $WSH_PORT or 7681)']);
+    if (subcommand === 'ls') subHelp('Usage: wsh ls [-p <port>]', ['', 'List active sessions.', '', 'Options:', '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)']);
+    else if (subcommand === 'port') subHelp('Usage: wsh port [-p <port>] <app>', ['', 'Print the port of a running web app.', '', 'Options:', '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)']);
+    else subHelp('Usage: wsh kill [-p <port>] <session-id>', ['', 'Close a session by ID.', '', 'Options:', '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)']);
   }
   const subArgs = process.argv.slice(3);
 
-  // Parse --port / -p, fallback to WSH_PORT env var, then default 7681
-  let port = parseInt(process.env.WSH_PORT || '', 10) || 7681;
+  // Parse --port / -p, fallback to ~/.wsh/port file, then default 7681
+  let port = resolveServerPort();
   const portIdx = subArgs.findIndex(a => a === '--port' || a === '-p');
   if (portIdx !== -1 && subArgs[portIdx + 1]) {
     port = parseInt(subArgs[portIdx + 1], 10);
@@ -814,6 +861,13 @@ function appPath(): string {
   return current.includes(localBin) ? current : `${localBin}:${current}`;
 }
 
+/** Base environment for child processes, without WSH_PORT (reserved for web apps). */
+function baseEnv(): Record<string, string> {
+  const env = { ...process.env, PATH: appPath() } as Record<string, string>;
+  delete env.WSH_PORT;
+  return env;
+}
+
 function resolveCwd(appConfig: AppConfig): string {
   const dir = appConfig.cwd ? expandHome(appConfig.cwd) : (process.env.HOME ?? process.cwd());
   fs.mkdirSync(dir, { recursive: true });
@@ -848,12 +902,9 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
     rows,
     cwd: resolveCwd(appConfig),
     env: {
-      ...process.env,
-      PATH: appPath(),
+      ...baseEnv(),
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
-      WSH_RPC_PORT: String(PORT),
-      WSH_RPC_BASE: BASE,
       WSH_SESSION: id,
       ...(appConfig.env ?? {}),
     } as Record<string, string>,
@@ -951,8 +1002,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   sessions.set(id, session);
 
   const env = {
-    ...process.env,
-    PATH: appPath(),
+    ...baseEnv(),
     ...(appConfig.env ?? {}),
     WSH_PORT: String(port),
     WSH_SESSION: id,
@@ -1044,12 +1094,9 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
   sessions.set(id, session);
 
   const env = {
-    ...process.env,
-    PATH: appPath(),
+    ...baseEnv(),
     ...(appConfig.env ?? {}),
     WSH_SESSION: id,
-    WSH_RPC_PORT: String(PORT),
-    WSH_RPC_BASE: BASE,
   };
 
   const child = spawn(appConfig.command, appConfig.args ?? [], {
@@ -1062,16 +1109,18 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
 
   session.child = child;
 
-  // Banner showing the command being run
+  // Banner showing the command being run (unless suppressed)
   const cmdLine = appConfig.args?.length
     ? `${appConfig.command} ${appConfig.args.join(' ')}`
     : appConfig.command;
-  const cwd = resolveCwd(appConfig);
-  const banner = `\x1b[90m$ cd ${cwd} && ${cmdLine}\x1b[0m\r\n`;
-  const bannerBuf = Buffer.from(banner);
-  appendScrollback(session, bannerBuf);
-  for (const ws of session.peers.keys()) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(bannerBuf, { binary: true });
+  if (!appConfig.noBanner) {
+    const cwd = resolveCwd(appConfig);
+    const banner = `\x1b[90m$ cd ${cwd} && ${cmdLine}\x1b[0m\r\n`;
+    const bannerBuf = Buffer.from(banner);
+    appendScrollback(session, bannerBuf);
+    for (const ws of session.peers.keys()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(bannerBuf, { binary: true });
+    }
   }
 
   const appendOutput = (data: Buffer) => {
@@ -1258,6 +1307,7 @@ interface AppConfig {
   stripPrefix?: boolean;
   healthCheck?: string;
   startupTimeout?: string;
+  noBanner?: boolean;
 }
 
 const DEFAULT_APPS: Record<string, AppConfig> = {
@@ -1896,6 +1946,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   const adHocCommand = (req.body?.command as string) || '';
   const adHocType = (req.body?.type as string) || '';
   const adHocTitle = (req.body?.title as string) || '';
+  const adHocNoBanner = !!req.body?.noBanner;
 
   let effectiveConfig: AppConfig;
   let sessionLabel: string;  // used for the URL and session metadata
@@ -1908,6 +1959,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
       title: adHocTitle || adHocCommand.slice(0, 40),
       ...(cwdOverride ? { cwd: cwdOverride } : {}),
       ...(Object.keys(envOverride).length ? { env: envOverride } : {}),
+      ...(adHocNoBanner ? { noBanner: true } : {}),
     };
     sessionLabel = appKey || 'job';
   } else if (skillName) {
@@ -2465,6 +2517,9 @@ const totalServers = (httpsOnly || httpOnly) ? 1 : (networkServer && networkBind
 
 function onListening(): void {
   if (++serversStarted < totalServers) return;
+
+  // Write port file so CLI subcommands can discover the server
+  try { fs.writeFileSync(PORT_FILE, String(PORT)); } catch {}
 
   console.log('');
   console.log(`  Local:       ${localURL}`);
