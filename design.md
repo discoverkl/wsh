@@ -154,7 +154,13 @@ Apps must be proxy-aware and configure their own base URL using `$WSH_BASE_URL`.
 
 `stripPrefix: true` is available for simple apps that use relative paths (SPAs, static file servers).
 
-Environment injected into web app processes: `WSH_PORT`, `WSH_SESSION`, `WSH_BASE_URL`.
+Environment injected into web app processes: `WSH_PORT` (the port the app should listen on), `WSH_SESSION`, `WSH_BASE_URL`.
+
+## Port Discovery
+
+The server writes its port to `~/.wsh/port` on startup. CLI subcommands (`ls`, `new`, `logs`, `kill`, `port`, `rpc`) read this file to find the server — no environment variables needed. The `--port` flag overrides if provided.
+
+`WSH_PORT` is reserved for web apps: it tells the app which port to listen on. It is **not** the server port.
 
 ## RPC (PTY-to-Client / Server-to-Client)
 
