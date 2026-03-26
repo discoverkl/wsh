@@ -42,6 +42,10 @@ function isSessionId(s: string): boolean { return /^[a-z0-9]{6}$/.test(s); }
 /** Port file path — the server writes its port here on startup; CLI reads it for discovery. */
 const PORT_FILE = path.join(os.homedir(), '.wsh', 'port');
 
+/** Directory for persisted job scrollback logs. */
+const JOB_LOG_DIR = path.join(os.homedir(), '.wsh', 'logs');
+const JOB_LOG_MAX = 200; // keep at most 200 log files
+
 /** Resolve the wsh server port for CLI subcommands. Priority: --port flag > port file > 7681 default. */
 function resolveServerPort(): number {
   try {
@@ -505,6 +509,8 @@ python3:
         if (isSessionId(target!)) {
           const byId = data.sessions.find(s => s.id === target);
           if (byId) return byId.id;
+          // Session not active — return ID anyway so the logs endpoint can try disk fallback
+          return target!;
         }
         // App name match (most recently created)
         const byApp = data.sessions.filter(s => s.app === target);
@@ -710,7 +716,6 @@ const MAX_SCROLLBACK_WEB = 512 * 1024;      // 512 KB (web app logs)
 const MAX_SCROLLBACK_JOB = 1 * 1024 * 1024; // 1 MB (job output)
 const SESSION_TTL     = 10 * 60 * 1000;     // 10 minutes
 const WEB_SESSION_TTL = 60 * 60 * 1000;     // 1 hour
-const JOB_LINGER_TTL  = 5 * 60 * 1000;      // 5 minutes — keep finished job session for log retrieval
 const PING_INTERVAL = 30_000;           // 30 seconds
 const PONG_TIMEOUT  = 10_000;           // 10 seconds
 const RATE_WINDOW   = 60_000;           // 1 minute
@@ -816,6 +821,47 @@ function stripEphemeralSequences(buf: Buffer): Buffer {
   if (!str.includes('\x1b')) return buf;
   const stripped = str.replace(oscQueryStripRe, '').replace(dsrResponseRe, '');
   return stripped.length === str.length ? buf : Buffer.from(stripped, 'utf8');
+}
+
+/** Write job scrollback to disk and rotate old logs. */
+function persistJobLog(id: string, scrollback: Buffer): void {
+  const cleaned = stripEphemeralSequences(scrollback);
+  fs.mkdir(JOB_LOG_DIR, { recursive: true }, (err) => {
+    if (err) { console.error(`[session ${id}] failed to create log dir:`, err.message); return; }
+    fs.writeFile(path.join(JOB_LOG_DIR, `${id}.log`), cleaned, (err) => {
+      if (err) { console.error(`[session ${id}] failed to write log:`, err.message); return; }
+      // Rotate: keep only the most recent JOB_LOG_MAX files
+      fs.readdir(JOB_LOG_DIR, (err, files) => {
+        if (err || files.length <= JOB_LOG_MAX) return;
+        const logFiles = files.filter(f => f.endsWith('.log')).map(f => ({
+          name: f,
+          path: path.join(JOB_LOG_DIR, f),
+        }));
+        let pending = logFiles.length;
+        const withMtime: { path: string; mtime: number }[] = [];
+        for (const lf of logFiles) {
+          fs.stat(lf.path, (err, stat) => {
+            if (!err) withMtime.push({ path: lf.path, mtime: stat.mtimeMs });
+            if (--pending === 0 && withMtime.length > JOB_LOG_MAX) {
+              withMtime.sort((a, b) => b.mtime - a.mtime);
+              for (const old of withMtime.slice(JOB_LOG_MAX)) {
+                fs.unlink(old.path, () => {});
+              }
+            }
+          });
+        }
+      });
+    });
+  });
+}
+
+/** Read a persisted job log from disk, or null if not found. */
+function readJobLog(id: string): Buffer | null {
+  try {
+    return fs.readFileSync(path.join(JOB_LOG_DIR, `${id}.log`));
+  } catch {
+    return null;
+  }
 }
 
 function appendScrollback(session: Session, data: Buffer): void {
@@ -1145,14 +1191,10 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
       if (ws.readyState === WebSocket.OPEN) ws.send(exitMsg);
     }
 
-    // Linger briefly so clients can retrieve scrollback, then auto-delete
+    // Persist scrollback to disk and delete session immediately
+    persistJobLog(id, session.scrollback);
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
-    session.cleanupTimer = setTimeout(() => {
-      if (sessions.get(id) === session) {
-        sessions.delete(id);
-        console.log(`[session ${id}] job session cleaned up`);
-      }
-    }, JOB_LINGER_TTL);
+    if (sessions.get(id) === session) sessions.delete(id);
   });
 
   console.log(`[session ${id}] job spawned: ${cmdLine}`);
@@ -1702,9 +1744,19 @@ router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
 
 router.get('/api/sessions/:id/logs', (req: express.Request, res: express.Response) => {
   const session = sessions.get(req.params.id);
-  if (!session) { res.status(404).json({ error: 'session not found' }); return; }
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.send(stripEphemeralSequences(session.scrollback));
+  if (session) {
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.send(stripEphemeralSequences(session.scrollback));
+    return;
+  }
+  // Fall back to persisted job log on disk
+  const diskLog = readJobLog(req.params.id);
+  if (diskLog) {
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.send(diskLog);
+    return;
+  }
+  res.status(404).json({ error: 'session not found' });
 });
 
 router.get('/api/sessions/:id/stream', (req: express.Request, res: express.Response) => {
