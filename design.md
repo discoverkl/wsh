@@ -55,22 +55,22 @@ child exits      --> all peers closed, session deleted immediately
 ### Job Sessions
 
 ```
-created via API  --> child process spawned, stdout/stderr captured to scrollback
+created via API  --> child process spawned, stdout/stderr tee'd to scrollback + disk (~/.wsh/logs/<id>.log)
                      no port, no health check, no keyboard input
 WS peers connect --> receive scrollback replay + live output (read-only)
-child exits      --> { type: 'job-exit', code, signal } sent to peers
-                     session lingers for JOB_LINGER_TTL (5 min) for log retrieval
-                     then auto-deleted
+wsh logs <id>    --> reads from disk file (works during and after execution, survives server restarts)
+wsh logs -f <id> --> reads disk file for catch-up, then EventEmitter for live chunks
+child exits      --> 'job-exit' event emitted, fd closed, session deleted immediately
 ```
 
-Jobs are non-interactive background tasks (cron runs, chat agent invocations). They are visible in `wsh ls` with `appType: 'job'` and provide box-level activity tracking for idle detection and graceful upgrades.
+Jobs are non-interactive background tasks (cron runs, chat agent invocations). Output is written to disk incrementally via `fs.writeSync` so it survives server restarts. They are visible in `wsh ls` with `appType: 'job'` and provide box-level activity tracking for idle detection and graceful upgrades.
 
 The cleanup timer starts from the moment of disconnect, not from last activity.
 
 ### Common Rules
 
 - Only owners can create sessions; non-owners get rejected with WS close code 4003
-- On reconnect, the full scrollback buffer is replayed (up to 5 MB for TUI, 512 KB for web, 1 MB for job)
+- On reconnect, the full scrollback buffer is replayed (up to 5 MB for TUI, 512 KB for web, 1 MB for job). Job logs are also persisted to disk for durability.
 - Only one active writer at a time; a new writer demotes the current one to viewer
 - Only owners can close sessions or toggle pin state; writers can resize and clear
 - Pin state is in-memory only; a server restart resets it (processes die anyway)

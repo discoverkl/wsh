@@ -7,6 +7,7 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 import { Duplex } from 'stream';
+import { EventEmitter } from 'events';
 import { parseArgs } from 'util';
 import express from 'express';
 import selfsigned from 'selfsigned';
@@ -431,8 +432,8 @@ python3:
     const flags = scheme === 'https' ? '-sSk' : '-sS';
     try {
       const body = execSync(
-        `curl ${flags} ${userHeader} -X POST -H 'Content-Type: application/json' -d '${jsonData}' -w '\\n%{http_code}' '${url}'`,
-        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
+        `curl ${flags} ${userHeader} -X POST -H 'Content-Type: application/json' -d @- -w '\\n%{http_code}' '${url}'`,
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], input: jsonData },
       );
       const lines = body.trimEnd().split('\n');
       const httpCode = parseInt(lines.pop()!, 10);
@@ -723,7 +724,7 @@ const RATE_MAX_MISS = 10;               // max invalid session attempts per IP p
 
 type Role = 'owner' | 'writer' | 'viewer';
 
-interface Session {
+interface SessionFields {
   pty: IPty | null;
   scrollback: Buffer;
   writer: WebSocket | null;
@@ -747,6 +748,8 @@ interface Session {
   /** When set, PTY spawn is deferred until the first resize message. */
   pendingConfig?: AppConfig;
 }
+
+type Session = SessionFields & EventEmitter;
 
 const sessions = new Map<string, Session>();
 const missAttempts = new Map<string, number[]>(); // IP -> timestamps of invalid session hits
@@ -824,34 +827,27 @@ function stripEphemeralSequences(buf: Buffer): Buffer {
 }
 
 /** Write job scrollback to disk and rotate old logs. */
-function persistJobLog(id: string, scrollback: Buffer): void {
-  const cleaned = stripEphemeralSequences(scrollback);
-  fs.mkdir(JOB_LOG_DIR, { recursive: true }, (err) => {
-    if (err) { console.error(`[session ${id}] failed to create log dir:`, err.message); return; }
-    fs.writeFile(path.join(JOB_LOG_DIR, `${id}.log`), cleaned, (err) => {
-      if (err) { console.error(`[session ${id}] failed to write log:`, err.message); return; }
-      // Rotate: keep only the most recent JOB_LOG_MAX files
-      fs.readdir(JOB_LOG_DIR, (err, files) => {
-        if (err || files.length <= JOB_LOG_MAX) return;
-        const logFiles = files.filter(f => f.endsWith('.log')).map(f => ({
-          name: f,
-          path: path.join(JOB_LOG_DIR, f),
-        }));
-        let pending = logFiles.length;
-        const withMtime: { path: string; mtime: number }[] = [];
-        for (const lf of logFiles) {
-          fs.stat(lf.path, (err, stat) => {
-            if (!err) withMtime.push({ path: lf.path, mtime: stat.mtimeMs });
-            if (--pending === 0 && withMtime.length > JOB_LOG_MAX) {
-              withMtime.sort((a, b) => b.mtime - a.mtime);
-              for (const old of withMtime.slice(JOB_LOG_MAX)) {
-                fs.unlink(old.path, () => {});
-              }
-            }
-          });
+/** Rotate job logs — keep only the most recent JOB_LOG_MAX files. */
+function rotateJobLogs(): void {
+  fs.readdir(JOB_LOG_DIR, (err, files) => {
+    if (err || files.length <= JOB_LOG_MAX) return;
+    const logFiles = files.filter(f => f.endsWith('.log')).map(f => ({
+      name: f,
+      path: path.join(JOB_LOG_DIR, f),
+    }));
+    let pending = logFiles.length;
+    const withMtime: { path: string; mtime: number }[] = [];
+    for (const lf of logFiles) {
+      fs.stat(lf.path, (err, stat) => {
+        if (!err) withMtime.push({ path: lf.path, mtime: stat.mtimeMs });
+        if (--pending === 0 && withMtime.length > JOB_LOG_MAX) {
+          withMtime.sort((a, b) => b.mtime - a.mtime);
+          for (const old of withMtime.slice(JOB_LOG_MAX)) {
+            fs.unlink(old.path, () => {});
+          }
         }
       });
-    });
+    }
   });
 }
 
@@ -876,7 +872,7 @@ function appendScrollback(session: Session, data: Buffer): void {
 
 function baseSession(appKey: string, appConfig: AppConfig): Session {
   const now = Date.now();
-  return {
+  const session = Object.assign(new EventEmitter(), {
     pty: null,
     scrollback: Buffer.alloc(0),
     writer: null,
@@ -889,9 +885,10 @@ function baseSession(appKey: string, appConfig: AppConfig): Session {
     createdAt: now,
     lastInput: now,
     lastOutput: now,
-    appType: 'pty',
+    appType: 'pty' as const,
     child: null,
-  };
+  }) as Session;
+  return session;
 }
 
 function expandHome(p: string): string {
@@ -990,7 +987,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
 
 function spawnSession(id: string, appKey: string, appConfig: AppConfig, cols = 80, rows = 24): Session {
   const session: Session = { ...baseSession(appKey, appConfig) };
-  sessions.set(id, session);
+  registerSession(id, session);
   spawnPty(id, session, appConfig, cols, rows);
   return session;
 }
@@ -999,7 +996,7 @@ function spawnSession(id: string, appKey: string, appConfig: AppConfig, cols = 8
 function createPendingSession(id: string, appKey: string, appConfig: AppConfig): Session {
   const session: Session = { ...baseSession(appKey, appConfig) };
   session.pendingConfig = appConfig;
-  sessions.set(id, session);
+  registerSession(id, session);
   console.log(`[session ${id}] created (pending — waiting for resize to spawn PTY)`);
   return session;
 }
@@ -1046,7 +1043,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
     stripPrefix: appConfig.stripPrefix,
   };
 
-  sessions.set(id, session);
+  registerSession(id, session);
 
   const env = {
     ...baseEnv(),
@@ -1133,12 +1130,14 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
 }
 
 function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Session {
-  const session: Session = {
-    ...baseSession(appKey, appConfig),
-    appType: 'job',
-  };
+  const session = baseSession(appKey, appConfig);
+  session.appType = 'job';
 
-  sessions.set(id, session);
+  registerSession(id, session);
+
+  // Open log file for incremental writes
+  fs.mkdirSync(JOB_LOG_DIR, { recursive: true });
+  const logFd = fs.openSync(path.join(JOB_LOG_DIR, `${id}.log`), 'w');
 
   const env = {
     ...baseEnv(),
@@ -1165,6 +1164,7 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
     const banner = `\x1b[90m$ cd ${cwd} && ${cmdLine}\x1b[0m\r\n`;
     const bannerBuf = Buffer.from(banner);
     appendScrollback(session, bannerBuf);
+    fs.writeSync(logFd, bannerBuf);
     for (const ws of session.peers.keys()) {
       if (ws.readyState === WebSocket.OPEN) ws.send(bannerBuf, { binary: true });
     }
@@ -1173,6 +1173,8 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
   const appendOutput = (data: Buffer) => {
     session.lastOutput = Date.now();
     appendScrollback(session, data);
+    fs.writeSync(logFd, data);
+    session.emit('output', data);
     for (const ws of session.peers.keys()) {
       if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: true });
     }
@@ -1181,10 +1183,11 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
   child.stdout!.on('data', appendOutput);
   child.stderr!.on('data', appendOutput);
 
-  child.on('exit', (code, signal) => {
+  child.on('close', (code, signal) => {
     console.log(`[session ${id}] job exited (code ${code}, signal ${signal})`);
     session.exitCode = code;
     session.child = null;
+    try { fs.closeSync(logFd); } catch {}
 
     // Notify connected peers that the job finished
     const exitMsg = JSON.stringify({ type: 'job-exit', code, signal });
@@ -1192,8 +1195,8 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
       if (ws.readyState === WebSocket.OPEN) ws.send(exitMsg);
     }
 
-    // Persist scrollback to disk and delete session immediately
-    persistJobLog(id, session.scrollback);
+    session.emit('job-exit', code);
+    rotateJobLogs();
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
     if (sessions.get(id) === session) sessions.delete(id);
   });
@@ -1225,7 +1228,12 @@ function scheduleCleanup(id: string, session: Session): void {
   if (session.appType === 'job') return; // jobs manage their own cleanup via exit handler
   const ttl = session.timeoutMs ?? (session.appType === 'web' ? WEB_SESSION_TTL : SESSION_TTL);
   session.cleanupTimer = setTimeout(() => {
-    console.log(`[session ${id}] TTL expired, killing process`);
+    console.log(`[session ${id}] TTL expired`);
+    // No process to kill (e.g. pending session that never received a resize)
+    if (!session.child && !session.pty) {
+      if (sessions.get(id) === session) sessions.delete(id);
+      return;
+    }
     if (session.child) killProcessGroup(session.child);
     else if (session.pty) session.pty.kill('SIGHUP');
     // Session cleanup happens in the process exit handler.
@@ -1241,6 +1249,14 @@ function scheduleCleanup(id: string, session: Session): void {
       }, 5000);
     }
   }, ttl);
+}
+
+/** Add session to the map and enforce idle-timeout invariant. */
+function registerSession(id: string, session: Session): void {
+  sessions.set(id, session);
+  if (session.peers.size === 0) {
+    scheduleCleanup(id, session);
+  }
 }
 
 // --- Args ---
@@ -1765,24 +1781,26 @@ router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
 });
 
 router.get('/api/sessions/:id/logs', (req: express.Request, res: express.Response) => {
+  // Try disk first (covers running and finished jobs)
+  const diskLog = readJobLog(req.params.id);
+  if (diskLog) {
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.send(stripEphemeralSequences(diskLog));
+    return;
+  }
+  // Fall back to scrollback buffer (non-job sessions)
   const session = sessions.get(req.params.id);
   if (session) {
     res.setHeader('Content-Type', 'application/octet-stream');
     res.send(stripEphemeralSequences(session.scrollback));
     return;
   }
-  // Fall back to persisted job log on disk
-  const diskLog = readJobLog(req.params.id);
-  if (diskLog) {
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.send(diskLog);
-    return;
-  }
   res.status(404).json({ error: 'session not found' });
 });
 
 router.get('/api/sessions/:id/stream', (req: express.Request, res: express.Response) => {
-  const session = sessions.get(req.params.id);
+  const id = req.params.id;
+  const session = sessions.get(id);
   if (!session) { res.status(404).json({ error: 'session not found' }); return; }
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1790,38 +1808,63 @@ router.get('/api/sessions/:id/stream', (req: express.Request, res: express.Respo
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  // Send existing scrollback
+  // Job sessions: read from disk + EventEmitter for live updates
+  if (session.appType === 'job') {
+    const onOutput = (data: Buffer) => {
+      if (res.destroyed) return;
+      const text = stripEphemeralSequences(data).toString('utf8');
+      if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
+    };
+    const onExit = (code: number | null) => {
+      if (res.destroyed) return;
+      res.write(`data: ${JSON.stringify({ exit: code })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    };
+
+    // Subscribe first, then read file — same tick, no gap
+    session.on('output', onOutput);
+    session.on('job-exit', onExit);
+
+    // Send existing content from disk (sync read — no events fire during this)
+    const existing = readJobLog(id);
+    if (existing?.length) {
+      const text = stripEphemeralSequences(existing).toString('utf8');
+      if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
+    }
+
+    // If already exited, send exit and close
+    if (session.child === null) {
+      session.off('output', onOutput);
+      session.off('job-exit', onExit);
+      res.write(`data: ${JSON.stringify({ exit: session.exitCode ?? null })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+
+    req.on('close', () => {
+      session.off('output', onOutput);
+      session.off('job-exit', onExit);
+    });
+    return;
+  }
+
+  // Non-job sessions: existing fake-peer approach
   if (session.scrollback.length > 0) {
     const text = stripEphemeralSequences(session.scrollback).toString('utf8');
     res.write(`data: ${JSON.stringify({ text })}\n\n`);
   }
 
-  // If the process already exited, send done and close
-  if (session.appType === 'job' && session.child === null) {
-    res.write(`data: ${JSON.stringify({ exit: session.exitCode ?? null })}\n\n`);
-    res.write('data: [DONE]\n\n');
-    res.end();
-    return;
-  }
-
-  // Create a fake WebSocket-like peer to receive live output
   const fakeWs = {
     readyState: WebSocket.OPEN,
     send(data: Buffer | string, _opts?: any) {
       if (res.destroyed) return;
       const text = Buffer.isBuffer(data) ? data.toString('utf8') : typeof data === 'string' ? data : '';
-      // Skip JSON control messages (role, ready, job-exit, etc.)
       if (text.startsWith('{')) {
         try {
           const parsed = JSON.parse(text);
-          if (parsed.type === 'job-exit') {
-            res.write(`data: ${JSON.stringify({ exit: parsed.code ?? null })}\n\n`);
-            res.write('data: [DONE]\n\n');
-            res.end();
-            return;
-          }
-          // Skip other control messages
-          if (parsed.type) return;
+          if (parsed.type) return; // Skip control messages
         } catch {}
       }
       if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
