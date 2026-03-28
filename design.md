@@ -65,7 +65,7 @@ child exits      --> 'job-exit' event emitted, fd closed, session deleted immedi
 
 Jobs are non-interactive background tasks (cron runs, chat agent invocations). Output is written to disk incrementally via `fs.writeSync` so it survives server restarts. They are visible in `wsh ls` with `appType: 'job'` and provide box-level activity tracking for idle detection and graceful upgrades.
 
-The cleanup timer starts from the moment of disconnect, not from last activity.
+The cleanup timer starts from the moment of disconnect, not from last activity. Sessions created via API (with no initial viewer) also get a timer at creation via `registerSession()`, ensuring they are cleaned up if no peer ever connects.
 
 ### Common Rules
 

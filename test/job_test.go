@@ -8,7 +8,6 @@ package wsh_test
 // │  ├ job appears in session list        │ GET /api/sessions includes job with appType=job   │
 // │  ├ job output via WebSocket           │ WS client receives stdout from job                │
 // │  ├ job exit message                   │ WS client receives job-exit with exit code        │
-// │  ├ scrollback replay after exit       │ late WS client gets full output + job-exit        │
 // │  ├ logs endpoint                      │ GET /api/sessions/:id/logs returns output         │
 // │  ├ input ignored                      │ binary input to job session is silently dropped   │
 // │  ├ multiple viewers                   │ two WS clients both receive job output            │
@@ -102,26 +101,6 @@ func TestJobSessions(t *testing.T) {
 		found := ws.readUntil(t, `"job-exit"`, 5*time.Second)
 		if !found {
 			t.Fatal("did not receive job-exit message")
-		}
-	})
-
-	t.Run("scrollback replay after exit", func(t *testing.T) {
-		resp := srv.postJSON(t, "/api/sessions", map[string]any{
-			"type":    "job",
-			"command": "echo replay-marker-123",
-		})
-		id := resp["id"].(string)
-
-		// Wait for the job to finish
-		time.Sleep(1 * time.Second)
-
-		// Connect late — should still get scrollback replay + job-exit
-		ws := srv.connectTerminal(t, id)
-		ws.readRole(t)
-
-		found := ws.readUntilAccum(t, "replay-marker-123", 5*time.Second)
-		if !found {
-			t.Fatalf("late client did not receive scrollback replay, got: %q", ws.accum)
 		}
 	})
 

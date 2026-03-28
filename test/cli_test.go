@@ -5,7 +5,7 @@ package wsh_test
 // ├───────────────────────────────────────┼───────────────────────────────────────────────────┤
 // │ TestCLI                               │ CLI subcommands                                   │
 // │  ├ version                            │ wsh version prints version                        │
-// │  ├ rpc missing port                   │ wsh rpc without WSH_RPC_PORT → error              │
+// │  ├ rpc missing port                   │ wsh rpc without target session → error            │
 // │  ├ rpc async via CLI                  │ wsh rpc --async succeeds                          │
 // │  ├ rpc sync eval via CLI              │ wsh rpc eval 42 → "42"                            │
 // │  ├ ls                                 │ wsh ls runs without error                         │
@@ -30,7 +30,7 @@ func TestCLI(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error")
 		}
-		assertContains(t, err.Error(), "WSH_RPC_PORT")
+		assertContains(t, err.Error(), "no target session")
 	})
 
 	t.Run("rpc async via CLI", func(t *testing.T) {
