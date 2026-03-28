@@ -503,7 +503,9 @@ document.querySelectorAll('.app-avatar-btn').forEach(btn => btn.addEventListener
         mode: 'inline',
         input: appName,
         ...(sessionCwd ? { cwd: sessionCwd } : {}),
-        env: { TARGET_APP: appName, TARGET_SESSION: sessionId, TARGET_DESC: desc },
+        snapshot: desc,
+        targetApp: appName,
+        targetSession: sessionId,
       }),
     }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 
@@ -518,6 +520,10 @@ document.querySelectorAll('.app-avatar-btn').forEach(btn => btn.addEventListener
 
   allBtns.forEach(b => b.classList.remove('loading'));
 }));
+
+// api.getSnapshot — callable via `wsh rpc --session <id> 'api.getSnapshot()'`
+(window as any).api.getSnapshot = () =>
+  gatherAppSnapshot({ appName, sessionId, sessionCwd, currentRole, appType });
 
 function sendAction(msg: Record<string, unknown>): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));

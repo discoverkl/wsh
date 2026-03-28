@@ -171,13 +171,15 @@ All RPC is `eval` — the server delivers JavaScript to connected browser client
 - **Server code**: `broadcastRpc('eval', code)` / `sessionRpc(id, 'eval', code)`
 - **Control WebSocket**: Pages without a terminal connect with `session=_rpc` to receive broadcasts
 
-**Built-in `api` functions** (`src/api.ts`): `api.toast(msg)` — toast notifications (text/html, raw mode, configurable duration, swipe-to-dismiss). Catalog adds `api.refreshCatalog()`, `api.sessionReady()`.
+**Built-in `api` functions** (`src/api.ts`): `api.toast(msg)` — toast notifications (text/html, raw mode, configurable duration, swipe-to-dismiss). Catalog adds `api.refreshCatalog()`, `api.sessionReady()`. Web app pages add `api.getSnapshot()` — returns a full app snapshot (DOM, console, network, storage) for skill agents.
 
 **Transport**: OSC 777 escape sequences (`\x1b]777;wsh:eval;<code>\x07`) or HTTP POST to `/api/rpc`.
 
 ## Skills
 
 Skills are apps with a `skill` field whose command template references `$SKILL` and `$INPUT` env vars. The `_skills` reserved key provides shared defaults (command, cwd) for all skill apps.
+
+When a skill session is spawned with a `snapshot` in the POST body, the server writes it to `~/.wsh/snapshots/<agentSessionId>.md` before spawning the PTY. The skill reads the file via the predictable path `~/.wsh/snapshots/$WSH_SESSION.md` — faster than reading a large env var through bash. Snapshot files are cleaned up on PTY exit.
 
 ## Distribution
 

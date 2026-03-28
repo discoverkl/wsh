@@ -982,6 +982,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
     for (const ws of session.peers.keys()) closeWs(ws);
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
     if (sessions.get(id) === session) sessions.delete(id);
+    removeSkillSnapshot(id);
   });
 
   console.log(`[session ${id}] spawned (${cols}x${rows}) cmd: ${wrapped}`);
@@ -1395,6 +1396,27 @@ function mergeApps(apps: Record<string, AppConfig>, parsed: Record<string, unkno
 
 /** Reserved URL paths that cannot be used as app names. */
 const RESERVED_PATHS = new Set(['skill']);
+
+const SNAPSHOT_DIR = path.join(os.homedir(), '.wsh', 'snapshots');
+
+/** Write a skill snapshot file and return the path. */
+function writeSkillSnapshot(agentSessionId: string, snapshot: string, targetApp: string, targetSession: string): string {
+  fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+  const filePath = path.join(SNAPSHOT_DIR, `${agentSessionId}.md`);
+  const lines = [
+    targetApp ? `app: ${targetApp}` : null,
+    targetSession ? `session: ${targetSession}` : null,
+    '',
+    snapshot,
+  ].filter(l => l !== null).join('\n');
+  fs.writeFileSync(filePath, lines);
+  return filePath;
+}
+
+/** Remove a skill snapshot file (best-effort). */
+function removeSkillSnapshot(agentSessionId: string): void {
+  try { fs.unlinkSync(path.join(SNAPSHOT_DIR, `${agentSessionId}.md`)); } catch {}
+}
 
 const SKILL_DEFAULTS: Partial<AppConfig> = {
   command: 'claude "/$SKILL $INPUT"',
@@ -1999,6 +2021,9 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   const adHocType = (req.body?.type as string) || '';
   const adHocTitle = (req.body?.title as string) || '';
   const adHocNoBanner = !!req.body?.noBanner;
+  const snapshot = (req.body?.snapshot as string) || '';
+  const targetApp = (req.body?.targetApp as string) || '';
+  const targetSession = (req.body?.targetSession as string) || '';
 
   let effectiveConfig: AppConfig;
   let sessionLabel: string;  // used for the URL and session metadata
@@ -2067,6 +2092,17 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     res.status(400).json({ error: 'Session ID must be exactly 6 lowercase alphanumeric characters' }); return;
   }
   const id = requestedSession || crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
+
+  // Write snapshot to file so the skill agent can read it directly (faster than env var round-trip).
+  // The file path is appended to INPUT so it appears in the command — no env vars for the LLM to read.
+  if (skillName && snapshot) {
+    writeSkillSnapshot(id, snapshot, targetApp, targetSession);
+    const snapshotPath = path.join(SNAPSHOT_DIR, `${id}.md`);
+    effectiveConfig = {
+      ...effectiveConfig,
+      env: { ...effectiveConfig.env, INPUT: `${input} ${snapshotPath}` },
+    };
+  }
 
   if (effectiveConfig.type === 'job') {
     try {
