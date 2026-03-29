@@ -107,9 +107,9 @@ if (process.argv[2] === 'version') {
     '  --timeout <ms>   Response timeout in milliseconds',
     '  --session <id>   Target a specific session (default: $WSH_SESSION, "index" for catalog)',
     '  --broadcast      Send to all sessions (ignore $WSH_SESSION)',
+    '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)',
     '  -                Read argument from stdin',
     '', 'Environment:',
-    '  (Server port is auto-discovered from ~/.wsh/port)',
     '  WSH_SESSION      Session ID for the RPC call (overridden by --session)',
     '', 'Examples:',
     '  wsh rpc \'api.toast("hello")\'',
@@ -121,11 +121,13 @@ if (process.argv[2] === 'version') {
   let rpcTimeout: number | undefined;
   let rpcSession: string | undefined;
   let rpcBroadcast = false;
+  let rpcPortOverride: number | undefined;
   for (let i = 3; i < process.argv.length; i++) {
     const a = process.argv[i];
     if (a === '--async') isAsync = true;
     else if (a === '--timeout' && process.argv[i + 1]) rpcTimeout = parseInt(process.argv[++i], 10);
     else if (a === '--session' && process.argv[i + 1]) rpcSession = process.argv[++i];
+    else if ((a === '--port' || a === '-p') && process.argv[i + 1]) rpcPortOverride = parseInt(process.argv[++i], 10);
     else if (a === '--broadcast') rpcBroadcast = true;
     else rpcArgs.push(a);
   }
@@ -146,7 +148,7 @@ if (process.argv[2] === 'version') {
   }
   const action = 'eval';
   const args = rpcArgs;
-  const rpcPort = resolveServerPort();
+  const rpcPort = rpcPortOverride ?? resolveServerPort();
   // HTTP mode: POST to the wsh server directly (bypasses stdout capture by agent tools)
   const session = rpcBroadcast ? undefined : (rpcSession ?? process.env.WSH_SESSION);
   if (!session && !rpcBroadcast) {
@@ -598,6 +600,16 @@ python3:
     tryConnect('ws');
     (globalThis as any).__wshFollowMode = true;
   }
+} else if (process.argv[2] === 'exitcode') {
+  const sid = process.argv[3];
+  if (!sid || wantsHelp) { console.error('Usage: wsh exitcode <session-id>'); process.exit(sid ? 0 : 1); }
+  try {
+    const code = fs.readFileSync(path.join(JOB_LOG_DIR, `${sid}.exit`), 'utf8').trim();
+    console.log(code);
+    process.exit(0);
+  } catch {
+    process.exit(1);
+  }
 } else if (process.argv[2] === 'ls' || process.argv[2] === 'kill' || process.argv[2] === 'port') {
   const subcommand = process.argv[2];
   if (wantsHelp) {
@@ -707,6 +719,15 @@ python3:
     console.log(`Session "${sessionId}" killed.`);
   }
   process.exit(0);
+}
+
+// Reject unknown subcommands before server startup.
+const knownCommands = new Set(['version', 'update', 'token', 'rpc', 'apps', 'new', 'logs', 'exitcode', 'ls', 'kill', 'port']);
+const firstArg = process.argv[2];
+if (firstArg && !firstArg.startsWith('-') && !knownCommands.has(firstArg)) {
+  console.error(`Unknown command: ${firstArg}`);
+  console.error(`Run 'wsh --help' for usage.`);
+  process.exit(1);
 }
 
 // `wsh logs -f` keeps the process alive via WebSocket — skip server startup.
@@ -844,6 +865,7 @@ function rotateJobLogs(): void {
           withMtime.sort((a, b) => b.mtime - a.mtime);
           for (const old of withMtime.slice(JOB_LOG_MAX)) {
             fs.unlink(old.path, () => {});
+            fs.unlink(old.path.replace(/\.log$/, '.exit'), () => {});
           }
         }
       });
@@ -1188,6 +1210,7 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
     session.exitCode = code;
     session.child = null;
     try { fs.closeSync(logFd); } catch {}
+    try { fs.writeFileSync(path.join(JOB_LOG_DIR, `${id}.exit`), String(code ?? -1)); } catch {}
 
     // Notify connected peers that the job finished
     const exitMsg = JSON.stringify({ type: 'job-exit', code, signal });
@@ -1293,6 +1316,9 @@ if (values.help) {
   console.log('  kill <session-id>  Close a session');
   console.log('  new [app-key]      Create a new session (default: bash)');
   console.log('  apps               List available apps');
+  console.log('  rpc <code>         Evaluate JavaScript on connected clients');
+  console.log('  exitcode <id>      Get exit code of a session');
+  console.log('  port <app>         Print the port of a running web app');
   console.log('  update             Update to the latest version');
   console.log('  version            Print version and exit');
   console.log('  token              Print the auth token and exit');
@@ -2477,6 +2503,11 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     }
     session.writer = ws;
     session.peers.set(ws, credential);
+    // Cancel the cleanup timer that registerSession started (peers was 0 at creation time).
+    if (session.cleanupTimer !== null) {
+      clearTimeout(session.cleanupTimer);
+      session.cleanupTimer = null;
+    }
     sendRoleMessage(ws, id, session, credential, credential);
     if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
   }
