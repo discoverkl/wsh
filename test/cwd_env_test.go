@@ -137,18 +137,15 @@ func TestCwdEnvOverrides(t *testing.T) {
 
 func TestCLICwdEnv(t *testing.T) {
 	srv := startServer(t)
+	port := fmt.Sprintf("%d", srv.port)
 
 	t.Run("new with --cwd", func(t *testing.T) {
-		out := runCLIWithEnv(t, map[string]string{
-			"WSH_PORT": fmt.Sprintf("%d", srv.port),
-		}, "new", "--cwd", "/tmp", "bash")
+		out := runCLI(t, "new", "-p", port, "--cwd", "/tmp", "bash")
 		assertContains(t, out, "bash#")
 	})
 
 	t.Run("new with --env", func(t *testing.T) {
-		out := runCLIWithEnv(t, map[string]string{
-			"WSH_PORT": fmt.Sprintf("%d", srv.port),
-		}, "new", "--env", "FOO=bar", "bash")
+		out := runCLI(t, "new", "-p", port, "--env", "FOO=bar", "bash")
 		assertContains(t, out, "bash#")
 	})
 }
