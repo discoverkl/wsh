@@ -220,8 +220,7 @@ python3:
 
 # jupyter:
 #   type: web
-#   command: jupyter
-#   args: [lab, --port=$WSH_PORT, --ServerApp.base_url=$WSH_BASE_URL, --no-browser]
+#   command: jupyter lab --port=$WSH_PORT --ServerApp.base_url=$WSH_BASE_URL --no-browser
 #   title: Jupyter Lab
 #   icon: python
 #   healthCheck: /api
@@ -292,7 +291,7 @@ python3:
   // Build table rows
   const rows = (Object.entries(apps) as [string, any][]).map(([key, app]) => {
     const title = app.title ?? path.basename(app.command);
-    const command = app.command + (app.args?.length ? ' ' + app.args.join(' ') : '');
+    const command = app.command;
     const tags: string[] = [];
     if (app.type === 'web') tags.push('web');
     if (app.access === 'public') tags.push('public');
@@ -939,29 +938,9 @@ function resolveCwd(appConfig: AppConfig): string {
   return dir;
 }
 
-/** Build the shell command line for PTY spawn. */
-function buildPtyCommand(appConfig: AppConfig): string {
-  // For skill apps the command is a shell expression (e.g. `claude "/$SKILL $INPUT"`)
-  // that must run via `sh -c`.  We fold it into the stty wrapper so there is only
-  // ONE intermediate shell.  For non-skill apps `exec` replaces the wrapper shell
-  // so there is no extra process and signals are delivered correctly.
-  let cmdLine: string;
-  if (appConfig.skill) {
-    cmdLine = [appConfig.command, ...(appConfig.args ?? [])].join(' ');
-  } else {
-    cmdLine = [appConfig.command, ...(appConfig.args ?? [])]
-      .map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-  }
-
-  return appConfig.skill
-    ? cmdLine
-    : `exec ${cmdLine}`;
-}
-
 /** Spawn a PTY and wire it into an existing session. */
 function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: number, rows: number): void {
-  const wrapped = buildPtyCommand(appConfig);
-  const ptyProcess = pty.spawn('/bin/sh', ['-c', wrapped], {
+  const ptyProcess = pty.spawn('/bin/sh', ['-c', appConfig.command], {
     name: 'xterm-256color',
     cols,
     rows,
@@ -1004,7 +983,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
     removeSkillSnapshot(id);
   });
 
-  console.log(`[session ${id}] spawned (${cols}x${rows}) cmd: ${wrapped}`);
+  console.log(`[session ${id}] spawned (${cols}x${rows}) cmd: ${appConfig.command}`);
 }
 
 function spawnSession(id: string, appKey: string, appConfig: AppConfig, cols = 80, rows = 24): Session {
@@ -1075,8 +1054,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
     WSH_BASE_URL: BASE + '_a/' + appKey + '/',
   };
 
-  const child = spawn(appConfig.command, appConfig.args ?? [], {
-    shell: '/bin/sh',
+  const child = spawn('/bin/sh', ['-c', appConfig.command], {
     detached: true,
     env: env as Record<string, string>,
     cwd: resolveCwd(appConfig),
@@ -1086,10 +1064,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   session.child = child;
 
   // Log the launch command to the log terminal
-  const cmdLine = appConfig.args?.length
-    ? `${appConfig.command} ${appConfig.args.join(' ')}`
-    : appConfig.command;
-  const resolvedCmd = cmdLine
+  const resolvedCmd = appConfig.command
     .replace(/\$WSH_PORT\b/g, String(port))
     .replace(/\$WSH_SESSION\b/g, id)
     .replace(/\$WSH_BASE_URL\b/g, BASE + '_a/' + appKey + '/');
@@ -1167,8 +1142,7 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
     WSH_SESSION: id,
   };
 
-  const child = spawn(appConfig.command, appConfig.args ?? [], {
-    shell: '/bin/sh',
+  const child = spawn('/bin/sh', ['-c', appConfig.command], {
     detached: true,
     env: env as Record<string, string>,
     cwd: resolveCwd(appConfig),
@@ -1178,12 +1152,9 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
   session.child = child;
 
   // Banner showing the command being run (unless suppressed)
-  const cmdLine = appConfig.args?.length
-    ? `${appConfig.command} ${appConfig.args.join(' ')}`
-    : appConfig.command;
   if (!appConfig.noBanner) {
     const cwd = resolveCwd(appConfig);
-    const banner = `\x1b[90m$ cd ${cwd} && ${cmdLine}\x1b[0m\r\n`;
+    const banner = `\x1b[90m$ cd ${cwd} && ${appConfig.command}\x1b[0m\r\n`;
     const bannerBuf = Buffer.from(banner);
     appendScrollback(session, bannerBuf);
     fs.writeSync(logFd, bannerBuf);
@@ -1224,7 +1195,7 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
     if (sessions.get(id) === session) sessions.delete(id);
   });
 
-  console.log(`[session ${id}] job spawned: ${cmdLine}`);
+  console.log(`[session ${id}] job spawned: ${appConfig.command}`);
   return session;
 }
 
@@ -1378,7 +1349,6 @@ if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
 interface AppConfig {
   command: string;
   inlineCommand?: string;
-  args?: string[];
   env?: Record<string, string>;
   cwd?: string;
   title?: string;
@@ -1397,8 +1367,7 @@ interface AppConfig {
 
 const DEFAULT_APPS: Record<string, AppConfig> = {
   bash: {
-    command: '/bin/bash',
-    args: values['no-login'] ? [] : ['-l'],
+    command: values['no-login'] ? '/bin/bash' : '/bin/bash -l',
     title: 'bash',
   },
 };
@@ -2097,17 +2066,17 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   let effectiveConfig: AppConfig;
   let sessionLabel: string;  // used for the URL and session metadata
 
-  if (adHocType === 'job' && adHocCommand) {
-    // --- Ad-hoc job: raw command, no app config lookup ---
+  if (adHocCommand) {
+    // --- Ad-hoc session: raw shell command, no app config lookup ---
     effectiveConfig = {
       command: adHocCommand,
-      type: 'job',
+      type: (adHocType || 'pty') as 'pty' | 'web' | 'job',
       title: adHocTitle || adHocCommand.slice(0, 40),
       ...(cwdOverride ? { cwd: cwdOverride } : {}),
       ...(Object.keys(envOverride).length ? { env: envOverride } : {}),
       ...(adHocNoBanner ? { noBanner: true } : {}),
     };
-    sessionLabel = appKey || 'job';
+    sessionLabel = appKey || adHocType || 'pty';
   } else if (skillName) {
     // --- Skill path: build config from _skills defaults, agent tool resolves the skill ---
     effectiveConfig = buildSkillConfig(skillName, input, mode, cwdOverride || undefined, Object.keys(envOverride).length ? envOverride : undefined);
