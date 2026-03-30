@@ -148,6 +148,18 @@ Apps load from three layers (field-level merge):
 
 Keys starting with `_` are reserved (e.g. `_skills`).
 
+## `wsh new` Positional Args
+
+The positional arg meaning depends on mode:
+
+| Mode | Positional args | `input` field |
+|------|----------------|---------------|
+| **App** (default) | First = app key (default `bash`) | Remaining args joined — only used if app has a `skill` field (`$INPUT` env) |
+| **Skill** (`--skill`) | All positionals are input | Joined → `$INPUT` env |
+| **Ad-hoc** (`--type`/`--command`) | First = fallback command if `--command` absent | Not used |
+
+For regular (non-skill) apps, trailing positionals after the app key are accepted but silently discarded.
+
 ## Web App Proxy
 
 Apps must be proxy-aware and configure their own base URL using `$WSH_BASE_URL`. The proxy does not rewrite `Location` headers or `Set-Cookie` paths.
