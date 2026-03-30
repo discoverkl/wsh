@@ -320,8 +320,13 @@ python3:
   console.log('Run "wsh apps init" to create a starter user config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
-  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [--cwd <dir>] [--env KEY=VALUE] [--skill <name>] [--type <type>] [--command <cmd>] [--title <title>] [app-key] [input...]', [
+  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [--cwd <dir>] [--env KEY=VALUE] [--skill <name>] [--type <type>] [--command <cmd>] [--title <title>] [app-key|command] [input...]', [
     '', 'Create a new session and print its URL.',
+    '',
+    'Modes:',
+    '  wsh new [app-key]                     Open a registered app (default: bash)',
+    '  wsh new --type pty|web|job <command>   Run an ad-hoc shell command',
+    '  echo "cmd" | wsh new --type pty        Read command from stdin',
     '', 'Options:',
     '  -p, --port <port>       Server port (default: auto from ~/.wsh/port)',
     '  -s, --session <id>      Reuse a specific session ID',
@@ -329,8 +334,8 @@ python3:
     '  --cwd <dir>             Override working directory for the session',
     '  --env KEY=VALUE         Set environment variable (repeatable)',
     '  --skill <name>          Run a skill instead of an app',
-    '  --type <type>           Session type: pty, web, or job',
-    '  --command <cmd>         Ad-hoc command to run (used with --type job)',
+    '  --type <type>           Ad-hoc session type: pty, web, or job',
+    '  --command <cmd>         Ad-hoc shell command (alternative to positional arg / stdin)',
     '  --title <title>         Session title',
     '  --id-only               Print only the session ID (no URL)',
     '  --no-banner             Suppress command banner in job output',
@@ -406,8 +411,26 @@ python3:
   const notify = notifyIdx !== -1;
   if (notifyIdx !== -1) subArgs.splice(notifyIdx, 1);
   const positionalArgs = subArgs.filter(a => !a.startsWith('-'));
-  const appKey = positionalArgs[0] || (skillFlag ? '' : (commandFlag ? '' : 'bash'));
-  const input = skillFlag ? positionalArgs.join(' ') : positionalArgs.slice(1).join(' ');
+
+  // Ad-hoc mode: --type or --command present → first positional is the command (shell expression)
+  const adHocMode = !!(typeFlag || commandFlag);
+  let appKey: string;
+  let input: string;
+  if (adHocMode) {
+    if (!commandFlag && positionalArgs[0]) commandFlag = positionalArgs[0];
+    if (!commandFlag && !process.stdin.isTTY) {
+      try { commandFlag = fs.readFileSync(0, 'utf8').trim(); } catch {}
+    }
+    if (!commandFlag) {
+      console.error('Error: No command provided. Pass as argument, --command, or stdin.');
+      process.exit(1);
+    }
+    appKey = '';
+    input = '';
+  } else {
+    appKey = positionalArgs[0] || (skillFlag ? '' : 'bash');
+    input = skillFlag ? positionalArgs.join(' ') : positionalArgs.slice(1).join(' ');
+  }
   let basePath = process.env.WSH_BASE_PATH || '/';
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
   if (!basePath.endsWith('/')) basePath += '/';
