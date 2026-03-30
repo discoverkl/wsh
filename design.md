@@ -148,17 +148,17 @@ Apps load from three layers (field-level merge):
 
 Keys starting with `_` are reserved (e.g. `_skills`).
 
+**Ordering**: `top: N` (positive integer) promotes an app to the top of its section (skills/apps independently), sorted by value ascending. `hidden: true` pushes to the bottom. `top: 0` explicitly overrides a system-level `top`. Catalog display order: topped → normal → hidden.
+
 ## `wsh new` Positional Args
 
 The positional arg meaning depends on mode:
 
-| Mode | Positional args | `input` field |
-|------|----------------|---------------|
-| **App** (default) | First = app key (default `bash`) | Remaining args joined — only used if app has a `skill` field (`$INPUT` env) |
-| **Skill** (`--skill`) | All positionals are input | Joined → `$INPUT` env |
-| **Ad-hoc** (`--type`/`--command`) | First = fallback command if `--command` absent | Not used |
-
-For regular (non-skill) apps, trailing positionals after the app key are accepted but silently discarded.
+| Mode | Positional args |
+|------|----------------|
+| **App** (default) | `[app-key]` — app to run (default `bash`). Extra positionals are an error. |
+| **Skill** (`--skill`) | `[words...]` — all joined → `$INPUT` env var |
+| **Ad-hoc** (`--type`/`-c`) | None. Command via `-c`/`--command` or stdin. Positionals are an error. |
 
 ## Web App Proxy
 
@@ -185,7 +185,7 @@ All RPC is `eval` — the server delivers JavaScript to connected browser client
 
 **Built-in `api` functions** (`src/api.ts`): `api.toast(msg)` — toast notifications (text/html, raw mode, configurable duration, swipe-to-dismiss). Catalog adds `api.refreshCatalog()`, `api.sessionReady()`. Web app pages add `api.getSnapshot()` — returns a full app snapshot (DOM, console, network, storage) for skill agents.
 
-**Transport**: OSC 777 escape sequences (`\x1b]777;wsh:eval;<code>\x07`) or HTTP POST to `/api/rpc`.
+**Transport**: HTTP POST to `/api/rpc`.
 
 ## Skills
 

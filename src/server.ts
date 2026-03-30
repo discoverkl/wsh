@@ -320,12 +320,12 @@ python3:
   console.log('Run "wsh apps init" to create a starter user config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
-  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [--cwd <dir>] [--env KEY=VALUE] [--skill <name>] [--type <type>] [--command <cmd>] [--title <title>] [app-key|command] [input...]', [
+  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [--cwd <dir>] [--env KEY=VALUE] [--skill <name>] [--type <type>] [-c <cmd>] [--title <title>] [app-key] [input...]', [
     '', 'Create a new session and print its URL.',
     '',
     'Modes:',
     '  wsh new [app-key]                     Open a registered app (default: bash)',
-    '  wsh new --type pty|web|job <command>   Run an ad-hoc shell command',
+    '  wsh new --type pty -c <command>        Run an ad-hoc shell command',
     '  echo "cmd" | wsh new --type pty        Read command from stdin',
     '', 'Options:',
     '  -p, --port <port>       Server port (default: auto from ~/.wsh/port)',
@@ -335,7 +335,7 @@ python3:
     '  --env KEY=VALUE         Set environment variable (repeatable)',
     '  --skill <name>          Run a skill instead of an app',
     '  --type <type>           Ad-hoc session type: pty, web, or job',
-    '  --command <cmd>         Ad-hoc shell command (alternative to positional arg / stdin)',
+    '  -c, --command <cmd>     Shell command (required for ad-hoc; via flag or stdin)',
     '  --title <title>         Session title',
     '  --id-only               Print only the session ID (no URL)',
     '  --no-banner             Suppress command banner in job output',
@@ -388,7 +388,7 @@ python3:
   }
 
   let commandFlag = '';
-  const commandIdx = subArgs.findIndex(a => a === '--command');
+  const commandIdx = subArgs.findIndex(a => a === '--command' || a === '-c');
   if (commandIdx !== -1 && subArgs[commandIdx + 1]) {
     commandFlag = subArgs[commandIdx + 1];
     subArgs.splice(commandIdx, 2);
@@ -417,19 +417,26 @@ python3:
   let appKey: string;
   let input: string;
   if (adHocMode) {
-    if (!commandFlag && positionalArgs[0]) commandFlag = positionalArgs[0];
+    if (positionalArgs.length) {
+      console.error(`Error: Unexpected positional arguments in ad-hoc mode: ${positionalArgs.join(' ')}. Use -c/--command or stdin.`);
+      process.exit(1);
+    }
     if (!commandFlag && !process.stdin.isTTY) {
       try { commandFlag = fs.readFileSync(0, 'utf8').trim(); } catch {}
     }
     if (!commandFlag) {
-      console.error('Error: No command provided. Pass as argument, --command, or stdin.');
+      console.error('Error: No command provided. Use -c/--command or stdin.');
       process.exit(1);
     }
     appKey = '';
     input = '';
   } else {
     appKey = positionalArgs[0] || (skillFlag ? '' : 'bash');
-    input = skillFlag ? positionalArgs.join(' ') : positionalArgs.slice(1).join(' ');
+    if (!skillFlag && positionalArgs.length > 1) {
+      console.error(`Error: Unexpected arguments: ${positionalArgs.slice(1).join(' ')}. Quote the command if it contains spaces.`);
+      process.exit(1);
+    }
+    input = skillFlag ? positionalArgs.join(' ') : '';
   }
   let basePath = process.env.WSH_BASE_PATH || '/';
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
@@ -1378,6 +1385,7 @@ interface AppConfig {
   icon?: string;
   description?: string;
   hidden?: boolean;
+  top?: number;
   skill?: string;
   type?: 'pty' | 'web' | 'job';
   timeout?: string;
@@ -1494,7 +1502,19 @@ function loadApps(warnings?: string[]): Record<string, AppConfig> {
       }
     }
   }
-  return apps;
+  // Sort: topped (by value asc), normal, hidden
+  const sorted = Object.entries(apps).sort(([, a], [, b]) => {
+    const tierOf = (app: AppConfig) => {
+      if (app.hidden) return 2;
+      if (typeof app.top === 'number' && app.top > 0) return 0;
+      return 1;
+    };
+    const ta = tierOf(a), tb = tierOf(b);
+    if (ta !== tb) return ta - tb;
+    if (ta === 0) return (a.top as number) - (b.top as number);
+    return 0;
+  });
+  return Object.fromEntries(sorted);
 }
 
 /** Build an AppConfig for running a skill by name. Uses _skills defaults from apps.yaml. */
@@ -1730,6 +1750,7 @@ router.get('/api/apps', (_req: express.Request, res: express.Response) => {
       type: app.type ?? 'pty',
       access: app.access ?? null,
       hidden: app.hidden ? true : undefined,
+      top: typeof app.top === 'number' && app.top > 0 ? app.top : undefined,
       _raw: app,
     }));
   res.json({ apps: list, ...(warnings.length ? { warnings } : {}) });
@@ -1769,6 +1790,62 @@ router.post('/api/apps/:key/hide', (req: express.Request, res: express.Response)
     userConfig[appKey] = { hidden: true };
   } else {
     (userConfig[appKey] as any).hidden = true;
+  }
+  fs.mkdirSync(userDir, { recursive: true });
+  fs.writeFileSync(userFile, YAML.stringify(userConfig), 'utf8');
+  res.json({ ok: true });
+});
+
+router.post('/api/apps/:key/top', (req: express.Request, res: express.Response) => {
+  const appKey = req.params.key;
+  const apps = loadApps();
+  if (!apps[appKey]) { res.status(404).json({ error: 'App not found' }); return; }
+  if (typeof apps[appKey].top === 'number' && apps[appKey].top! > 0) { res.json({ ok: true }); return; }
+
+  // Find next available top value within the same section (skills vs apps)
+  const isSkill = !!apps[appKey].skill;
+  const maxTop = Math.max(0, ...Object.values(apps)
+    .filter(a => !!a.skill === isSkill && typeof a.top === 'number' && a.top > 0)
+    .map(a => a.top as number));
+
+  const userDir = path.join(os.homedir(), '.wsh');
+  const userFile = path.join(userDir, 'apps.yaml');
+  let userConfig: Record<string, unknown> = {};
+  try { userConfig = YAML.parse(fs.readFileSync(userFile, 'utf8')) ?? {}; } catch {}
+  if (!userConfig[appKey] || typeof userConfig[appKey] !== 'object') {
+    userConfig[appKey] = { top: maxTop + 1 };
+  } else {
+    (userConfig[appKey] as any).top = maxTop + 1;
+  }
+  fs.mkdirSync(userDir, { recursive: true });
+  fs.writeFileSync(userFile, YAML.stringify(userConfig), 'utf8');
+  res.json({ ok: true });
+});
+
+router.post('/api/apps/:key/untop', (req: express.Request, res: express.Response) => {
+  const appKey = req.params.key;
+  const apps = loadApps();
+  if (!apps[appKey]) { res.status(404).json({ error: 'App not found' }); return; }
+  if (!(typeof apps[appKey].top === 'number' && apps[appKey].top! > 0)) { res.json({ ok: true }); return; }
+
+  // Check if system config has a top for this key
+  const systemConfig = loadConfigFile(SYSTEM_CONFIG_DIR);
+  const systemHasTop = systemConfig && typeof systemConfig === 'object' &&
+    systemConfig[appKey] && typeof systemConfig[appKey] === 'object' &&
+    typeof (systemConfig[appKey] as any).top === 'number' && (systemConfig[appKey] as any).top > 0;
+
+  const userDir = path.join(os.homedir(), '.wsh');
+  const userFile = path.join(userDir, 'apps.yaml');
+  let userConfig: Record<string, unknown> = {};
+  try { userConfig = YAML.parse(fs.readFileSync(userFile, 'utf8')) ?? {}; } catch {}
+  if (!userConfig[appKey] || typeof userConfig[appKey] !== 'object') {
+    userConfig[appKey] = { top: systemHasTop ? 0 : undefined };
+  } else {
+    if (systemHasTop) {
+      (userConfig[appKey] as any).top = 0;
+    } else {
+      delete (userConfig[appKey] as any).top;
+    }
   }
   fs.mkdirSync(userDir, { recursive: true });
   fs.writeFileSync(userFile, YAML.stringify(userConfig), 'utf8');
