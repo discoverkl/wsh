@@ -288,12 +288,21 @@ api.toast = (msgOrOpts: string | ToastOptions = '') => {
   el.appendChild(close);
 
   // Progress
+  let progressEl: HTMLDivElement | null = null;
   if (!raw && duration > 0) {
-    const progress = document.createElement('div');
-    progress.className = 'wsh-toast-progress';
-    progress.style.animationDuration = duration + 'ms';
-    el.appendChild(progress);
+    progressEl = document.createElement('div');
+    progressEl.className = 'wsh-toast-progress';
+    progressEl.style.animationDuration = duration + 'ms';
+    el.appendChild(progressEl);
   }
+
+  // Click/tap to pin — cancel auto-dismiss so user can read/copy content
+  let dismissTimer: ReturnType<typeof setTimeout> | null = null;
+  el.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).closest('.wsh-toast-close')) return;
+    if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
+    if (progressEl) progressEl.remove();
+  });
 
   // Swipe to dismiss (touch)
   let startX = 0;
@@ -344,7 +353,7 @@ api.toast = (msgOrOpts: string | ToastOptions = '') => {
   }
 
   if (duration > 0) {
-    setTimeout(() => {
+    dismissTimer = setTimeout(() => {
       if (el.parentNode) dismissToast(el);
     }, duration);
   }
