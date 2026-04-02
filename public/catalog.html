@@ -937,6 +937,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     div.dataset.app = app.key;
     div.dataset.title = app.title;
     div.dataset.desc = resolveDescription(app);
+    if (app.slashPrefix === false) div.dataset.slashPrefix = '0';
     if (isHidden) div.dataset.hidden = '1';
     if (isTopped) div.dataset.top = '1';
     var badges = isHidden
@@ -1754,7 +1755,8 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     if (existing && existing.isAlive() && !newTabFlag) {
       if (!input) { existing.send('\r'); ta.value = ''; ta.style.height = 'auto'; saveDraft(appKey, ''); return; }
       var raw = input[0] === '/' || input[0] === '?' || input[0] === '!';
-      existing.send(raw ? input + '\r' : '/' + appKey + ' ' + input + '\r');
+      var usePrefix = card.dataset.slashPrefix !== '0';
+      existing.send(raw ? input + '\r' : (usePrefix ? '/' + appKey + ' ' : '') + input + '\r');
       ta.value = '';
       ta.style.height = 'auto';
       saveDraft(appKey, '');
