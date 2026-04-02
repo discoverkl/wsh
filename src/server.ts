@@ -1389,6 +1389,7 @@ interface AppConfig {
   hidden?: boolean;
   top?: number;
   skill?: string;
+  slashPrefix?: boolean;
   type?: 'pty' | 'web' | 'job';
   timeout?: string;
   access?: 'public' | 'private';
@@ -1538,6 +1539,14 @@ function buildSkillConfig(skillName: string, input: string, mode: string, cwd?: 
     },
   };
   if (cwd) config.cwd = cwd;
+  return applySlashPrefix(config);
+}
+
+/** Strip /$SKILL from command when slashPrefix is false. */
+function applySlashPrefix(config: AppConfig): AppConfig {
+  if (config.skill && config.slashPrefix === false) {
+    return { ...config, command: config.command.replace(/\/\$SKILL\s?/, '') };
+  }
   return config;
 }
 
@@ -1749,6 +1758,7 @@ router.get('/api/apps', (_req: express.Request, res: express.Response) => {
       icon: app.icon ?? null,
       description: app.description ?? null,
       skill: app.skill ?? null,
+      slashPrefix: app.slashPrefix ?? true,
       type: app.type ?? 'pty',
       access: app.access ?? null,
       hidden: app.hidden ? true : undefined,
@@ -2192,11 +2202,11 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     effectiveConfig = appConfig;
     if (appConfig.skill) {
       const useInline = mode === 'inline' && appConfig.inlineCommand;
-      effectiveConfig = {
+      effectiveConfig = applySlashPrefix({
         ...appConfig,
         ...(useInline ? { command: appConfig.inlineCommand! } : {}),
         env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input, ...(mode ? { WSH_MODE: mode } : {}) },
-      };
+      });
     }
 
     // Apply runtime cwd/env overrides
@@ -2541,11 +2551,11 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
         const wsInput = url.searchParams.get('input') || '';
         const wsMode = url.searchParams.get('mode') || '';
         const useInline = wsMode === 'inline' && appConfig.inlineCommand;
-        effectiveConfig = {
+        effectiveConfig = applySlashPrefix({
           ...appConfig,
           ...(useInline ? { command: appConfig.inlineCommand! } : {}),
           env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: wsInput, ...(wsMode ? { WSH_MODE: wsMode } : {}) },
-        };
+        });
       }
       sessionLabel = appKey;
     }
