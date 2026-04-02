@@ -65,7 +65,11 @@ mv "$TMP" "$BIN"
 chmod +x "$BIN"
 
 ok "Installed to $BIN"
-VERSION=$("$BIN" --version 2>/dev/null) && info "Version: $VERSION"
+if VERSION=$("$BIN" --version 2>/dev/null); then
+  info "Version: $VERSION"
+else
+  info "Warning: 'wsh --version' failed (first-run setup may have failed)"
+fi
 
 # ---- PATH hint ----
 case ":${PATH}:" in
