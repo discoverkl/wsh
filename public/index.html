@@ -393,10 +393,63 @@
       background: #1e1e2e;
       z-index: 2;
     }
+    #web-loading .loading-bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 30%;
+      height: 2px;
+      background: var(--loading-accent, #89b4fa);
+      box-shadow: 0 0 8px var(--loading-accent, #89b4fa);
+      border-radius: 0 1px 1px 0;
+      animation: loading-slide 1.8s ease-in-out infinite;
+    }
+    @keyframes loading-slide {
+      0% { left: -30%; }
+      100% { left: 100%; }
+    }
+    #web-loading .loading-icon {
+      width: 48px;
+      height: 48px;
+      color: #6c7086;
+      animation: loading-fade-in 0.4s ease both, icon-breathe 2.5s ease-in-out 0.4s infinite;
+    }
+    @keyframes icon-breathe {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.15); opacity: 0.7; }
+    }
+    #web-loading .loading-icon:empty { display: none; }
+    #web-loading .loading-icon svg {
+      width: 100%;
+      height: 100%;
+    }
+    #web-loading .loading-title {
+      color: #cdd6f4;
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    #web-loading .loading-title:empty { display: none; }
     #web-loading .loading-text {
       color: #6c7086;
       font-size: 13px;
       letter-spacing: 0.03em;
+      transition: opacity 0.3s ease;
+    }
+    #web-loading .loading-title,
+    #web-loading .loading-text {
+      animation: loading-fade-in 0.4s ease both;
+    }
+    #web-loading .loading-title { animation-delay: 0.05s; }
+    #web-loading .loading-text { animation-delay: 0.1s; }
+    @keyframes loading-fade-in {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    #web-loading.fade-out {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
     }
 
     /* html.web light theme */
@@ -420,6 +473,15 @@
     }
     html.web #web-loading {
       background: #fff;
+    }
+    html.web #web-loading .loading-bar {
+      background: #3b82f6;
+    }
+    html.web #web-loading .loading-icon {
+      color: #86868b;
+    }
+    html.web #web-loading .loading-title {
+      color: #1d1d1f;
     }
     html.web #web-loading .loading-text {
       color: #86868b;
@@ -1060,21 +1122,10 @@
       </div>
       <div id="web-container" hidden>
         <div id="web-loading">
-          <svg width="40" height="10" viewBox="0 0 40 10">
-            <circle cx="5" cy="5" r="4" fill="#86868b" opacity="0.6">
-              <animate attributeName="opacity" values="0.6;1;0.6" dur="1.2s" repeatCount="indefinite" begin="0s"/>
-              <animate attributeName="r" values="3;4.5;3" dur="1.2s" repeatCount="indefinite" begin="0s"/>
-            </circle>
-            <circle cx="20" cy="5" r="4" fill="#86868b" opacity="0.6">
-              <animate attributeName="opacity" values="0.6;1;0.6" dur="1.2s" repeatCount="indefinite" begin="0.2s"/>
-              <animate attributeName="r" values="3;4.5;3" dur="1.2s" repeatCount="indefinite" begin="0.2s"/>
-            </circle>
-            <circle cx="35" cy="5" r="4" fill="#86868b" opacity="0.6">
-              <animate attributeName="opacity" values="0.6;1;0.6" dur="1.2s" repeatCount="indefinite" begin="0.4s"/>
-              <animate attributeName="r" values="3;4.5;3" dur="1.2s" repeatCount="indefinite" begin="0.4s"/>
-            </circle>
-          </svg>
-          <div class="loading-text">Starting up…</div>
+          <div class="loading-bar"></div>
+          <div class="loading-icon" id="loading-icon"></div>
+          <div class="loading-title" id="loading-title"></div>
+          <div class="loading-text" id="loading-text">Starting up…</div>
         </div>
         <iframe id="web-frame"></iframe>
       </div>
@@ -1101,6 +1152,40 @@
   </div>
 
   <div id="agent-bubble"></div>
+  <script>
+    (function() {
+      var tips = [
+        "Give me a sec\u2026",
+        "Hold on, waking up\u2026",
+        "Let me get my things together\u2026",
+        "I\u2019m almost ready\u2026",
+        "Just a moment\u2026",
+        "Booting up, bear with me\u2026",
+        "Stretching my pixels\u2026",
+        "One sec, coming to life\u2026",
+        "Warming up\u2026",
+        "Getting myself together\u2026",
+      ];
+      var el = document.getElementById('loading-text');
+      if (!el) return;
+      // Shuffle so we don't repeat until the pool is exhausted
+      var pool = tips.slice();
+      for (var i = pool.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
+      }
+      var idx = 0;
+      el.textContent = pool[idx++];
+      window.__loadingTipTimer = setInterval(function() {
+        el.style.opacity = '0';
+        setTimeout(function() {
+          if (idx >= pool.length) idx = 0;
+          el.textContent = pool[idx++];
+          el.style.opacity = '1';
+        }, 300);
+      }, 2500);
+    })();
+  </script>
   <script>
     (function() {
       var btns = document.querySelectorAll('.app-avatar-btn');
@@ -1182,6 +1267,7 @@
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js"></script>
+  <script src="icons.js"></script>
   <script type="module" src="client.js"></script>
 </body>
 </html>

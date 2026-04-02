@@ -75,7 +75,7 @@ const hadSession = location.hash.length > 1;
 // Everything after it is the app hash, passed through to web app iframes.
 // Writer share links embed the token as a query param: #id?wt=...
 // Viewer share links are just #id — the session ID alone is the viewer secret.
-function getSessionParams(): { sessionId: string; wtoken: string | null } {
+function getSessionParams(): { sessionId: string | null; wtoken: string | null } {
   const hash = location.hash.slice(1);
   // Split off the wtoken query param (always at the end of the session ID segment).
   const q = hash.indexOf('?');
@@ -83,34 +83,43 @@ function getSessionParams(): { sessionId: string; wtoken: string | null } {
   const params = q >= 0 ? new URLSearchParams(hash.slice(q + 1)) : null;
   // Split session ID from app hash at the first '/'.
   const slash = beforeQuery.indexOf('/');
-  let id = slash >= 0 ? beforeQuery.slice(0, slash) : beforeQuery;
-  const appHash = slash >= 0 ? beforeQuery.slice(slash + 1) : '';
+  const id = slash >= 0 ? beforeQuery.slice(0, slash) : beforeQuery;
   if (!id) {
-    id = (crypto.getRandomValues(new Uint32Array(1))[0] % 2176782336).toString(36).padStart(6, '0');
+    // No session ID in URL — server will assign one.
+    return { sessionId: null, wtoken: null };
   }
-  // Always rewrite the hash to strip ?wt= (if present) so it doesn't leak
+  const appHash = slash >= 0 ? beforeQuery.slice(slash + 1) : '';
+  // Rewrite the hash to strip ?wt= (if present) so it doesn't leak
   // into getAppHash() or become visible to embedded web apps.
   history.replaceState(null, '', `#${id}${appHash ? '/' + appHash : ''}`);
   return { sessionId: id, wtoken: params?.get('wt') ?? null };
 }
 
-const { sessionId, wtoken } = getSessionParams();
+let { sessionId, wtoken } = getSessionParams();
 
 // --- Hash passthrough for web apps ---
 // The parent URL hash has the form #sessionId/app/path. The part after the
 // first '/' is the "app hash" which is relayed to/from the web app iframe.
 
-/** Read the current app hash from location.hash (everything after sessionId + first '/'). */
+/** Read the current app hash from location.hash.
+ *  For TUI apps the hash is #sessionId/app/hash — strip the session prefix.
+ *  For web apps the hash is just #app/hash (no session prefix). */
 function getAppHash(): string {
   const hash = location.hash.slice(1);
+  if (appType === 'web') return hash;
   const slash = hash.indexOf('/');
   return slash >= 0 ? hash.slice(slash + 1) : '';
 }
 
-/** Update the parent URL hash, preserving the session ID prefix. */
+/** Update the parent URL hash.
+ *  TUI apps: #sessionId/appHash.  Web apps: #appHash (no session prefix). */
 function setParentHash(appHash: string): void {
-  const newHash = appHash ? `${sessionId}/${appHash}` : sessionId;
-  history.replaceState(null, '', `#${newHash}`);
+  if (appType === 'web') {
+    history.replaceState(null, '', appHash ? `#${appHash}` : location.pathname);
+  } else {
+    const newHash = appHash ? `${sessionId}/${appHash}` : (sessionId || '');
+    history.replaceState(null, '', `#${newHash}`);
+  }
 }
 
 let hashSyncActive = false;
@@ -160,21 +169,24 @@ document.title = appName;
 // First load without hash → creating session → 'active'.
 // First load with hash    → joining existing → 'viewer'.
 // Refresh                 → key persists, preserving the user's choice.
-const ROLE_KEY = `wsh_role_${sessionId}`;
-if (!sessionStorage.getItem(ROLE_KEY)) {
+let ROLE_KEY = sessionId ? `wsh_role_${sessionId}` : '';
+if (ROLE_KEY && !sessionStorage.getItem(ROLE_KEY)) {
   sessionStorage.setItem(ROLE_KEY, hadSession ? 'viewer' : 'active');
+}
+
+/** Finalize ROLE_KEY once the server assigns a session ID. */
+function initRoleKey(id: string): void {
+  if (ROLE_KEY) return;
+  ROLE_KEY = `wsh_role_${id}`;
+  sessionStorage.setItem(ROLE_KEY, 'active'); // creator is always active
 }
 let isOwner = false;
 
 document.getElementById('titlebar')!.addEventListener('mousedown', e => e.preventDefault());
 
 document.getElementById('new-session')!.addEventListener('click', () => {
-  if (appType === 'web') {
-    // Web apps: open another tab to the same session
-    window.open(`${location.origin}${serverBase}/${appName}#${sessionId}`, '_blank');
-  } else {
-    window.open(`${location.origin}${serverBase}/${appName}`, '_blank');
-  }
+  // Web apps: server finds singleton automatically. TUI: new session each time.
+  window.open(`${location.origin}${serverBase}/${appName}`, '_blank');
 });
 
 let userRequestedClose = false;
@@ -245,8 +257,9 @@ document.addEventListener('fullscreenchange', () => {
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 
 function buildWsQuery(): URLSearchParams {
-  const isViewer = sessionStorage.getItem(ROLE_KEY) === 'viewer';
-  const query = new URLSearchParams({ session: sessionId });
+  const isViewer = ROLE_KEY ? sessionStorage.getItem(ROLE_KEY) === 'viewer' : false;
+  const query = new URLSearchParams();
+  if (sessionId) query.set('session', sessionId);
   query.set('app', appName);
   if (wtoken && !isViewer) query.set('wtoken', wtoken);
   if (isViewer) query.set('yield', '1');
@@ -331,11 +344,22 @@ function connect(): void {
     } else if (typeof event.data === 'string') {
       if (handleWshRpc(event, document, makeResponder(ws))) return;
       try {
-        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; cwd?: string; base?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string; session?: string };
+        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; cwd?: string; base?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string; session?: string; icon?: string; title?: string };
         if (msg.type === 'role' && msg.role) {
           if (msg.cwd) sessionCwd = msg.cwd;
           if (msg.base) serverBase = msg.base.replace(/\/+$/, '');
           if (msg.appType === 'web') appType = 'web';
+          if (msg.title) { windowTitle.textContent = msg.title; document.title = msg.title; }
+          // Server-assigned session ID (for new sessions created without a hash).
+          if (msg.session && !sessionId) {
+            sessionId = msg.session;
+            initRoleKey(sessionId);
+            // Put session ID in hash for TUI apps (needed for share links / reconnect).
+            // Web apps don't need it — singletons are found by app name.
+            if (appType !== 'web') {
+              history.replaceState(null, '', `#${sessionId}`);
+            }
+          }
           ws.send(JSON.stringify({ type: 'origin', origin: location.origin }));
           applyRole(msg.role, msg.credential);
           const desktop = document.getElementById('desktop')!;
@@ -350,6 +374,21 @@ function connect(): void {
               document.getElementById('shortcut-bar')!.classList.add('hidden');
               document.getElementById('input-toggle')!.setAttribute('hidden', '');
               term.options.convertEol = true;
+              // Populate loading screen with app identity
+              const loadingIcon = document.getElementById('loading-icon');
+              const loadingTitle = document.getElementById('loading-title');
+              if (loadingIcon && typeof (window as any).resolveIcon === 'function') {
+                const resolved = (window as any).resolveIcon(msg.icon || msg.app || appName);
+                loadingIcon.innerHTML = resolved.svg;
+                const color = (window as any).wshIconColors?.[resolved.id];
+                if (color) {
+                  loadingIcon.style.color = color;
+                  document.getElementById('web-loading')!.style.setProperty('--loading-accent', color);
+                }
+              }
+              if (loadingTitle) {
+                loadingTitle.textContent = msg.title || appName;
+              }
             } else {
               document.getElementById('terminal-container')!.removeAttribute('hidden');
             }
@@ -368,7 +407,10 @@ function connect(): void {
           if (!iframe.src || iframe.src === 'about:blank') {
             iframe.src = targetSrc;
             iframe.addEventListener('load', () => {
-              document.getElementById('web-loading')!.setAttribute('hidden', '');
+              const loadingEl = document.getElementById('web-loading')!;
+              loadingEl.classList.add('fade-out');
+              if ((window as any).__loadingTipTimer) clearInterval((window as any).__loadingTipTimer);
+              setTimeout(() => loadingEl.setAttribute('hidden', ''), 300);
               iframe.classList.add('loaded');
               focusWebFrame();
               startHealthCheck();
@@ -381,13 +423,6 @@ function connect(): void {
           }
         }
         if (msg.type === 'pin' && typeof msg.pinned === 'boolean') applyPinState(msg.pinned);
-        if (msg.type === 'redirect' && msg.session) {
-          // Server is redirecting us to an existing singleton web session; preserve app hash.
-          const redirectAppHash = getAppHash();
-          history.replaceState(null, '', `#${msg.session}${redirectAppHash ? '/' + redirectAppHash : ''}`);
-          location.reload();
-          return;
-        }
       } catch { /* ignore */ }
     }
   });
@@ -487,7 +522,7 @@ document.querySelectorAll('.app-avatar-btn').forEach(btn => btn.addEventListener
   allBtns.forEach(b => b.classList.add('loading'));
 
   try {
-    let desc = gatherAppSnapshot({ appName, sessionId, sessionCwd, currentRole, appType });
+    let desc = gatherAppSnapshot({ appName, sessionId: sessionId!, sessionCwd, currentRole, appType });
     const lastTip = (window as any).__lastBubbleTip as string | undefined;
     const health = (window as any).__appHealth as AppHealth | null;
     if (lastTip) {
@@ -523,7 +558,7 @@ document.querySelectorAll('.app-avatar-btn').forEach(btn => btn.addEventListener
 
 // api.getSnapshot — callable via `wsh rpc --session <id> 'api.getSnapshot()'`
 (window as any).api.getSnapshot = () =>
-  gatherAppSnapshot({ appName, sessionId, sessionCwd, currentRole, appType });
+  gatherAppSnapshot({ appName, sessionId: sessionId!, sessionCwd, currentRole, appType });
 
 function sendAction(msg: Record<string, unknown>): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));

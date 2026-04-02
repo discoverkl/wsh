@@ -794,6 +794,7 @@ interface SessionFields {
   timeoutMs?: number;
   access?: 'public' | 'private';
   stripPrefix?: boolean;
+  icon?: string;
   exitCode?: number | null;
   /** When set, PTY spawn is deferred until the first resize message. */
   pendingConfig?: AppConfig;
@@ -931,6 +932,7 @@ function baseSession(appKey: string, appConfig: AppConfig): Session {
     cleanupTimer: null,
     pinned: false,
     title: appConfig.title ?? path.basename(appConfig.command),
+    icon: appConfig.icon,
     app: appKey,
     cwd: resolveCwd(appConfig),
     createdAt: now,
@@ -2319,7 +2321,7 @@ function sendRoleMessage(ws: WebSocket, sessionId: string, session: Session, rol
   const pinnedOther = role === 'owner'
     ? [...sessions.entries()].filter(([sid, s]) => sid !== sessionId && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
     : undefined;
-  ws.send(JSON.stringify({ type: 'role', role, credential, app: session.app, appType: session.appType, cwd: session.cwd, base: BASE, ...(role === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
+  ws.send(JSON.stringify({ type: 'role', role, credential, session: sessionId, app: session.app, appType: session.appType, cwd: session.cwd, base: BASE, icon: session.icon, title: session.title, ...(role === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
 }
 
 function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -2416,9 +2418,7 @@ if (networkServer) networkServer.on('upgrade', handleUpgrade);
 
 wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-  const id  = url.searchParams.get('session');
-
-  if (!id) { console.log('[ws] rejected: no session ID'); ws.close(4000, 'session ID required'); return; }
+  let id  = url.searchParams.get('session');
 
   // Control-only connection: receives broadcast RPCs, no session needed.
   if (id === '_rpc') {
@@ -2432,6 +2432,13 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     });
     ws.on('close', () => rpcClients.delete(ws));
     return;
+  }
+
+  // No session ID → server generates one (only owners may create sessions).
+  if (!id) {
+    const cred = getRoleForSession(req, '') ?? 'viewer';
+    if (cred !== 'owner') { ws.close(4000, 'session ID required'); return; }
+    id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
   }
 
   console.log(`[ws] connect session=${id} url=${req.url}`);
@@ -2520,13 +2527,12 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       const appKey = apps[requestedApp] ? requestedApp : 'bash';
       const appConfig = apps[appKey];
 
-      // Web apps are singletons: redirect to existing session if one is running
+      // Web apps are singletons: join existing session if one is running
       if (appConfig.type === 'web') {
         const existing = findWebSession(appKey);
         if (existing) {
-          ws.send(JSON.stringify({ type: 'redirect', session: existing.id }));
-          ws.close(4100, 'redirecting to existing session');
-          return;
+          id = existing.id;
+          session = existing.session;
         }
       }
 
@@ -2544,7 +2550,22 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       sessionLabel = appKey;
     }
 
-    if (effectiveConfig.type === 'job') {
+    if (session) {
+      // Joining existing web singleton — same logic as the existing-session path above.
+      if (session.cleanupTimer !== null) { clearTimeout(session.cleanupTimer); session.cleanupTimer = null; }
+      const effectiveWriter = isWriter || (yields && session.writer === null);
+      if (effectiveWriter) {
+        if (session.writer && session.writer.readyState === WebSocket.OPEN) {
+          session.writer.send(JSON.stringify({ type: 'role', role: 'viewer' }));
+        }
+        session.writer = ws;
+      }
+      const sentRole = (yields && !effectiveWriter) ? 'viewer' : credential;
+      session.peers.set(ws, sentRole);
+      sendRoleMessage(ws, id, session, sentRole, credential);
+      if (session.ready) ws.send(JSON.stringify({ type: 'ready' }));
+      if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
+    } else if (effectiveConfig.type === 'job') {
       try {
         session = spawnJobSession(id, sessionLabel, effectiveConfig);
       } catch (err) {
@@ -2570,15 +2591,18 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
         return;
       }
     }
-    session.writer = ws;
-    session.peers.set(ws, credential);
-    // Cancel the cleanup timer that registerSession started (peers was 0 at creation time).
-    if (session.cleanupTimer !== null) {
-      clearTimeout(session.cleanupTimer);
-      session.cleanupTimer = null;
+    if (!session) { ws.close(1011, 'Failed to create session'); return; }
+    // For newly spawned sessions (not singleton joins), attach writer and send role.
+    if (!session.peers.has(ws)) {
+      session.writer = ws;
+      session.peers.set(ws, credential);
+      if (session.cleanupTimer !== null) {
+        clearTimeout(session.cleanupTimer);
+        session.cleanupTimer = null;
+      }
+      sendRoleMessage(ws, id, session, credential, credential);
+      if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
     }
-    sendRoleMessage(ws, id, session, credential, credential);
-    if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
   }
 
   const currentSession = session;
