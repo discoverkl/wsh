@@ -714,6 +714,53 @@
     .shortcut-text-input:focus {
       background: rgba(205, 214, 244, 0.12);
     }
+    .shortcut-text-input.prefill-glow {
+      animation: prefill-pulse 3s ease-in-out infinite;
+      border: 1px solid transparent;
+    }
+    .shortcut-text-input.prefill-glow:focus {
+      animation: prefill-pulse-focus 3s ease-in-out infinite;
+    }
+    @keyframes prefill-pulse {
+      0%, 100% {
+        border-color: rgba(137, 180, 250, 0.5);
+        box-shadow: 0 0 10px 2px rgba(137, 180, 250, 0.2), 0 0 30px 4px rgba(137, 180, 250, 0.08), inset 0 0 8px rgba(137, 180, 250, 0.06);
+      }
+      25% {
+        border-color: rgba(203, 166, 247, 0.6);
+        box-shadow: 0 0 14px 3px rgba(203, 166, 247, 0.25), 0 0 40px 8px rgba(203, 166, 247, 0.1), inset 0 0 10px rgba(203, 166, 247, 0.08);
+      }
+      50% {
+        border-color: rgba(249, 226, 175, 0.6);
+        box-shadow: 0 0 14px 3px rgba(249, 226, 175, 0.25), 0 0 40px 8px rgba(249, 226, 175, 0.1), inset 0 0 10px rgba(249, 226, 175, 0.08);
+      }
+      75% {
+        border-color: rgba(166, 227, 161, 0.6);
+        box-shadow: 0 0 14px 3px rgba(166, 227, 161, 0.25), 0 0 40px 8px rgba(166, 227, 161, 0.1), inset 0 0 10px rgba(166, 227, 161, 0.08);
+      }
+    }
+    @keyframes prefill-pulse-focus {
+      0%, 100% {
+        border-color: rgba(137, 180, 250, 0.7);
+        box-shadow: 0 0 16px 4px rgba(137, 180, 250, 0.3), 0 0 40px 8px rgba(137, 180, 250, 0.12), inset 0 0 12px rgba(137, 180, 250, 0.1);
+        background: rgba(137, 180, 250, 0.08);
+      }
+      25% {
+        border-color: rgba(203, 166, 247, 0.7);
+        box-shadow: 0 0 18px 5px rgba(203, 166, 247, 0.3), 0 0 45px 10px rgba(203, 166, 247, 0.12), inset 0 0 12px rgba(203, 166, 247, 0.1);
+        background: rgba(203, 166, 247, 0.08);
+      }
+      50% {
+        border-color: rgba(249, 226, 175, 0.7);
+        box-shadow: 0 0 18px 5px rgba(249, 226, 175, 0.3), 0 0 45px 10px rgba(249, 226, 175, 0.12), inset 0 0 12px rgba(249, 226, 175, 0.1);
+        background: rgba(249, 226, 175, 0.08);
+      }
+      75% {
+        border-color: rgba(166, 227, 161, 0.7);
+        box-shadow: 0 0 18px 5px rgba(166, 227, 161, 0.3), 0 0 45px 10px rgba(166, 227, 161, 0.12), inset 0 0 12px rgba(166, 227, 161, 0.1);
+        background: rgba(166, 227, 161, 0.08);
+      }
+    }
     .shortcut-text-input::-webkit-scrollbar { width: 4px; }
     .shortcut-text-input::-webkit-scrollbar-track { background: transparent; }
     .shortcut-text-input::-webkit-scrollbar-thumb { background: #45475a; border-radius: 2px; }
