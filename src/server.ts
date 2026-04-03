@@ -1397,6 +1397,7 @@ interface AppConfig {
   healthCheck?: string;
   startupTimeout?: string;
   noBanner?: boolean;
+  prefixCommand?: string;
 }
 
 const DEFAULT_APPS: Record<string, AppConfig> = {
@@ -1485,6 +1486,7 @@ function extractSkillDefaults(...configs: (Record<string, unknown> | null)[]): P
     const tool = tools[agent];
     if (typeof tool.command === 'string') defaults.command = tool.command;
     if (typeof tool.inline === 'string') defaults.inlineCommand = tool.inline;
+    if (typeof tool.prefix === 'string') defaults.prefixCommand = tool.prefix;
   }
   return defaults;
 }
@@ -1526,20 +1528,20 @@ function buildSkillConfig(skillName: string, input: string, mode: string, cwd?: 
   const user = loadConfigFile(path.join(os.homedir(), '.wsh'));
   const defaults = extractSkillDefaults(system, user);
   const useInline = mode === 'inline' && defaults.inlineCommand;
+  const usePrefix = !input && !useInline && defaults.prefixCommand;
   const config: AppConfig = {
-    command: useInline ? defaults.inlineCommand! : (defaults.command || SKILL_DEFAULTS.command!),
-    skill: skillName,
+    command: usePrefix ? defaults.prefixCommand! : useInline ? defaults.inlineCommand! : (defaults.command || SKILL_DEFAULTS.command!),
+    ...(usePrefix ? {} : { skill: skillName }),
     ...(defaults.cwd ? { cwd: defaults.cwd } : {}),
     env: {
       ...(defaults.env ?? {}),
-      SKILL: skillName,
-      INPUT: input,
+      ...(usePrefix ? {} : { SKILL: skillName, INPUT: input }),
       ...(mode ? { WSH_MODE: mode } : {}),
       ...(envOverride ?? {}),
     },
   };
   if (cwd) config.cwd = cwd;
-  return applySlashPrefix(config);
+  return usePrefix ? config : applySlashPrefix(config);
 }
 
 /** Strip /$SKILL from command when slashPrefix is false. */
@@ -2201,12 +2203,26 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
 
     effectiveConfig = appConfig;
     if (appConfig.skill) {
-      const useInline = mode === 'inline' && appConfig.inlineCommand;
-      effectiveConfig = applySlashPrefix({
-        ...appConfig,
-        ...(useInline ? { command: appConfig.inlineCommand! } : {}),
-        env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input, ...(mode ? { WSH_MODE: mode } : {}) },
-      });
+      const skillDefaults = extractSkillDefaults(loadConfigFile(SYSTEM_CONFIG_DIR), loadConfigFile(path.join(os.homedir(), '.wsh')));
+      const mergedCommand = appConfig.command || skillDefaults.command || SKILL_DEFAULTS.command!;
+      const mergedInline = appConfig.inlineCommand || skillDefaults.inlineCommand;
+      const mergedPrefix = appConfig.prefixCommand || skillDefaults.prefixCommand;
+      const useInline = mode === 'inline' && mergedInline;
+      const usePrefix = !input && !useInline && mergedPrefix;
+      console.log(`[api] skill app path: input=${JSON.stringify(input)} mode=${JSON.stringify(mode)} useInline=${!!useInline} usePrefix=${!!usePrefix} mergedPrefix=${JSON.stringify(mergedPrefix)} mergedCommand=${JSON.stringify(mergedCommand)}`);
+      if (usePrefix) {
+        effectiveConfig = {
+          ...appConfig,
+          command: mergedPrefix!,
+          env: { ...(appConfig.env ?? {}), ...(mode ? { WSH_MODE: mode } : {}) },
+        };
+      } else {
+        effectiveConfig = applySlashPrefix({
+          ...appConfig,
+          command: useInline ? mergedInline! : mergedCommand,
+          env: { ...(appConfig.env ?? {}), SKILL: appConfig.skill, INPUT: input, ...(mode ? { WSH_MODE: mode } : {}) },
+        });
+      }
     }
 
     // Apply runtime cwd/env overrides

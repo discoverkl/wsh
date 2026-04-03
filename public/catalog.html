@@ -668,6 +668,36 @@ header {
   width: 16px;
   height: 16px;
 }
+.skill-newtab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  padding: 0;
+  vertical-align: middle;
+  margin-left: 6px;
+  opacity: 0.4;
+}
+.skill-card:hover .skill-newtab {
+  opacity: 1;
+  color: #a78bfa;
+}
+.skill-newtab:hover {
+  background: rgba(167, 139, 250, 0.2);
+  color: #c4b5fd;
+  opacity: 1;
+}
+.skill-newtab svg {
+  width: 16px;
+  height: 16px;
+}
 .skill-form-footer {
   display: flex;
   align-items: center;
@@ -775,6 +805,8 @@ html.touch .config-gear { opacity: 0.5; width: 44px; height: 44px; top: 6px; rig
 html.touch .card:active { transform: scale(0.98); background: var(--bg-card-hover); transition: none; }
 html.touch .skill-card:active { transform: scale(0.99); background: var(--bg-card-hover); transition: none; }
 html.touch .skill-submit { width: 44px; height: 44px; right: 2px; bottom: 2px; }
+html.touch .skill-newtab { width: 32px; height: 32px; opacity: 0.7; }
+html.touch .skill-newtab svg { width: 16px; height: 16px; }
 
 /* ── Swipe cards base (always present, actions hidden until narrow+touch) ── */
 .card-swipe-wrap {
@@ -948,7 +980,8 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       '<div class="skill-header">' +
         '<div class="card-icon" style="color:#a78bfa">' + icons[iconId] + '</div>' +
         '<div class="skill-info">' +
-          '<span class="card-title">' + escapeHtml(app.title) + '</span> ' + badges +
+          '<span class="card-title">' + escapeHtml(app.title) + '</span> ' +
+          '<button type="button" class="skill-newtab" tabindex="-1" title="Open in new tab" data-app="' + escapeAttr(app.key) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>' + badges +
           '<div class="skill-desc" title="' + escapeAttr(resolveDescription(app)) + '">' + linkify(resolveDescription(app)) + '</div>' +
         '</div>' +
         '<span class="card-sessions" data-app="' + escapeAttr(app.key) + '"></span>' +
@@ -959,7 +992,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
           '<button type="submit" class="skill-submit" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>' +
         '</div>' +
         '<div class="skill-form-footer">' +
-          '<span class="skill-hint"><kbd>Enter</kbd> run · <kbd>' + (navigator.platform.indexOf('Mac') > -1 ? '\u2318' : 'Ctrl') + '</kbd><kbd>Enter</kbd> new tab · <kbd>Esc</kbd> send Esc</span>' +
+          '<span class="skill-hint"><kbd>Enter</kbd> run · <kbd>Esc</kbd> send Esc</span>' +
         '</div>' +
       '</form>' +
       '<div class="skill-inline-wrap"></div>';
@@ -1698,6 +1731,13 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     if (btn) btn.classList.toggle('has-input', ta.value.trim().length > 0);
   });
   document.getElementById('skills-content').addEventListener('click', function(e) {
+    var newtabBtn = e.target.closest('.skill-newtab');
+    if (newtabBtn) {
+      var card = newtabBtn.closest('.skill-card');
+      var form = card && card.querySelector('.skill-form');
+      if (form) { form.dataset.newTab = '1'; form.requestSubmit(); }
+      return;
+    }
     if (e.target.closest('button') || e.target.closest('.config-popover') || e.target.classList.contains('skill-input') || e.target.closest('a')) return;
     var sel = window.getSelection();
     if (sel && sel.toString().length > 0) return;

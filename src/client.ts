@@ -329,7 +329,7 @@ function connect(): void {
     webReconnectDelay = 1000;
     webReconnectAttempts = 0;
     sessionDead = false;
-    if (!document.getElementById('desktop')!.hasAttribute('hidden') && appType !== 'web') {
+    if (!document.getElementById('desktop')?.hasAttribute('hidden') && appType !== 'web') {
       requestAnimationFrame(() => {
         fitAddon.fit();
         sendResize(term.cols, term.rows);
@@ -920,6 +920,22 @@ if (inputToggle && shortcutBar) {
     localStorage.setItem(PREF_KEY, isHidden ? 'hidden' : 'visible');
     scheduleResize();
   });
+
+  // URL query params: ?input=1 shows the input bar, ?text=... pre-fills it
+  const urlParams = new URLSearchParams(location.search);
+  if (urlParams.get('input') === '1' && shortcutBar.classList.contains('hidden')) {
+    shortcutBar.classList.remove('hidden');
+    inputToggle.classList.add('active');
+  }
+  const prefillText = urlParams.get('text');
+  if (prefillText && shortcutInput) {
+    shortcutInput.value = prefillText;
+    shortcutInput.classList.add('prefill-glow');
+    shortcutInput.addEventListener('input', () => shortcutInput.classList.remove('prefill-glow'), { once: true });
+    // Re-focus after terminal steals focus on connect
+    const origFocus = term.focus.bind(term);
+    term.focus = () => { origFocus(); shortcutInput.focus(); term.focus = origFocus; };
+  }
 }
 
 
