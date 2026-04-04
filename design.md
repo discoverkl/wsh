@@ -189,7 +189,7 @@ All RPC is `eval` — the server delivers JavaScript to connected browser client
 
 ## Skills
 
-Skills are apps with a `skill` field whose command template references `$SKILL` and `$INPUT` env vars. The `_skills` reserved key provides shared defaults (command, cwd) for all skill apps.
+Skills are apps with a `skill` field whose command template references `$SKILL` and `$INPUT` env vars. The `_skills` reserved key provides shared defaults (command, cwd) for all skill apps. Two card types: **skill cards** (launch a named skill via `/$SKILL <input>`, `slashPrefix: true` default) and **project cards** (open an assistant scoped to a project directory, `slashPrefix: false`, input sent as plain text).
 
 When a skill session is spawned with a `snapshot` in the POST body, the server writes it to `~/.wsh/snapshots/<agentSessionId>.md` before spawning the PTY. The skill reads the file via the predictable path `~/.wsh/snapshots/$WSH_SESSION.md` — faster than reading a large env var through bash. Snapshot files are cleaned up on PTY exit.
 

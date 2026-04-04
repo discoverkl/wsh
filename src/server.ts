@@ -1398,6 +1398,7 @@ interface AppConfig {
   startupTimeout?: string;
   noBanner?: boolean;
   prefixCommand?: string;
+  tips?: string[];
 }
 
 const DEFAULT_APPS: Record<string, AppConfig> = {
@@ -1765,6 +1766,7 @@ router.get('/api/apps', (_req: express.Request, res: express.Response) => {
       access: app.access ?? null,
       hidden: app.hidden ? true : undefined,
       top: typeof app.top === 'number' && app.top > 0 ? app.top : undefined,
+      tips: Array.isArray(app.tips) && app.tips.length ? app.tips : undefined,
       _raw: app,
     }));
   res.json({ apps: list, ...(warnings.length ? { warnings } : {}) });
