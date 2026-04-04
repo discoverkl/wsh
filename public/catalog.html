@@ -568,6 +568,39 @@ header {
   box-shadow: 0 0 30px rgba(167, 139, 250, 0.06);
 }
 
+/* Project card — blue-purple accent */
+.skill-card.project-card { border-color: rgba(124, 154, 239, 0.15); }
+.skill-card.project-card:hover { border-color: rgba(124, 154, 239, 0.35); box-shadow: 0 0 30px rgba(124, 154, 239, 0.06); }
+.skill-card.project-card .skill-input:focus { border-color: rgba(124, 154, 239, 0.5); box-shadow: 0 0 0 3px rgba(124, 154, 239, 0.08); }
+.skill-card.project-card .skill-submit.has-input { color: #7c9aef; }
+.skill-card.project-card .skill-submit:hover,
+.skill-card.project-card .skill-submit.has-input:hover { background: rgba(124, 154, 239, 0.15); color: #7c9aef; }
+.skill-card.project-card:hover .skill-newtab { color: #7c9aef; }
+.skill-card.project-card .skill-newtab:hover { background: rgba(124, 154, 239, 0.2); color: #9db8f5; }
+.project-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: #7c9aef;
+  background: rgba(124, 154, 239, 0.12);
+  border: 1px solid rgba(124, 154, 239, 0.2);
+  vertical-align: middle;
+}
+.project-path {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
+  opacity: 0.7;
+}
+
 /* Skill card header — icon + title + desc */
 .skill-header {
   display: flex;
@@ -615,6 +648,8 @@ header {
   line-height: 1.5;
   field-sizing: content;
 }
+.skill-input.tip-fading::placeholder { opacity: 0; transition: opacity 0.3s ease; }
+.skill-input::placeholder { transition: opacity 0.3s ease; }
 .skill-input:focus {
   border-color: rgba(167, 139, 250, 0.5);
   box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.08);
@@ -879,7 +914,7 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
     </div>
   </header>
   <div id="skills-section" hidden>
-    <div class="section-label">Skills</div>
+    <div class="section-label">Skills & Projects</div>
     <div id="skills-content" class="skills-grid"></div>
   </div>
   <div id="apps-section" hidden>
@@ -964,7 +999,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     var color = iconColors[iconId] || iconColors.default;
     var div = document.createElement('div');
     var isTopped = !isHidden && !!app.top;
-    div.className = 'skill-card' + (isHidden ? ' hidden-app' : '') + (isTopped ? ' topped-app' : '');
+    div.className = 'skill-card' + (app.slashPrefix === false ? ' project-card' : '') + (isHidden ? ' hidden-app' : '') + (isTopped ? ' topped-app' : '');
     if (isHidden) div.style.display = 'none';
     div.dataset.app = app.key;
     div.dataset.title = app.title;
@@ -972,36 +1007,72 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     if (app.slashPrefix === false) div.dataset.slashPrefix = '0';
     if (isHidden) div.dataset.hidden = '1';
     if (isTopped) div.dataset.top = '1';
+    var isProject = app.slashPrefix === false;
+    var tips = app.tips && app.tips.length ? app.tips : null;
+    var startIdx = tips ? Math.floor(Math.random() * tips.length) : 0;
+    var placeholder = tips ? tips[startIdx] : (isProject ? 'What would you like to do?' : 'Describe your task...');
     var badges = isHidden
       ? '<span class="hidden-badge">Hidden</span> <button class="unhide-btn" data-unhide="' + escapeAttr(app.key) + '">Unhide</button>'
-      : (isTopped ? '<span class="top-badge">Top</span>' : '');
+      : (isProject ? '<span class="project-badge">Project</span>' + (isTopped ? ' <span class="top-badge">Top</span>' : '') : (isTopped ? '<span class="top-badge">Top</span>' : ''));
     div.innerHTML =
       buildConfigPopover(app) +
       '<div class="skill-header">' +
-        '<div class="card-icon" style="color:#a78bfa">' + icons[iconId] + '</div>' +
+        '<div class="card-icon" style="color:' + (app.slashPrefix === false ? '#7c9aef' : '#a78bfa') + '">' + icons[iconId] + '</div>' +
         '<div class="skill-info">' +
           '<span class="card-title">' + escapeHtml(app.title) + '</span> ' +
           '<button type="button" class="skill-newtab" tabindex="-1" title="Open in new tab" data-app="' + escapeAttr(app.key) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>' + badges +
           '<div class="skill-desc" title="' + escapeAttr(resolveDescription(app)) + '">' + linkify(resolveDescription(app)) + '</div>' +
+          (isProject && app.cwd ? '<div class="project-path" title="' + escapeAttr(app.cwd) + '">' + escapeHtml(app.cwd.replace(/^\/root\//, '~/')) + '</div>' : '') +
         '</div>' +
         '<span class="card-sessions" data-app="' + escapeAttr(app.key) + '"></span>' +
       '</div>' +
       '<form class="skill-form" data-app="' + escapeAttr(app.key) + '">' +
         '<div class="skill-input-wrap">' +
-          '<textarea class="skill-input" rows="1" placeholder="Describe your task..."></textarea>' +
+          '<textarea class="skill-input" rows="1"' +
+            (tips ? ' data-tips="' + escapeAttr(JSON.stringify(tips)) + '" data-tip-idx="' + startIdx + '"' : '') +
+            ' placeholder="' + escapeAttr(placeholder) + '"></textarea>' +
           '<button type="submit" class="skill-submit" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>' +
         '</div>' +
         '<div class="skill-form-footer">' +
-          '<span class="skill-hint"><kbd>Enter</kbd> run · <kbd>Esc</kbd> send Esc</span>' +
+          '<span class="skill-hint">' + (tips ? '<kbd>Tab</kbd> try · ' : '') + '<kbd>Enter</kbd> run · <kbd>Esc</kbd> send Esc</span>' +
         '</div>' +
       '</form>' +
       '<div class="skill-inline-wrap"></div>';
     return div;
   }
 
+  var tipCycleTimer = null;
+
+  function stopTipCycling() {
+    if (tipCycleTimer) { clearInterval(tipCycleTimer); tipCycleTimer = null; }
+  }
+
+  function startTipCycling(container) {
+    stopTipCycling();
+    var textareas = Array.from(container.querySelectorAll('textarea.skill-input[data-tips]')).filter(function(ta) {
+      try { return JSON.parse(ta.dataset.tips).length >= 2; } catch(e) { return false; }
+    });
+    if (!textareas.length) return;
+    tipCycleTimer = setInterval(function() {
+      textareas.forEach(function(ta) {
+        if (ta.value !== '' || document.activeElement === ta) return;
+        var tips = JSON.parse(ta.dataset.tips);
+        var curIdx = parseInt(ta.dataset.tipIdx, 10) || 0;
+        var tipIdx = (curIdx + 1 + Math.floor(Math.random() * (tips.length - 1))) % tips.length;
+        ta.classList.add('tip-fading');
+        setTimeout(function() {
+          ta.dataset.tipIdx = tipIdx;
+          ta.placeholder = tips[tipIdx];
+          ta.classList.remove('tip-fading');
+        }, 300);
+      });
+    }, 18000);
+  }
+
   function renderSkills(skills, hiddenSkills) {
     var section = document.getElementById('skills-section');
     var content = document.getElementById('skills-content');
+    stopTipCycling();
     content.innerHTML = '';
     skills.forEach(function(app, i) {
       var div = buildSkillCard(app, false);
@@ -1014,6 +1085,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       setTimeout(function() { div.classList.add('visible'); }, 30 * (skills.length + i));
     });
     section.hidden = false;
+    startTipCycling(content);
   }
 
   function buildAppCard(app, isHidden) {
@@ -1355,7 +1427,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
 
   var gearSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>';
 
-  var skillPopoverFields = { skill: 1, agent: 1, cwd: 1, icon: 1, hidden: 1, top: 1 };
+  var skillPopoverFields = { skill: 1, agent: 1, cwd: 1, icon: 1, hidden: 1, top: 1, tips: 1 };
 
   function buildConfigPopover(app) {
     var html = '';
@@ -1757,6 +1829,15 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
         form.dataset.newTab = '1';
       }
       form.requestSubmit();
+    }
+    if (e.key === 'Tab' && !e.shiftKey) {
+      var ta = e.target;
+      if (ta.value === '' && ta.placeholder && ta.dataset.tips) {
+        e.preventDefault();
+        ta.value = ta.placeholder;
+        var btn = ta.closest('.skill-input-wrap').querySelector('.skill-submit');
+        if (btn) btn.classList.add('has-input');
+      }
     }
     if (e.key === 'Escape') {
       var appKey = e.target.closest('.skill-form').dataset.app;
