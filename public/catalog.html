@@ -895,9 +895,7 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
 </style>
 </head>
 <body>
-<script>
-(function(){var d=document.documentElement;var tq=matchMedia('(any-pointer:coarse)');if(tq.matches)d.classList.add('touch');tq.addEventListener('change',function(e){d.classList.toggle('touch',e.matches)});if(matchMedia('(max-width:640px)').matches)d.classList.add('narrow');matchMedia('(max-width:640px)').addEventListener('change',function(e){d.classList.toggle('narrow',e.matches)})})();
-</script>
+<script src="viewport.js"></script>
 <div class="container">
   <header>
     <div class="header-left">
