@@ -290,7 +290,7 @@ python3:
   }
   // Build table rows
   const rows = (Object.entries(apps) as [string, any][]).map(([key, app]) => {
-    const title = app.title ?? path.basename(app.command);
+    const title = app.title ?? path.basename(app.command.split(/\s/)[0]);
     const command = app.command;
     const tags: string[] = [];
     if (app.type === 'web') tags.push('web');
@@ -931,7 +931,7 @@ function baseSession(appKey: string, appConfig: AppConfig): Session {
     peers: new Map(),
     cleanupTimer: null,
     pinned: false,
-    title: appConfig.title ?? path.basename(appConfig.command),
+    title: appConfig.title ?? path.basename(appConfig.command.split(/\s/)[0]),
     icon: appConfig.icon,
     app: appKey,
     cwd: resolveCwd(appConfig),
@@ -1756,7 +1756,7 @@ router.get('/api/apps', (_req: express.Request, res: express.Response) => {
   const list = Object.entries(apps)
     .map(([key, app]) => ({
       key,
-      title: app.title ?? path.basename(app.command),
+      title: app.title ?? path.basename(app.command.split(/\s/)[0]),
       command: app.command,
       icon: app.icon ?? null,
       description: app.description ?? null,
@@ -2196,6 +2196,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   } else if (skillName) {
     // --- Skill path: build config from _skills defaults, agent tool resolves the skill ---
     effectiveConfig = buildSkillConfig(skillName, input, mode, cwdOverride || undefined, Object.keys(envOverride).length ? envOverride : undefined);
+    if (!effectiveConfig.title) effectiveConfig.title = skillName + ' skill';
     sessionLabel = 'skill';
   } else {
     // --- App path: lookup from apps.yaml ---
