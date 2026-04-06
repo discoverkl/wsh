@@ -344,8 +344,16 @@ python3:
   const cliWarnings: string[] = [];
   function loadAndMerge(dir: string) {
     let parsed: any = null;
-    try { parsed = YAML.parse(fs.readFileSync(path.join(dir, 'apps.yaml'), 'utf8')); } catch {
-      try { parsed = JSON.parse(fs.readFileSync(path.join(dir, 'apps.json'), 'utf8')); } catch {}
+    const yamlPath = path.join(dir, 'apps.yaml');
+    const jsonPath = path.join(dir, 'apps.json');
+    if (fs.existsSync(yamlPath)) {
+      try { parsed = YAML.parse(fs.readFileSync(yamlPath, 'utf8')); } catch (err: any) {
+        cliWarnings.push(`Failed to parse ${yamlPath}: ${err.message}`); return;
+      }
+    } else if (fs.existsSync(jsonPath)) {
+      try { parsed = JSON.parse(fs.readFileSync(jsonPath, 'utf8')); } catch (err: any) {
+        cliWarnings.push(`Failed to parse ${jsonPath}: ${err.message}`); return;
+      }
     }
     if (parsed && typeof parsed === 'object') {
       configs.push(parsed);
@@ -1951,10 +1959,22 @@ const DEFAULT_APPS: Record<string, AppConfig> = {
 
 const SYSTEM_CONFIG_DIR = '/etc/wsh';
 
-function loadConfigFile(dir: string): Record<string, unknown> | null {
+function loadConfigFile(dir: string, warnings?: string[]): Record<string, unknown> | null {
   // Prefer apps.yaml, fall back to apps.json
-  try { return YAML.parse(fs.readFileSync(path.join(dir, 'apps.yaml'), 'utf8')); } catch {}
-  try { return JSON.parse(fs.readFileSync(path.join(dir, 'apps.json'), 'utf8')); } catch {}
+  const yamlPath = path.join(dir, 'apps.yaml');
+  const jsonPath = path.join(dir, 'apps.json');
+  if (fs.existsSync(yamlPath)) {
+    try { return YAML.parse(fs.readFileSync(yamlPath, 'utf8')); } catch (err: any) {
+      warnings?.push(`Failed to parse ${yamlPath}: ${err.message}`);
+      return null;
+    }
+  }
+  if (fs.existsSync(jsonPath)) {
+    try { return JSON.parse(fs.readFileSync(jsonPath, 'utf8')); } catch (err: any) {
+      warnings?.push(`Failed to parse ${jsonPath}: ${err.message}`);
+      return null;
+    }
+  }
   return null;
 }
 
@@ -1975,9 +1995,10 @@ function mergeApps(apps: Record<string, AppConfig>, parsed: Record<string, unkno
       // Field-level merge into existing app (enables partial overrides like hidden: true)
       apps[key] = { ...apps[key], ...(value as Partial<AppConfig>) };
     } else {
-      // New app — requires command
+      // New app — requires command or skill
       const config = normalizeAppEntry(value);
       if (config) apps[key] = config;
+      else warnings?.push(`App "${key}" ignored — missing "command" or "skill" field`);
     }
   }
 }
@@ -2035,8 +2056,8 @@ function extractSkillDefaults(...configs: (Record<string, unknown> | null)[]): P
 
 function loadApps(warnings?: string[]): Record<string, AppConfig> {
   const apps = { ...DEFAULT_APPS };
-  const system = loadConfigFile(SYSTEM_CONFIG_DIR);
-  const user = loadConfigFile(path.join(os.homedir(), '.wsh'));
+  const system = loadConfigFile(SYSTEM_CONFIG_DIR, warnings);
+  const user = loadConfigFile(path.join(os.homedir(), '.wsh'), warnings);
   // Merge app entries (keys starting with _ are reserved and skipped)
   if (system && typeof system === 'object') mergeApps(apps, system, warnings);
   if (user && typeof user === 'object') mergeApps(apps, user, warnings);

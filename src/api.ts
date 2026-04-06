@@ -59,6 +59,34 @@ const TOAST_CSS = `
   opacity: .8;
 }
 
+/* Warn variant */
+.wsh-toast.wsh-toast-warn::before {
+  background: linear-gradient(180deg, #f59e0b, #d97706);
+}
+.wsh-toast.wsh-toast-warn .wsh-toast-icon {
+  background: rgba(245,158,11,.15);
+}
+.wsh-toast.wsh-toast-warn .wsh-toast-icon svg {
+  stroke: #f59e0b;
+}
+.wsh-toast.wsh-toast-warn .wsh-toast-progress {
+  background: rgba(245,158,11,.35);
+}
+
+/* Error variant */
+.wsh-toast.wsh-toast-error::before {
+  background: linear-gradient(180deg, #ef4444, #dc2626);
+}
+.wsh-toast.wsh-toast-error .wsh-toast-icon {
+  background: rgba(239,68,68,.15);
+}
+.wsh-toast.wsh-toast-error .wsh-toast-icon svg {
+  stroke: #ef4444;
+}
+.wsh-toast.wsh-toast-error .wsh-toast-progress {
+  background: rgba(239,68,68,.35);
+}
+
 /* Icon */
 .wsh-toast-icon {
   flex-shrink: 0;
@@ -221,6 +249,8 @@ const TOAST_CSS = `
 
 const CLOSE_ICON = '<svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
 const INFO_ICON = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>';
+const WARN_ICON = '<svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+const ERROR_ICON = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>';
 
 function ensureToastContainer(): HTMLElement {
   let container = document.getElementById('wsh-toast-container');
@@ -248,6 +278,7 @@ interface ToastOptions {
   text?: string;
   html?: string;
   raw?: boolean;
+  variant?: 'warn' | 'error';
   duration?: number;
 }
 
@@ -256,16 +287,18 @@ api.toast = (msgOrOpts: string | ToastOptions = '') => {
   const isHtml = !!opts.html;
   const content = opts.html ?? opts.text ?? '';
   const raw = !!opts.raw;
+  const variant = opts.variant;
   const duration = opts.duration ?? 8000;
 
   const container = ensureToastContainer();
   const el = document.createElement('div');
-  el.className = raw ? 'wsh-toast wsh-toast-raw' : 'wsh-toast';
+  const variantClass = variant === 'warn' ? ' wsh-toast-warn' : variant === 'error' ? ' wsh-toast-error' : '';
+  el.className = raw ? 'wsh-toast wsh-toast-raw' : 'wsh-toast' + variantClass;
 
   if (!raw) {
     const icon = document.createElement('div');
     icon.className = 'wsh-toast-icon';
-    icon.innerHTML = INFO_ICON;
+    icon.innerHTML = variant === 'warn' ? WARN_ICON : variant === 'error' ? ERROR_ICON : INFO_ICON;
     el.appendChild(icon);
   }
 

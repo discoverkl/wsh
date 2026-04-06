@@ -1584,7 +1584,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
           var warnTs = parseInt(localStorage.getItem(warnKey) || '0', 10);
           if (!warnTs || Date.now() - warnTs > 86400000) {
             localStorage.setItem(warnKey, String(Date.now()));
-            data.warnings.forEach(function(w) { api.toast({ html: '⚠️ ' + w, duration: 10000 }); });
+            data.warnings.forEach(function(w) { api.toast({ html: w, variant: 'warn', duration: 10000 }); });
           }
         }
 
