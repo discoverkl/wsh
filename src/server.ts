@@ -16,6 +16,7 @@ import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
 import YAML from 'yaml';
 import { version } from '../package.json';
+import { emit as emitEvent, on as onEvent, readSince, getCursor, setCursor, rotate as rotateEvents, trim as trimEvents, isValidEventType, LOG_FILE as EVENT_LOG_FILE, CURSOR_DIR as EVENT_CURSOR_DIR, WshEvent } from './events';
 
 // --- Error handling ---
 
@@ -67,12 +68,92 @@ function subHelp(usage: string, lines: string[] = []): never {
   process.exit(0);
 }
 
+/** Parse a duration string (5m, 1h, 2d, today) into an absolute ms timestamp, or return raw as-is. */
+function parseDuration(raw: string): string {
+  const relMatch = raw.match(/^(\d+)([smhd])$/);
+  if (raw === 'today') {
+    const d = new Date(); d.setHours(0, 0, 0, 0);
+    return String(d.getTime());
+  } else if (relMatch) {
+    const n = parseInt(relMatch[1], 10);
+    const unit: Record<string, number> = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+    return String(Date.now() - n * unit[relMatch[2]]);
+  }
+  return raw;
+}
+
+const eventPalette = [
+  117, 156, 114, 179, 174, 139, 110, 218,
+  81,  150, 215, 176, 183, 109, 223, 146,
+  75,  168, 209, 120, 213, 105, 167, 222,
+];
+
+function formatEvent(json: string): string {
+  const event = JSON.parse(json);
+  const d = new Date(event.ts);
+  const time = `\x1b[37m${d.toLocaleTimeString('en-GB', { hour12: false })}\x1b[0m`;
+  const type = event.type;
+  const pad = Math.max(20, type.length);
+  const paddedType = type + ' '.repeat(pad - type.length);
+  const clean = (s: string) => s.replace(/[\n\r\t]/g, ' ');
+  const trunc = (s: string, max = 80) => s.length > max ? s.slice(0, max) + '\x1b[2m…\x1b[0m' : s;
+  const fields = event.data && Object.keys(event.data).length > 0
+    ? Object.entries(event.data).map(([k, v]) => {
+        const val = typeof v === 'number' ? `\x1b[96m${v}\x1b[0m`
+          : typeof v === 'boolean' ? `\x1b[96m${v}\x1b[0m`
+          : v === null ? `\x1b[2mnull\x1b[0m`
+          : typeof v === 'object' ? `\x1b[2m${trunc(clean(JSON.stringify(v)))}\x1b[0m`
+          : String(v) === '' ? `\x1b[2m(empty)\x1b[0m`
+          : `\x1b[97m${trunc(clean(String(v)))}\x1b[0m`;
+        return { raw: `\x1b[2m${k}=\x1b[0m${val}`, len: k.length + 1 + (typeof v === 'object' ? JSON.stringify(v).length : String(v).length) };
+      })
+    : [];
+  const cols = process.stdout.columns || 120;
+  const prefix = 8 + 2 + pad + 2;
+  const indent = ' '.repeat(prefix);
+  let sep = '';
+  if (fields.length > 0) {
+    let line = '';
+    let lineLen = prefix;
+    const lines: string[] = [];
+    for (const f of fields) {
+      const fieldWidth = f.len + 2;
+      if (line && lineLen + fieldWidth > cols) {
+        lines.push(line);
+        line = f.raw;
+        lineLen = prefix + f.len;
+      } else {
+        line = line ? line + '  ' + f.raw : f.raw;
+        lineLen += (line === f.raw ? 0 : 2) + f.len;
+      }
+    }
+    if (line) lines.push(line);
+    sep = '  ' + lines.join('\n' + indent);
+  }
+  const lastDot = type.lastIndexOf('.');
+  const ns = lastDot > 0 ? type.slice(0, lastDot) : type;
+  let hash = 0;
+  for (let i = 0; i < ns.length; i++) hash = ((hash << 5) - hash + ns.charCodeAt(i)) | 0;
+  const color = eventPalette[Math.abs(hash) % eventPalette.length];
+  return `${time}  \x1b[1;38;5;${color}m${paddedType}\x1b[0m${sep}`;
+}
+
 if (process.argv[2] === 'version') {
-  if (wantsHelp) subHelp('Usage: wsh version', ['', 'Print the current version and exit.']);
+  if (wantsHelp) subHelp('Usage: wsh version', [
+    '', 'Print the current wsh version.',
+    '', 'Examples:',
+    '  wsh version              # e.g. v1.19.0',
+  ]);
   console.log(`v${version}`);
   process.exit(0);
 } else if (process.argv[2] === 'update') {
-  if (wantsHelp) subHelp('Usage: wsh update', ['', 'Update wsh to the latest version.']);
+  if (wantsHelp) subHelp('Usage: wsh update', [
+    '', 'Update wsh to the latest published release.',
+    '', 'Compares the current version against the latest GitHub release',
+    'and installs it if newer. No-op if already up to date.',
+    '', 'Examples:',
+    '  wsh update               # Updating v1.18.0 → v1.19.0 ...',
+  ]);
   try {
     const body = execSync('curl -fsSL https://api.github.com/repos/discoverkl/wsh/releases/latest', { encoding: 'utf8' });
     const latest = (JSON.parse(body) as { tag_name: string }).tag_name.replace(/^v/, '');
@@ -88,7 +169,13 @@ if (process.argv[2] === 'version') {
   }
   process.exit(0);
 } else if (process.argv[2] === 'token') {
-  if (wantsHelp) subHelp('Usage: wsh token', ['', 'Print the auth token derived from the TLS key.']);
+  if (wantsHelp) subHelp('Usage: wsh token', [
+    '', 'Print the auth token derived from the TLS key.',
+    'Used for authenticating browser connections to the wsh server.',
+    '', 'Examples:',
+    '  wsh token                # e.g. a1b2c3d4e5f67890',
+    '  curl -b "wsh_token=$(wsh token)" https://localhost:7681/',
+  ]);
   const keyFile = path.join(os.homedir(), '.wsh', 'tls', 'key.pem');
   try {
     const key = fs.readFileSync(keyFile, 'utf8');
@@ -100,21 +187,25 @@ if (process.argv[2] === 'version') {
   }
 } else if (process.argv[2] === 'rpc') {
   if (wantsHelp) subHelp('Usage: wsh rpc [options] <code> [args...]', [
-    '', 'Evaluate JavaScript on connected clients via the wsh RPC mechanism.',
-    '', 'Pages expose capabilities on window.api (e.g. api.toast, api.refreshCatalog).',
+    '', 'Evaluate JavaScript on connected browser clients.',
+    '', 'Pages expose capabilities on window.api (e.g. api.toast,',
+    'api.refreshCatalog). The code runs in the browser context and',
+    'the return value is printed as JSON.',
     '', 'Options:',
-    '  --async          Fire-and-forget (do not wait for response)',
-    '  --timeout <ms>   Response timeout in milliseconds',
-    '  --session <id>   Target a specific session (default: $WSH_SESSION, "index" for catalog)',
-    '  --broadcast      Send to all sessions (ignore $WSH_SESSION)',
-    '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)',
-    '  -                Read argument from stdin',
+    '  -p, --port <port>    Server port (default: auto from ~/.wsh/port)',
+    '  --session <id>       Target a specific session (default: $WSH_SESSION)',
+    '  --broadcast          Send to all connected sessions',
+    '  --async              Fire-and-forget (do not wait for response)',
+    '  --timeout <ms>       Response timeout in milliseconds (default: 10000)',
+    '  -                    Read code from stdin instead of argument',
     '', 'Environment:',
-    '  WSH_SESSION      Session ID for the RPC call (overridden by --session)',
+    '  WSH_SESSION          Session ID for the RPC call (overridden by --session)',
     '', 'Examples:',
-    '  wsh rpc \'api.toast("hello")\'',
-    '  wsh rpc --broadcast \'api.refreshCatalog()\'',
-    '  echo \'api.toast({html:"<b>hi</b>"})\' | wsh rpc --broadcast -',
+    '  wsh rpc \'api.toast("hello")\'                 # show a toast notification',
+    '  wsh rpc \'api.toast({html:"<b>hi</b>"})\'      # toast with HTML content',
+    '  wsh rpc --broadcast \'api.refreshCatalog()\'    # refresh all clients',
+    '  wsh rpc --session index \'api.refreshCatalog()\' # refresh the catalog page',
+    '  echo \'document.title\' | wsh rpc -              # read code from stdin',
   ]);
   const rpcArgs: string[] = [];
   let isAsync = false;
@@ -185,8 +276,13 @@ if (process.argv[2] === 'version') {
 } else if (process.argv[2] === 'apps') {
   if (wantsHelp) subHelp('Usage: wsh apps [init]', [
     '', 'List available apps, or initialize a starter config.',
+    '', 'Apps are defined in ~/.wsh/apps.yaml (or /etc/wsh/apps.yaml).',
+    'Each app has a type (pty, web, or skill), a command, and optional settings.',
     '', 'Subcommands:',
-    '  init  Create ~/.wsh/apps.yaml with example app definitions',
+    '  init    Create ~/.wsh/apps.yaml with example app definitions',
+    '', 'Examples:',
+    '  wsh apps                 # list all registered apps',
+    '  wsh apps init            # create a starter apps.yaml',
   ]);
   const YAML = require('yaml') as typeof import('yaml');
   const subCmd = process.argv[3];
@@ -320,25 +416,31 @@ python3:
   console.log('Run "wsh apps init" to create a starter user config.');
   process.exit(0);
 } else if (process.argv[2] === 'new') {
-  if (wantsHelp) subHelp('Usage: wsh new [-p <port>] [-s <session-id>] [--notify] [--cwd <dir>] [--env KEY=VALUE] [--skill <name>] [--type <type>] [-c <cmd>] [--title <title>] [app-key] [input...]', [
+  if (wantsHelp) subHelp('Usage: wsh new [options] [app-key] [input...]', [
     '', 'Create a new session and print its URL.',
-    '',
-    'Modes:',
-    '  wsh new [app-key]                     Open a registered app (default: bash)',
-    '  wsh new --type pty -c <command>        Run an ad-hoc shell command',
-    '  echo "cmd" | wsh new --type pty        Read command from stdin',
+    '', 'There are two ways to start a session:',
+    '  1. Open a registered app by name (see "wsh apps" for available apps)',
+    '  2. Run an ad-hoc command with --type and -c',
     '', 'Options:',
     '  -p, --port <port>       Server port (default: auto from ~/.wsh/port)',
     '  -s, --session <id>      Reuse a specific session ID',
-    '  --notify                Show a toast on the catalog page when the app is ready',
-    '  --cwd <dir>             Override working directory for the session',
+    '  -c, --command <cmd>     Shell command for ad-hoc sessions (or pipe via stdin)',
+    '  --type <type>           Ad-hoc session type: pty, web, or job',
+    '  --title <title>         Session title shown in the catalog',
+    '  --cwd <dir>             Working directory for the session',
     '  --env KEY=VALUE         Set environment variable (repeatable)',
     '  --skill <name>          Run a skill instead of an app',
-    '  --type <type>           Ad-hoc session type: pty, web, or job',
-    '  -c, --command <cmd>     Shell command (required for ad-hoc; via flag or stdin)',
-    '  --title <title>         Session title',
+    '  --notify                Show a toast on the catalog page when ready',
     '  --id-only               Print only the session ID (no URL)',
     '  --no-banner             Suppress command banner in job output',
+    '', 'Examples:',
+    '  wsh new                              # open default shell (bash)',
+    '  wsh new htop                         # open a registered app by name',
+    '  wsh new --type pty -c "python3"      # run an ad-hoc pty command',
+    '  wsh new --type web -c "python3 -m http.server 8080"  # ad-hoc web app',
+    '  wsh new --type job -c "sleep 10"     # run a background job',
+    '  echo "ls -la" | wsh new --type pty    # pipe command via stdin',
+    '  wsh new --env FOO=bar my-app         # pass env vars to an app',
   ]);
   const subArgs = process.argv.slice(3);
 
@@ -425,7 +527,7 @@ python3:
       try { commandFlag = fs.readFileSync(0, 'utf8').trim(); } catch {}
     }
     if (!commandFlag) {
-      console.error('Error: No command provided. Use -c/--command or stdin.');
+      console.error('Error: No command provided. Use -c/--command or pipe via stdin.');
       process.exit(1);
     }
     appKey = '';
@@ -497,11 +599,14 @@ python3:
   }
   process.exit(1);
 } else if (process.argv[2] === 'logs') {
-  if (wantsHelp) subHelp('Usage: wsh logs [-p <port>] [-f] <session-id>', [
+  if (wantsHelp) subHelp('Usage: wsh logs [-f] <session-id>', [
     '', 'Print session scrollback (stdout/stderr output).',
     '', 'Options:',
     '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)',
-    '  -f, --follow       Stream new output after printing scrollback',
+    '  -f, --follow       Stream new output in real time (like tail -f)',
+    '', 'Examples:',
+    '  wsh logs abc123             # print full scrollback',
+    '  wsh logs -f abc123          # follow live output',
   ]);
   const subArgs = process.argv.slice(3);
 
@@ -631,7 +736,14 @@ python3:
   }
 } else if (process.argv[2] === 'exitcode') {
   const sid = process.argv[3];
-  if (!sid || wantsHelp) { console.error('Usage: wsh exitcode <session-id>'); process.exit(sid ? 0 : 1); }
+  if (!sid || wantsHelp) subHelp('Usage: wsh exitcode <session-id>', [
+    '', 'Print the exit code of a finished session.',
+    '', 'Returns the exit code of the process that ran in the session.',
+    'Exits with code 1 if the session is not found or still running.',
+    '', 'Examples:',
+    '  wsh exitcode abc123         # e.g. 0',
+    '  wsh exitcode abc123 && echo "success"',
+  ]);
   try {
     const code = fs.readFileSync(path.join(JOB_LOG_DIR, `${sid}.exit`), 'utf8').trim();
     console.log(code);
@@ -642,9 +754,32 @@ python3:
 } else if (process.argv[2] === 'ls' || process.argv[2] === 'kill' || process.argv[2] === 'port') {
   const subcommand = process.argv[2];
   if (wantsHelp) {
-    if (subcommand === 'ls') subHelp('Usage: wsh ls [-p <port>]', ['', 'List active sessions.', '', 'Options:', '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)']);
-    else if (subcommand === 'port') subHelp('Usage: wsh port [-p <port>] <app>', ['', 'Print the port of a running web app.', '', 'Options:', '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)']);
-    else subHelp('Usage: wsh kill [-p <port>] <session-id>', ['', 'Close a session by ID.', '', 'Options:', '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)']);
+    if (subcommand === 'ls') subHelp('Usage: wsh ls [-p <port>]', [
+      '', 'List active sessions with their ID, type, app, and status.',
+      '', 'Options:',
+      '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)',
+      '', 'Examples:',
+      '  wsh ls                     # list all sessions',
+      '  wsh ls | grep web          # filter web app sessions',
+    ]);
+    else if (subcommand === 'port') subHelp('Usage: wsh port <app>', [
+      '', 'Print the local port of a running web app.',
+      '', 'Useful for connecting to a web app from other processes.',
+      '', 'Options:',
+      '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)',
+      '', 'Examples:',
+      '  wsh port jupyter           # e.g. 38421',
+      '  curl http://localhost:$(wsh port my-app)/api/health',
+    ]);
+    else subHelp('Usage: wsh kill <session-id>', [
+      '', 'Close a session by ID.',
+      '', 'Sends SIGHUP to the session process and removes it from the catalog.',
+      '', 'Options:',
+      '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)',
+      '', 'Examples:',
+      '  wsh kill abc123            # close a specific session',
+      '  wsh ls                     # find the session ID first',
+    ]);
   }
   const subArgs = process.argv.slice(3);
 
@@ -748,10 +883,412 @@ python3:
     console.log(`Session "${sessionId}" killed.`);
   }
   process.exit(0);
+
+// --- wsh emit ---
+} else if (process.argv[2] === 'emit') {
+  if (wantsHelp) subHelp('Usage: wsh emit [options] <type> [key=value... | -]', [
+    '', 'Emit an event to the event bus.',
+    '', 'Events have a type (namespace.action, e.g. "deploy.done") and optional',
+    'data fields. System events use "sys.*" with three levels (e.g.',
+    '"sys.session.opened"); user events use two. Data can be passed as',
+    'key=value args or JSON via stdin with "-".',
+    'Values are auto-parsed: numbers, booleans, and JSON are converted;',
+    'everything else is stored as a string.',
+    '', 'Options:',
+    '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)',
+    '  -q, --quiet        Suppress output (exit code only)',
+    '  --json             Output raw JSON instead of pretty format',
+    '  -                  Read data as JSON from stdin',
+    '', 'Examples:',
+    '  wsh emit deploy.done                           # pretty confirmation',
+    '  wsh emit deploy.done env=prod duration=12      # key=value data',
+    '  wsh emit job.fail exitCode=1 name=test         # numbers auto-parsed',
+    '  wsh emit app.flag active=true                  # booleans auto-parsed',
+    '  wsh emit test.done \'results=[1,2,3]\'             # JSON values auto-parsed',
+    '  wsh emit deploy.done env=prod --json           # raw JSON output',
+    '  wsh emit deploy.done -q                        # silent (for scripts)',
+    '', '  # Read data from stdin with "-":',
+    '  echo \'{"results":[1,2,3]}\' | wsh emit job.completed -',
+    '  curl -s api/status | wsh emit health.check -',
+  ]);
+  const subArgs = process.argv.slice(3);
+
+  let port = resolveServerPort();
+  const portIdx = subArgs.findIndex(a => a === '--port' || a === '-p');
+  if (portIdx !== -1 && subArgs[portIdx + 1]) {
+    port = parseInt(subArgs[portIdx + 1], 10);
+    subArgs.splice(portIdx, 2);
+  }
+
+  const jsonIdx = subArgs.indexOf('--json');
+  const printJson = jsonIdx !== -1;
+  if (jsonIdx !== -1) subArgs.splice(jsonIdx, 1);
+
+  const quietIdx = subArgs.findIndex(a => a === '--quiet' || a === '-q');
+  const quiet = quietIdx !== -1;
+  if (quietIdx !== -1) subArgs.splice(quietIdx, 1);
+
+  const eventType = subArgs.find(a => !a.startsWith('-'));
+  if (!eventType) { console.error('Usage: wsh emit <type> [key=value...]'); process.exit(1); }
+  subArgs.splice(subArgs.indexOf(eventType), 1);
+  if (!isValidEventType(eventType)) {
+    console.error(`wsh emit: invalid type "${eventType}" — must be lowercase, 2-4 dot-separated segments (e.g. "deploy.done")`);
+    process.exit(1);
+  }
+
+  // Build data from key=value args, or read JSON from stdin with "-"
+  let data: Record<string, any> | undefined;
+  const stdinIdx = subArgs.indexOf('-');
+  if (stdinIdx !== -1) {
+    subArgs.splice(stdinIdx, 1);
+    try {
+      const input = fs.readFileSync(0, 'utf8').trim();
+      if (input) data = JSON.parse(input);
+    } catch (err: any) {
+      console.error('wsh emit: invalid JSON on stdin —', err.message);
+      process.exit(1);
+    }
+  } else if (subArgs.length > 0) {
+    // key=value mode
+    data = {};
+    for (const arg of subArgs) {
+      const eq = arg.indexOf('=');
+      if (eq === -1) { console.error(`wsh emit: invalid argument "${arg}" — data must be key=value (e.g. msg=${arg})`); process.exit(1); }
+      const key = arg.slice(0, eq);
+      const raw = arg.slice(eq + 1);
+      // Try to parse as number/boolean/JSON, fall back to string
+      try { data[key] = JSON.parse(raw); } catch { data[key] = raw; }
+    }
+  }
+
+  let basePath = process.env.WSH_BASE_PATH || '/';
+  if (!basePath.startsWith('/')) basePath = '/' + basePath;
+  if (!basePath.endsWith('/')) basePath += '/';
+
+  const proxySecret = process.env.WSH_PROXY_SECRET;
+  const aboxUser = process.env.ABOX_USER;
+  let headers = "-H 'Content-Type: application/json'";
+  if (proxySecret) headers += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
+  if (aboxUser) headers += ` -H 'X-WSH-User: ${aboxUser}'`;
+
+  const body = JSON.stringify({ type: eventType, ...(data !== undefined && { data }) });
+  const escapedBody = body.replace(/'/g, "'\\''");
+  try {
+    let response: string;
+    try {
+      response = execSync(`curl -sS -X POST ${headers} -d '${escapedBody}' 'http://127.0.0.1:${port}${basePath}api/events'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch {
+      response = execSync(`curl -sSk -X POST ${headers} -d '${escapedBody}' 'https://127.0.0.1:${port}${basePath}api/events'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+    }
+    const result = response.trim();
+    if (printJson) console.log(result);
+    else if (!quiet) try { console.log(formatEvent(result)); } catch { console.log(result); }
+  } catch (err: any) {
+    console.error('wsh emit: failed —', err.stderr?.toString().trim() || err.message);
+    process.exit(1);
+  }
+  process.exit(0);
+
+// --- wsh events ---
+} else if (process.argv[2] === 'events') {
+  if (wantsHelp) subHelp('Usage: wsh events [--filter <prefix>] [--since <when>] [--exec <cmd>] [--json]', [
+    '', 'Subscribe to events from the event bus.',
+    '', 'By default, shows only new events in a pretty format. Event types',
+    'follow a namespace.action convention (e.g. "deploy.done"); system',
+    'events use "sys.*" with three levels (e.g. "sys.session.opened").',
+    'Use --since to replay past events, --exec to run a handler, or',
+    '--json for raw output.',
+    '', 'Options:',
+    '  -p, --port <port>    Server port (default: auto from ~/.wsh/port)',
+    '  --filter <pattern>   Filter by type prefix, comma-separated, "!" to exclude',
+    '                         e.g. "deploy.*", "deploy.*,job.*", "!sys.*"',
+    '  --since <when>       Replay past events:',
+    '                         5m, 30m, 1h, 2d  — relative (minutes, hours, days)',
+    '                         today             — since midnight',
+    '                         0                 — all events',
+    '  --name <cursor>      Named consumer with tracked cursor; resumes from',
+    '                       where it left off. One consumer per name (--force to take over)',
+    '  --force              Take over a named consumer from another process',
+    '  --exec <cmd>         Run a shell command for each event',
+    '  --json               Output raw JSON lines (for piping to jq, etc.)',
+    '  --types              List unique event types from the log (with last example)',
+    '  --consumers          List named consumers with status and last event time',
+    '', 'Exec mode — environment variables available in --exec commands:',
+    '  $EVENT               Full event JSON string',
+    '  $EVENT_TYPE          Event type (e.g. "deploy.done")',
+    '  $EVENT_TS            Event timestamp in milliseconds',
+    '  $<key>               Each top-level data field (e.g. $status, $exitCode)',
+    '', 'Examples:',
+    '  wsh events                              # pretty live monitor',
+    '  wsh events --since 1h                   # replay last hour + live',
+    '  wsh events --since 0                    # replay everything + live',
+    '  wsh events --filter \'deploy.*\'           # only deploy events',
+    '  wsh events --filter \'!sys.*\'            # user events only (exclude system)',
+    '  wsh events --filter \'deploy.*,job.*\'    # multiple prefixes',
+    '  wsh events --json | jq .type            # pipe JSON to jq',
+    '', '  # Run a handler for each event:',
+    '  wsh events --exec \'echo "$EVENT_TYPE: status=$status"\'',
+    '', '  # Conditional handler:',
+    '  wsh events --filter \'job.*\' --exec \'if [ "$exitCode" != "0" ]; then echo "FAIL: $name"; fi\'',
+    '', '  # Resumable consumer (picks up where it left off):',
+    '  wsh events --name my-bot --exec \'python3 handle.py\'',
+    '', '  # Forward events to a webhook:',
+    '  wsh events --exec \'curl -s -d "$EVENT" http://example.com/webhook\'',
+  ]);
+  const subArgs = process.argv.slice(3);
+
+  let port = resolveServerPort();
+  const portIdx = subArgs.findIndex(a => a === '--port' || a === '-p');
+  if (portIdx !== -1 && subArgs[portIdx + 1]) {
+    port = parseInt(subArgs[portIdx + 1], 10);
+    subArgs.splice(portIdx, 2);
+  }
+
+  let filter = '';
+  const filterIdx = subArgs.indexOf('--filter');
+  if (filterIdx !== -1 && subArgs[filterIdx + 1]) {
+    filter = subArgs[filterIdx + 1];
+    subArgs.splice(filterIdx, 2);
+  }
+
+  let name = '';
+  const nameIdx = subArgs.indexOf('--name');
+  if (nameIdx !== -1 && subArgs[nameIdx + 1]) {
+    name = subArgs[nameIdx + 1];
+    subArgs.splice(nameIdx, 2);
+  }
+
+  let since = '';
+  const sinceIdx = subArgs.indexOf('--since');
+  if (sinceIdx !== -1 && subArgs[sinceIdx + 1]) {
+    since = parseDuration(subArgs[sinceIdx + 1]);
+    subArgs.splice(sinceIdx, 2);
+  }
+
+  let execCmd = '';
+  const execIdx = subArgs.indexOf('--exec');
+  if (execIdx !== -1 && subArgs[execIdx + 1]) {
+    execCmd = subArgs[execIdx + 1];
+    subArgs.splice(execIdx, 2);
+  }
+
+  const typesIdx = subArgs.indexOf('--types');
+  if (typesIdx !== -1) {
+    // Show unique event types from the log (most recent of each)
+    if (!fs.existsSync(EVENT_LOG_FILE)) { process.exit(0); }
+    const lines = fs.readFileSync(EVENT_LOG_FILE, 'utf8').split('\n').filter(Boolean);
+    const latest = new Map<string, string>(); // type → json line
+    for (const line of lines) {
+      try { const e = JSON.parse(line); latest.set(e.type, line); } catch {}
+    }
+    const sorted = [...latest.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [, json] of sorted) {
+      try { console.log(formatEvent(json)); } catch { console.log(json); }
+    }
+    process.exit(0);
+  }
+
+  const consumersIdx = subArgs.indexOf('--consumers');
+  if (consumersIdx !== -1) {
+    if (!fs.existsSync(EVENT_CURSOR_DIR)) { process.exit(0); }
+    const files = fs.readdirSync(EVENT_CURSOR_DIR).filter(f => !f.endsWith('.pid'));
+    if (files.length === 0) { process.exit(0); }
+    // Header
+    const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+    const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+    const green = (s: string) => `\x1b[92m${s}\x1b[0m`;
+    const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
+    const cyan = (s: string) => `\x1b[96m${s}\x1b[0m`;
+    const maxName = Math.max(20, ...files.map(f => f.length));
+    console.log(`${bold('NAME'.padEnd(maxName))}  ${bold('STATUS')}    ${bold('LAST EVENT')}`);
+    for (const name of files.sort()) {
+      const cursorTs = parseInt(fs.readFileSync(path.join(EVENT_CURSOR_DIR, name), 'utf8').trim(), 10) || 0;
+      const pidPath = path.join(EVENT_CURSOR_DIR, name + '.pid');
+      let active = false;
+      try {
+        const pid = parseInt(fs.readFileSync(pidPath, 'utf8').trim(), 10);
+        process.kill(pid, 0); // check alive
+        active = true;
+      } catch {}
+      const status = active ? green('active ') : dim('stopped');
+      const time = cursorTs ? cyan(new Date(cursorTs).toLocaleTimeString('en-GB', { hour12: false })) : dim('never');
+      console.log(`${yellow(name.padEnd(maxName))}  ${status}   ${time}`);
+    }
+    process.exit(0);
+  }
+
+  const forceIdx = subArgs.indexOf('--force');
+  const force = forceIdx !== -1;
+  if (forceIdx !== -1) subArgs.splice(forceIdx, 1);
+
+  const jsonIdx = subArgs.indexOf('--json');
+  const forceJson = jsonIdx !== -1;
+  if (forceJson) subArgs.splice(jsonIdx, 1);
+  const pretty = !forceJson && !execCmd;
+
+  // Named consumer: enforce single consumer per name
+  const pidFile = name ? path.join(EVENT_CURSOR_DIR, name + '.pid') : '';
+  if (name) {
+    fs.mkdirSync(EVENT_CURSOR_DIR, { recursive: true });
+    try {
+      const oldPid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+      if (oldPid && oldPid !== process.pid) {
+        try { process.kill(oldPid, 0); // check if alive
+          if (force) {
+            process.kill(oldPid, 'SIGTERM');
+            console.error(`[wsh events] killed previous consumer "${name}" (pid ${oldPid})`);
+          } else {
+            console.error(`wsh events: consumer "${name}" is already active (pid ${oldPid}). Use --force to take over.`);
+            process.exit(1);
+          }
+        } catch {} // pid not running, stale file — fine
+      }
+    } catch {} // no pid file — fine
+    fs.writeFileSync(pidFile, String(process.pid));
+    const cleanup = () => { try { fs.unlinkSync(pidFile); } catch {} };
+    process.on('exit', cleanup);
+    process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+    process.on('SIGINT', () => { cleanup(); process.exit(0); });
+  }
+
+  let basePath = process.env.WSH_BASE_PATH || '/';
+  if (!basePath.startsWith('/')) basePath = '/' + basePath;
+  if (!basePath.endsWith('/')) basePath += '/';
+
+  const proxySecret = process.env.WSH_PROXY_SECRET;
+  const aboxUser = process.env.ABOX_USER;
+
+  // Build SSE URL
+  const clientAck = !!(name && execCmd);
+  const params = new URLSearchParams();
+  if (filter) params.set('filter', filter);
+  if (name) params.set('name', name);
+  if (since) params.set('since', since);
+  if (clientAck) params.set('ack', 'client');
+  const qs = params.toString() ? '?' + params.toString() : '';
+
+  // Stream SSE via curl
+  const curlHeaders: string[] = [];
+  if (proxySecret) curlHeaders.push('-H', `X-WSH-Proxy-Secret: ${proxySecret}`);
+  if (aboxUser) curlHeaders.push('-H', `X-WSH-User: ${aboxUser}`);
+
+  function tryConnect(scheme: 'http' | 'https'): void {
+    const url = `${scheme}://127.0.0.1:${port}${basePath}api/events${qs}`;
+    const flags = scheme === 'https' ? ['-sSk', '-N'] : ['-sS', '-N'];
+    let opened = false;
+    const curl = spawn('curl', [...flags, ...curlHeaders, url], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+    let buf = '';
+    curl.stdout.on('data', (chunk: Buffer) => {
+      opened = true;
+      buf += chunk.toString();
+      const lines = buf.split('\n');
+      buf = lines.pop()!; // keep incomplete line
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const json = line.slice(6);
+        if (execCmd) {
+          // Exec mode: spawn handler with env vars
+          try {
+            const event = JSON.parse(json);
+            const env: Record<string, string> = {
+              ...process.env,
+              EVENT: json,
+              EVENT_TYPE: event.type,
+              EVENT_TS: String(event.ts),
+            };
+            // Flatten data fields
+            if (event.data && typeof event.data === 'object') {
+              for (const [k, v] of Object.entries(event.data)) {
+                if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+                  env[k] = String(v);
+                }
+              }
+            }
+            // Replace {} placeholder with event JSON
+            const cmd = execCmd.includes('{}') ? execCmd.replace(/\{\}/g, json.replace(/'/g, "'\\''")) : execCmd;
+            try {
+              execSync(cmd, { env, stdio: 'inherit', shell: '/bin/sh' });
+              // Client-side ack: write cursor after successful exec
+              if (clientAck) {
+                setCursor(name, event.ts);
+              }
+            } catch (err: any) {
+              console.error(`[wsh events] exec failed (exit ${err.status}): ${cmd}`);
+            }
+          } catch {}
+        } else if (pretty) {
+          try { console.log(formatEvent(json)); } catch { console.log(json); }
+        } else {
+          // Stream mode: print JSON line
+          console.log(json);
+        }
+      }
+    });
+
+    curl.on('close', (code) => {
+      if (!opened && scheme === 'http') { tryConnect('https'); return; }
+      if (!opened) { console.error(`No wsh server running on localhost:${port}`); process.exit(1); }
+      process.exit(code ?? 0);
+    });
+    curl.on('error', () => {
+      if (!opened && scheme === 'http') { tryConnect('https'); return; }
+      if (!opened) { console.error(`No wsh server running on localhost:${port}`); process.exit(1); }
+      process.exit(1);
+    });
+
+    process.on('SIGINT', () => { curl.kill(); process.exit(0); });
+    process.on('SIGTERM', () => { curl.kill(); process.exit(0); });
+  }
+  tryConnect('http');
+  (globalThis as any).__wshFollowMode = true;
+
+// --- wsh gc ---
+} else if (process.argv[2] === 'gc') {
+  if (wantsHelp) subHelp('Usage: wsh gc <target> [options]', [
+    '', 'Clean up old data.',
+    '', 'Targets:',
+    '  events    Trim event log (default: keep last 10,000)',
+    '', 'Options (events):',
+    '  --keep <N|duration>  Keep last N events or events within duration',
+    '                       Duration: 5m, 1h, 2d, today',
+    '', 'Examples:',
+    '  wsh gc events              # trim to default 10k',
+    '  wsh gc events --keep 500   # keep last 500',
+    '  wsh gc events --keep 1h    # keep last hour',
+  ]);
+  const subArgs = process.argv.slice(3);
+  const target = subArgs.find(a => !a.startsWith('-'));
+  if (!target || target !== 'events') {
+    console.error(target ? `wsh gc: unknown target "${target}"` : 'wsh gc: target required (e.g. "wsh gc events")');
+    process.exit(1);
+  }
+  subArgs.splice(subArgs.indexOf(target), 1);
+
+  let keep: { count?: number; sinceTs?: number } | undefined;
+  const keepIdx = subArgs.indexOf('--keep');
+  if (keepIdx !== -1 && subArgs[keepIdx + 1]) {
+    const raw = subArgs[keepIdx + 1];
+    if (/^\d+$/.test(raw)) {
+      keep = { count: parseInt(raw, 10) };
+    } else {
+      const ts = parseInt(parseDuration(raw), 10);
+      if (isNaN(ts)) { console.error(`wsh gc: invalid --keep value "${raw}"`); process.exit(1); }
+      keep = { sinceTs: ts };
+    }
+  }
+
+  const removed = trimEvents(keep);
+  if (removed === 0) {
+    console.log('events: nothing to remove');
+  } else {
+    console.log(`events: removed ${removed.toLocaleString()} entries`);
+  }
+  process.exit(0);
 }
 
 // Reject unknown subcommands before server startup.
-const knownCommands = new Set(['version', 'update', 'token', 'rpc', 'apps', 'new', 'logs', 'exitcode', 'ls', 'kill', 'port']);
+const knownCommands = new Set(['version', 'update', 'token', 'rpc', 'apps', 'new', 'logs', 'exitcode', 'ls', 'kill', 'port', 'emit', 'events', 'gc']);
 const firstArg = process.argv[2];
 if (firstArg && !firstArg.startsWith('-') && !knownCommands.has(firstArg)) {
   console.error(`Unknown command: ${firstArg}`);
@@ -761,6 +1298,8 @@ if (firstArg && !firstArg.startsWith('-') && !knownCommands.has(firstArg)) {
 
 // `wsh logs -f` keeps the process alive via WebSocket — skip server startup.
 if ((globalThis as any).__wshFollowMode) { /* event loop stays alive */ } else {
+
+rotateEvents();
 
 const MAX_SCROLLBACK     = 5 * 1024 * 1024; // 5 MB
 const MAX_SCROLLBACK_WEB = 512 * 1024;      // 512 KB (web app logs)
@@ -1322,6 +1861,8 @@ if (values.help) {
   console.log('  rpc <code>         Evaluate JavaScript on connected clients');
   console.log('  exitcode <id>      Get exit code of a session');
   console.log('  port <app>         Print the port of a running web app');
+  console.log('  emit <type>        Emit an event to the event bus');
+  console.log('  events             Subscribe to events from the event bus');
   console.log('  update             Update to the latest version');
   console.log('  version            Print version and exit');
   console.log('  token              Print the auth token and exit');
@@ -1993,6 +2534,67 @@ router.get('/api/sessions/:id/stream', (req: express.Request, res: express.Respo
   req.on('close', () => {
     session.peers.delete(fakeWs);
   });
+});
+
+// --- Events ---
+
+router.post('/api/events', express.json(), (req: express.Request, res: express.Response) => {
+  const { type, data } = req.body ?? {};
+  if (!type || typeof type !== 'string') { res.status(400).json({ error: 'missing type' }); return; }
+  if (!isValidEventType(type)) { res.status(400).json({ error: 'invalid type — must be lowercase namespace.action (2-4 dot-separated segments, e.g. "deploy.done")' }); return; }
+  res.json(emitEvent(type, data));
+});
+
+router.get('/api/events', (req: express.Request, res: express.Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const filter = (req.query.filter as string) || '';
+  const name = (req.query.name as string) || '';
+  const since = req.query.since !== undefined ? Number(req.query.since) : (name ? getCursor(name) : Date.now());
+  // Parse filters: comma-separated, "!" prefix for exclude, "*" suffix stripped
+  const includes: string[] = [];
+  const excludes: string[] = [];
+  if (filter) {
+    for (const f of filter.split(',')) {
+      const trimmed = f.trim().replace(/\*$/, '');
+      if (!trimmed) continue;
+      if (trimmed.startsWith('!')) excludes.push(trimmed.slice(1));
+      else includes.push(trimmed);
+    }
+  }
+  const match = (e: WshEvent) => {
+    if (excludes.some(p => e.type.startsWith(p))) return false;
+    if (includes.length > 0) return includes.some(p => e.type.startsWith(p));
+    return true;
+  };
+
+  // Client-side ack: when set, server skips cursor writes (client manages cursor locally)
+  const clientAck = req.query.ack === 'client';
+
+  // Replay from disk
+  let lastReplayTs = since;
+  for (const e of readSince(since)) {
+    if (match(e)) res.write(`data: ${JSON.stringify(e)}\n\n`);
+    if (e.ts > lastReplayTs) lastReplayTs = e.ts;
+  }
+  if (name && !clientAck && lastReplayTs > since) setCursor(name, lastReplayTs);
+
+  // Live subscription
+  const unsub = onEvent((e) => {
+    if (res.destroyed) return;
+    if (match(e)) res.write(`data: ${JSON.stringify(e)}\n\n`);
+    if (name && !clientAck) setCursor(name, e.ts);
+  });
+
+  // Heartbeat
+  const hb = setInterval(() => {
+    if (!res.destroyed) res.write(': ping\n\n');
+  }, 30_000);
+
+  req.on('close', () => { unsub(); clearInterval(hb); });
 });
 
 router.delete('/api/sessions/:id', (req: express.Request, res: express.Response) => {

@@ -193,6 +193,22 @@ Skills are apps with a `skill` field whose command template references `$SKILL` 
 
 When a skill session is spawned with a `snapshot` in the POST body, the server writes it to `~/.wsh/snapshots/<agentSessionId>.md` before spawning the PTY. The skill reads the file via the predictable path `~/.wsh/snapshots/$WSH_SESSION.md` — faster than reading a large env var through bash. Snapshot files are cleaned up on PTY exit.
 
+## Events
+
+Lightweight pub/sub event bus backed by an append-only log file (`~/.wsh/events.log`, NDJSON). Events have a `type` (dotted namespace), monotonic `ts`, and optional `data`.
+
+**Event types:** `namespace.action` convention (e.g. `deploy.done`, `job.failed`). System events use `sys.*` prefix with three levels (e.g. `sys.session.opened`); user events use two levels.
+
+**Emit:** `wsh emit <type> [key=value...]`, `POST /api/events`, or in-process `emit(type, data)`. Key=value args are auto-parsed (numbers, booleans, JSON arrays/objects); plain strings are the fallback. Use stdin (`-`) for full control over types.
+
+**Consume:** `wsh events [--filter X] [--name X] [--exec CMD]`, `GET /api/events` (SSE), or in-process `on(fn)`.
+
+**Persistence:** Events persist to disk; named consumers (`--name`) get tracked cursors (`~/.wsh/events/cursors/<name>`) for resumable subscriptions. Log auto-rotated to last 10k lines (on startup and every 100 emits at runtime). Manual cleanup via `wsh gc events [--keep N|duration]`.
+
+**Named consumers:** One consumer per name enforced via PID file; `--force` to take over. With `--exec`, cursor advances client-side only after successful handler execution (at-least-once delivery). Without `--exec`, cursor is managed server-side. Note: `--since` with `--name` replays from the given point and resets the cursor as events are consumed.
+
+**Exec mode:** `--exec` spawns a command per event with `$EVENT` (full JSON), `$EVENT_TYPE`, `$EVENT_TS`, and flat data fields as env vars. `{}` in the command is replaced with event JSON. Handler failures are logged but don't stop the consumer.
+
 ## Distribution
 
 Single Go binary. Downloads and caches Node.js LTS to `~/.wsh/node/`. Embeds `dist/`, `public/`, `node_modules/` (~15-18 MB). Build must run on the target platform.
