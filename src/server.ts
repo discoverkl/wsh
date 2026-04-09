@@ -1984,6 +1984,13 @@ function normalizeAppEntry(value: unknown): AppConfig | null {
   return null;
 }
 
+const METADATA_ONLY_KEYS = new Set(['hidden', 'top', 'icon', 'title', 'description']);
+
+function isMetadataOnly(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  return Object.keys(value as Record<string, unknown>).every(k => METADATA_ONLY_KEYS.has(k));
+}
+
 function mergeApps(apps: Record<string, AppConfig>, parsed: Record<string, unknown>, warnings?: string[]): void {
   for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
     if (key.startsWith('_') || !value || typeof value !== 'object') continue;
@@ -1998,7 +2005,8 @@ function mergeApps(apps: Record<string, AppConfig>, parsed: Record<string, unkno
       // New app — requires command or skill
       const config = normalizeAppEntry(value);
       if (config) apps[key] = config;
-      else warnings?.push(`App "${key}" ignored — missing "command" or "skill" field`);
+      else if (!isMetadataOnly(value)) warnings?.push(`App "${key}" ignored — missing "command" or "skill" field`);
+      // Silently skip metadata-only entries (e.g. orphaned hidden/top overrides for removed apps)
     }
   }
 }
