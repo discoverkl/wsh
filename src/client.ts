@@ -1,5 +1,6 @@
 import type { Terminal as TerminalType } from '@xterm/xterm';
 import type { FitAddon as FitAddonType } from '@xterm/addon-fit';
+import type { WebLinksAddon as WebLinksAddonType } from '@xterm/addon-web-links';
 import { bindTouchScroll } from './touch-scroll.js';
 import './api.js';
 import { handleWshRpc, makeResponder } from './wsh-rpc.js';
@@ -9,6 +10,7 @@ import type { AppHealth } from './app-snapshot.js';
 // These globals are injected by the CDN <script> tags in index.html.
 declare const Terminal: typeof TerminalType;
 declare const FitAddon: { FitAddon: new () => FitAddonType };
+declare const WebLinksAddon: { WebLinksAddon: new () => WebLinksAddonType };
 
 const term = new Terminal({
   disableStdin: true,
@@ -50,6 +52,7 @@ const term = new Terminal({
 
 const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
+term.loadAddon(new WebLinksAddon.WebLinksAddon());
 term.open(document.getElementById('terminal-container') as HTMLElement);
 
 // Auto-compact on small viewports (phones) or restore saved preference

@@ -21,7 +21,13 @@ function ensureXterm() {
         script.onload = () => {
             const fitScript = document.createElement('script');
             fitScript.src = 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js';
-            fitScript.onload = () => resolve();
+            fitScript.onload = () => {
+                const wlScript = document.createElement('script');
+                wlScript.src = 'https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.12.0/lib/addon-web-links.js';
+                wlScript.onload = () => resolve();
+                wlScript.onerror = () => reject(new Error('Failed to load xterm web-links addon'));
+                document.head.appendChild(wlScript);
+            };
             fitScript.onerror = () => reject(new Error('Failed to load xterm fit addon'));
             document.head.appendChild(fitScript);
         };
@@ -338,6 +344,7 @@ window.MiniTerminal = {
             });
             fitAddon = new FitAddon.FitAddon();
             term.loadAddon(fitAddon);
+            term.loadAddon(new WebLinksAddon.WebLinksAddon());
             term.open(termDiv);
             // Make xterm non-focusable so focus stays on the skill input box.
             const xtermTextarea = termDiv.querySelector('.xterm-helper-textarea');
