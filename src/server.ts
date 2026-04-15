@@ -1409,18 +1409,42 @@ function killProcessGroup(child: ChildProcess): void {
 
 
 // Strip ephemeral terminal queries/responses from scrollback data.
-// These should not be replayed — replaying them causes xterm.js to generate
-// fresh responses that appear as garbage in TUI input fields on reconnect.
+// These should not be replayed — replaying stale queries causes xterm.js to
+// generate responses that flow back to PTY stdin as garbage (the originating
+// program is long gone, so bash echoes the responses as visible text).
 //
-// Stripped sequences:
-//   - OSC color queries:  \e]10;?\a  \e]11;?\e\\  etc.
-//   - DSR cursor reports: \e[row;colR  (response to \e[6n)
-const oscQueryStripRe = /\x1b\]\d+;\?(?:\x07|\x1b\\)/g;
-const dsrResponseRe = /\x1b\[\d+;\d+R/g;
+// Every query xterm.js responds to is listed here, plus responses that were
+// already echoed as garbage and baked into the scrollback.
+//
+// Queries:
+//   CSI c  / CSI > c / CSI = c    — DA1/DA2/DA3 (device attributes)
+//   CSI 5 n / CSI 6 n / CSI ? 6 n — DSR (device status / cursor position)
+//   CSI ? Ps $ p / CSI Ps $ p     — DECRQM (request mode)
+//   CSI 14 t / 16 t / 18 t        — window/cell size queries
+//   DCS $ q ... ST                — DECRQSS (request status string)
+//   OSC 4;N;? / 10;? / 11;? / 12;? — color queries
+// Responses:
+//   CSI row ; col R / CSI ? row ; col R — CPR
+//   CSI ? ... c                         — DA response
+//   CSI Ps ; Ps $ y / CSI ? Ps ; Ps $ y — DECRPM (mode report)
+//   CSI 8 ; rows ; cols t               — text area size response
+//   DCS 0/1 $ r ... ST                  — DECRQSS response
+const ephemeralRe = new RegExp([
+  '\\x1b\\[\\??[>= ]?[\\d;]*c',           // DA query + response
+  '\\x1b\\[\\??\\d*n',                     // DSR query (5n, 6n, ?6n)
+  '\\x1b\\[\\??\\d+;\\d+R',               // CPR response (row;colR, ?row;colR)
+  '\\x1b\\[\\??\\d+\\$p',                 // DECRQM query (?Ps$p, Ps$p)
+  '\\x1b\\[\\??\\d+;\\d+\\$y',            // DECRPM response (?Ps;Ps$y, Ps;Ps$y)
+  '\\x1b\\[(?:14|16|18)t',                // window/cell size queries
+  '\\x1b\\[8;\\d+;\\d+t',                 // text area size response
+  '\\x1bP\\$q[^\\x1b]*\\x1b\\\\',         // DECRQSS query (DCS$q...ST)
+  '\\x1bP[01]\\$r[^\\x1b]*\\x1b\\\\',     // DECRQSS response (DCS 0/1 $r...ST)
+  '\\x1b\\](?:1[012]|4;\\d+);\\?(?:\\x07|\\x1b\\\\)', // OSC color queries
+].join('|'), 'g');
 function stripEphemeralSequences(buf: Buffer): Buffer {
   const str = buf.toString('utf8');
   if (!str.includes('\x1b')) return buf;
-  const stripped = str.replace(oscQueryStripRe, '').replace(dsrResponseRe, '');
+  const stripped = str.replace(ephemeralRe, '');
   return stripped.length === str.length ? buf : Buffer.from(stripped, 'utf8');
 }
 
@@ -2211,7 +2235,9 @@ function parseCookies(header: string): Record<string, string> {
 }
 
 function verifyProxySecret(req: http.IncomingMessage): boolean {
-  return req.headers['x-wsh-proxy-secret'] === PROXY_SECRET;
+  const header = req.headers['x-wsh-proxy-secret'];
+  if (typeof header !== 'string' || header.length !== PROXY_SECRET.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(header), Buffer.from(PROXY_SECRET));
 }
 
 function makeTokenMiddleware(tok: string): express.RequestHandler {
