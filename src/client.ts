@@ -266,6 +266,7 @@ function buildWsQuery(): URLSearchParams {
   query.set('app', appName);
   if (wtoken && !isViewer) query.set('wtoken', wtoken);
   if (isViewer) query.set('yield', '1');
+  if (webReconnectAttempts > 0) query.set('reconnect', '1');
   return query;
 }
 

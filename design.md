@@ -70,7 +70,7 @@ The cleanup timer starts from the moment of disconnect, not from last activity. 
 ### Common Rules
 
 - Only owners can create sessions; non-owners get rejected with WS close code 4003
-- On reconnect, the full scrollback buffer is replayed (up to 5 MB for TUI, 512 KB for web, 1 MB for job). Job logs are also persisted to disk for durability.
+- On reconnect, the full scrollback buffer is replayed (up to 5 MB for TUI, 512 KB for web, 1 MB for job). Job logs are also persisted to disk for durability. Terminal query sequences (DSR, DA, DECRQM, DECRQSS, window-size ops, OSC color queries) and their responses are stripped from replayed scrollback — stale queries would otherwise trigger xterm.js to generate responses that flow back to PTY stdin as garbage text, since the originating program is no longer listening.
 - Only one active writer at a time; a new writer demotes the current one to viewer
 - Only owners can close sessions or toggle pin state; writers can resize and clear
 - Pin state is in-memory only; a server restart resets it (processes die anyway)
@@ -83,8 +83,8 @@ All tokens are derived from the TLS private key generated on first run (`~/.wsh/
 
 | Token | Derivation | Format | Delivery |
 |---|---|---|---|
-| **Owner** | `SHA256(TLS key)[0:16]` | 16-char hex | `HttpOnly` cookie `wsh_token` |
-| **Writer** | `SHA256(TLS key + salt + sessionId)[0:16]` | 16-char hex, per-session | URL param `?wt=<token>` |
+| **Owner** | `SHA256(TLS key)[0:16]` | 16-char hex | `HttpOnly; SameSite=Strict; Path=${BASE}` cookie `wsh_token` |
+| **Writer** | `SHA256(TLS key + salt + sessionId)[0:16]` | 16-char hex, per-session | URL param `?wtoken=` (stripped from bar via `replaceState`) |
 | **Viewer** | *(none)* | Session ID itself is the secret | URL hash `#<sessionId>` |
 
 Stateless derivation — the server can recompute any session's writer token without storing it.
