@@ -1837,6 +1837,20 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
         if (btn) btn.classList.add('has-input');
       }
     }
+    var passthrough = { Backspace: '\x7f', ArrowUp: '\x1b[A', ArrowDown: '\x1b[B' };
+    if ((e.key >= '1' && e.key <= '9' || passthrough[e.key]) && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      var ta = e.target;
+      if (ta.value === '') {
+        var appKey = ta.closest('.skill-form').dataset.app;
+        var existing = inlineTerminals[appKey];
+        if (existing && existing.isAlive()) {
+          e.preventDefault();
+          existing.send(passthrough[e.key] || e.key);
+          ta.value = '';
+          return;
+        }
+      }
+    }
     if (e.key === 'Escape') {
       var appKey = e.target.closest('.skill-form').dataset.app;
       var existing = inlineTerminals[appKey];
