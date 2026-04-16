@@ -107,6 +107,15 @@ function injectStyles() {
   background: rgba(255,255,255,0.06);
   color: #cdd6f4;
 }
+.mt-btn-primary {
+  background: rgba(205,214,244,0.1);
+  border-color: rgba(205,214,244,0.25);
+  color: #cdd6f4;
+}
+.mt-btn-primary:hover {
+  background: rgba(205,214,244,0.18);
+  color: #fff;
+}
 .mt-term {
   position: relative;
   height: 360px;
@@ -124,7 +133,7 @@ function injectStyles() {
 }
 .mt-term .xterm { background: #1e1e2e; }
 .mt-term .xterm-cursor-layer { display: none !important; }
-.mt-term .xterm * { cursor: default !important; }
+.mt-term .xterm * { cursor: default !important; user-select: none !important; -webkit-user-select: none !important; }
 .mt-term .xterm-helper-textarea { pointer-events: none !important; }
 .mt-term .xterm-viewport {
   overflow-y: auto !important;
@@ -213,7 +222,7 @@ window.MiniTerminal = {
         status.appendChild(dot);
         status.appendChild(document.createTextNode('Running...'));
         const popoutBtn = document.createElement('button');
-        popoutBtn.className = 'mt-btn';
+        popoutBtn.className = 'mt-btn mt-btn-primary';
         popoutBtn.textContent = 'Open in Tab';
         popoutBtn.setAttribute('data-action', 'popout');
         popoutBtn.tabIndex = -1;
@@ -354,14 +363,11 @@ window.MiniTerminal = {
             // Block keyboard input while allowing xterm.js to respond to OSC queries.
             // (disableStdin suppresses OSC responses, causing TUI apps to stall.)
             term.attachCustomKeyEventHandler(() => false);
-            let clearingSelection = false;
-            term.onSelectionChange(() => {
-                if (clearingSelection)
-                    return;
-                clearingSelection = true;
-                term.clearSelection();
-                clearingSelection = false;
-            });
+            // Block mouse-driven selection by intercepting mousedown on the xterm screen.
+            const xtermScreen = termDiv.querySelector('.xterm-screen');
+            if (xtermScreen) {
+                xtermScreen.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); }, true);
+            }
             // Touch scrolling with inertia (same xterm.js v6 workaround as full terminal)
             bindTouchScroll({
                 el: termDiv,
