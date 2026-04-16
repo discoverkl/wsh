@@ -1786,10 +1786,14 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
     try { fs.closeSync(logFd); } catch {}
     try { fs.writeFileSync(path.join(JOB_LOG_DIR, `${id}.exit`), String(code ?? -1)); } catch {}
 
-    // Notify connected peers that the job finished
+    // Notify connected peers that the job finished, then close their connections
+    // so followers (e.g. `wsh logs -f`) can exit cleanly instead of hanging.
     const exitMsg = JSON.stringify({ type: 'job-exit', code, signal });
     for (const ws of session.peers.keys()) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(exitMsg);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(exitMsg);
+        ws.close(1000, 'job-exit');
+      }
     }
 
     session.emit('job-exit', code);
@@ -3161,7 +3165,10 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       ws.send(JSON.stringify({ type: 'ready' }));
     }
     if (session.appType === 'job' && session.child === null && session.exitCode !== undefined) {
+      if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
       ws.send(JSON.stringify({ type: 'job-exit', code: session.exitCode }));
+      ws.close(1000, 'job-exit');
+      return;
     }
     if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
   } else {
