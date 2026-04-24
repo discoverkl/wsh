@@ -17,12 +17,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
+	"time"
 )
 
 //go:embed dist public node_modules package.json
 var appFiles embed.FS
 
 const nodeVer = "v20.19.0"
+
+// Covers slow links but bails on a hung TCP connection. 30 MB over 50 kbps still finishes in 80 min.
+var httpClient = &http.Client{Timeout: 10 * time.Minute}
 
 // appVer is set at build time: go build -ldflags "-X main.appVer=v1.0.0"
 var appVer = "dev"
@@ -131,23 +136,17 @@ func cacheDir() (string, error) {
 // ---- Node.js management ----
 
 func nodeOS() string {
-	switch runtime.GOOS {
-	case "darwin":
-		return "darwin"
-	case "linux":
-		return "linux"
-	case "windows":
+	if runtime.GOOS == "windows" {
 		return "win"
-	default:
-		return runtime.GOOS
 	}
+	return runtime.GOOS
 }
 
 func nodeArch() string {
 	if runtime.GOARCH == "amd64" {
 		return "x64"
 	}
-	return runtime.GOARCH // arm64 matches as-is
+	return runtime.GOARCH
 }
 
 func nodeDirName() string {
@@ -161,7 +160,6 @@ func nodeArchiveExt() string {
 	return ".tar.gz"
 }
 
-// ensureNode ensures the pinned Node.js version is cached and returns the path to its binary.
 func ensureNode(cache string) (string, error) {
 	nodeDir := filepath.Join(cache, "node", nodeDirName())
 
@@ -228,7 +226,6 @@ func isExecutableAppFile(path string) bool {
 
 // ---- App file extraction ----
 
-// ensureApp extracts embedded app files to the cache directory.
 // Re-extracts only when appVer changes.
 func ensureApp(cache string) (string, error) {
 	appDir := filepath.Join(cache, "app", appVer)
@@ -280,8 +277,7 @@ func ensureApp(cache string) (string, error) {
 
 // ---- Server execution ----
 
-// runServer starts the Node.js server process and waits for it to exit.
-// Forwards os.Interrupt to the child so Ctrl+C is handled gracefully.
+// Forwards SIGINT/SIGTERM to the child so Ctrl+C and container stops propagate.
 func runServer(nodeBin, serverJS string, args []string) int {
 	cmd := exec.Command(nodeBin, append([]string{serverJS}, args...)...)
 	cmd.Stdin = os.Stdin
@@ -296,7 +292,7 @@ func runServer(nodeBin, serverJS string, args []string) int {
 	}
 
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		for s := range ch {
 			_ = cmd.Process.Signal(s)
@@ -319,7 +315,7 @@ func runServer(nodeBin, serverJS string, args []string) int {
 // ---- Download helpers ----
 
 func downloadTo(w io.Writer, url string) error {
-	resp, err := http.Get(url) //nolint:gosec
+	resp, err := httpClient.Get(url) //nolint:gosec
 	if err != nil {
 		return err
 	}
@@ -332,7 +328,7 @@ func downloadTo(w io.Writer, url string) error {
 }
 
 func verifySHA256(filePath, filename, sumsURL string) error {
-	resp, err := http.Get(sumsURL) //nolint:gosec
+	resp, err := httpClient.Get(sumsURL) //nolint:gosec
 	if err != nil {
 		return err
 	}
@@ -376,11 +372,11 @@ func verifySHA256(filePath, filename, sumsURL string) error {
 // stripFirstComponent removes the leading directory segment from an archive path.
 // "node-v20.0.0-darwin-arm64/bin/node" → "bin/node"
 func stripFirstComponent(p string) string {
-	p = filepath.ToSlash(p)
-	if idx := strings.Index(p, "/"); idx >= 0 {
-		return p[idx+1:]
+	_, rest, ok := strings.Cut(filepath.ToSlash(p), "/")
+	if !ok {
+		return ""
 	}
-	return ""
+	return rest
 }
 
 // safe returns dest only if it is safely inside destDir (guards against path traversal).
@@ -390,6 +386,21 @@ func safe(destDir, rel string) string {
 		return ""
 	}
 	return dest
+}
+
+func writeExtracted(dest string, mode fs.FileMode, r io.Reader) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(out, r)
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 func extractTarGz(src, destDir string) error {
@@ -428,14 +439,7 @@ func extractTarGz(src, destDir string) error {
 		case tar.TypeDir:
 			os.MkdirAll(dest, 0755)
 		case tar.TypeReg:
-			os.MkdirAll(filepath.Dir(dest), 0755)
-			out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, hdr.FileInfo().Mode())
-			if err != nil {
-				return err
-			}
-			_, err = io.Copy(out, tr)
-			out.Close()
-			if err != nil {
+			if err := writeExtracted(dest, hdr.FileInfo().Mode(), tr); err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
@@ -469,18 +473,11 @@ func extractZip(src, destDir string) error {
 			continue
 		}
 
-		os.MkdirAll(filepath.Dir(dest), 0755)
 		rc, err := f.Open()
 		if err != nil {
 			return err
 		}
-		out, err := os.Create(dest)
-		if err != nil {
-			rc.Close()
-			return err
-		}
-		_, err = io.Copy(out, rc)
-		out.Close()
+		err = writeExtracted(dest, f.Mode(), rc)
 		rc.Close()
 		if err != nil {
 			return err

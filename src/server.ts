@@ -1318,12 +1318,25 @@ const PING_INTERVAL = 30_000;           // 30 seconds
 const PONG_TIMEOUT  = 10_000;           // 10 seconds
 const RATE_WINDOW   = 60_000;           // 1 minute
 const RATE_MAX_MISS = 10;               // max invalid session attempts per IP per window
+const MISS_SWEEP_INTERVAL = 5 * 60_000; // prune missAttempts every 5 minutes
+
+const WS_CLOSE = {
+  OK:               1000,
+  INTERNAL_ERROR:   1011,
+  SESSION_REQUIRED: 4000,
+  PONG_TIMEOUT:     4001,
+  FORBIDDEN:        4003,
+  RATE_LIMIT:       4029,
+} as const;
 
 type Role = 'owner' | 'writer' | 'viewer';
 
 interface SessionFields {
   pty: IPty | null;
-  scrollback: Buffer;
+  scrollbackChunks: Buffer[];
+  scrollbackBytes: number;
+  /** Cached result of stripEphemeralSequences(scrollback). Null until first read or after mutation. */
+  strippedScrollback: Buffer | null;
   writer: WebSocket | null;
   peers: Map<WebSocket, Role>; // every connected WS → its original role
   cleanupTimer: ReturnType<typeof setTimeout> | null;
@@ -1398,12 +1411,26 @@ function parseClientMessage(text: string): ClientMessage | null {
 }
 
 
-/** Kill a child process and its entire process group. */
-function killProcessGroup(child: ChildProcess): void {
+function killProcessGroup(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): void {
   if (child.pid != null) {
-    try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already dead */ }
+    try { process.kill(-child.pid, signal); } catch { /* already dead */ }
   } else {
-    child.kill('SIGTERM');
+    child.kill(signal);
+  }
+}
+
+function broadcast(session: Session, data: string | Buffer, opts?: { binary?: boolean }): void {
+  const binary = opts?.binary === true;
+  for (const ws of session.peers.keys()) {
+    if (ws.readyState !== WebSocket.OPEN) continue;
+    if (binary) ws.send(data, { binary: true });
+    else ws.send(data);
+  }
+}
+
+function broadcastClose(session: Session, code: number, reason: string): void {
+  for (const ws of session.peers.keys()) {
+    if (ws.readyState === WebSocket.OPEN) ws.close(code, reason);
   }
 }
 
@@ -1448,8 +1475,7 @@ function stripEphemeralSequences(buf: Buffer): Buffer {
   return stripped.length === str.length ? buf : Buffer.from(stripped, 'utf8');
 }
 
-/** Write job scrollback to disk and rotate old logs. */
-/** Rotate job logs — keep only the most recent JOB_LOG_MAX files. */
+/** Keep only the most recent JOB_LOG_MAX files. */
 function rotateJobLogs(): void {
   fs.readdir(JOB_LOG_DIR, (err, files) => {
     if (err || files.length <= JOB_LOG_MAX) return;
@@ -1483,14 +1509,47 @@ function readJobLog(id: string): Buffer | null {
   }
 }
 
+function scrollbackLimit(session: Session): number {
+  return session.appType === 'web' ? MAX_SCROLLBACK_WEB
+       : session.appType === 'job' ? MAX_SCROLLBACK_JOB
+       : MAX_SCROLLBACK;
+}
+
+// Chunk-list scrollback: O(1) amortized append, O(n) only on replay (and the
+// stripped result is cached). Buffer.concat-then-slice was quadratic.
 function appendScrollback(session: Session, data: Buffer): void {
-  const limit = session.appType === 'web' ? MAX_SCROLLBACK_WEB : session.appType === 'job' ? MAX_SCROLLBACK_JOB : MAX_SCROLLBACK;
-  session.scrollback = Buffer.concat([session.scrollback, data]);
-  if (session.scrollback.length > limit) {
-    session.scrollback = session.scrollback.slice(
-      session.scrollback.length - limit
-    );
+  if (data.length === 0) return;
+  session.scrollbackChunks.push(data);
+  session.scrollbackBytes += data.length;
+  session.strippedScrollback = null;
+  const limit = scrollbackLimit(session);
+  while (session.scrollbackBytes > limit && session.scrollbackChunks.length > 0) {
+    const first = session.scrollbackChunks[0];
+    const excess = session.scrollbackBytes - limit;
+    if (excess >= first.length) {
+      session.scrollbackChunks.shift();
+      session.scrollbackBytes -= first.length;
+    } else {
+      session.scrollbackChunks[0] = first.slice(excess);
+      session.scrollbackBytes -= excess;
+    }
   }
+}
+
+function scrollbackReplay(session: Session): Buffer | null {
+  if (session.scrollbackBytes === 0) return null;
+  if (session.strippedScrollback) return session.strippedScrollback;
+  const full = session.scrollbackChunks.length === 1
+    ? session.scrollbackChunks[0]
+    : Buffer.concat(session.scrollbackChunks, session.scrollbackBytes);
+  session.strippedScrollback = stripEphemeralSequences(full);
+  return session.strippedScrollback;
+}
+
+function clearScrollback(session: Session): void {
+  session.scrollbackChunks = [];
+  session.scrollbackBytes = 0;
+  session.strippedScrollback = null;
 }
 
 function deriveTitleFromCommand(cmd: string): string {
@@ -1501,9 +1560,11 @@ function deriveTitleFromCommand(cmd: string): string {
 
 function baseSession(appKey: string, appConfig: AppConfig): Session {
   const now = Date.now();
-  const session = Object.assign(new EventEmitter(), {
+  return Object.assign(new EventEmitter(), {
     pty: null,
-    scrollback: Buffer.alloc(0),
+    scrollbackChunks: [] as Buffer[],
+    scrollbackBytes: 0,
+    strippedScrollback: null,
     writer: null,
     peers: new Map(),
     cleanupTimer: null,
@@ -1518,7 +1579,6 @@ function baseSession(appKey: string, appConfig: AppConfig): Session {
     appType: 'pty' as const,
     child: null,
   }) as Session;
-  return session;
 }
 
 function expandHome(p: string): string {
@@ -1566,27 +1626,19 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
   session.pty = ptyProcess;
 
   const oscTitleRe = /\x1b\](?:0|2);([^\x07]*)\x07/;
-  const spawnTime = Date.now();
-  let ptyMsgCount = 0;
   ptyProcess.onData((data: string) => {
-    ptyMsgCount++;
-    if (ptyMsgCount <= 10) console.log(`[session ${id}] PTY data #${ptyMsgCount}: ${Buffer.byteLength(data)}B +${Date.now() - spawnTime}ms peers=${session.peers.size}`);
-
     const m = data.match(oscTitleRe);
     if (m) session.title = m[1];
     session.lastOutput = Date.now();
     const buf = Buffer.from(data, 'utf8');
     appendScrollback(session, buf);
-    for (const ws of session.peers.keys()) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(buf, { binary: true });
-    }
+    broadcast(session, buf, { binary: true });
   });
 
   ptyProcess.onExit(({ exitCode, signal }) => {
     console.log(`[session ${id}] PTY exited (code=${exitCode} signal=${signal})`);
     session.pty = null;
-    const closeWs = (ws: WebSocket) => { if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'PTY process exited'); };
-    for (const ws of session.peers.keys()) closeWs(ws);
+    broadcastClose(session, WS_CLOSE.OK, 'PTY process exited');
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
     if (sessions.get(id) === session) sessions.delete(id);
     removeSkillSnapshot(id);
@@ -1596,7 +1648,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
 }
 
 function spawnSession(id: string, appKey: string, appConfig: AppConfig, cols = 80, rows = 24): Session {
-  const session: Session = { ...baseSession(appKey, appConfig) };
+  const session = baseSession(appKey, appConfig);
   registerSession(id, session);
   spawnPty(id, session, appConfig, cols, rows);
   return session;
@@ -1604,7 +1656,7 @@ function spawnSession(id: string, appKey: string, appConfig: AppConfig, cols = 8
 
 /** Create a pending session that defers PTY spawn until the first resize. */
 function createPendingSession(id: string, appKey: string, appConfig: AppConfig): Session {
-  const session: Session = { ...baseSession(appKey, appConfig) };
+  const session = baseSession(appKey, appConfig);
   session.pendingConfig = appConfig;
   registerSession(id, session);
   console.log(`[session ${id}] created (pending — waiting for resize to spawn PTY)`);
@@ -1643,15 +1695,14 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   const port = await findFreePort();
   const configuredTimeout = appConfig.timeout ? parseTimeout(appConfig.timeout) : undefined;
   const timeoutMs = (configuredTimeout != null && !isNaN(configuredTimeout)) ? configuredTimeout : WEB_SESSION_TTL;
-  const session: Session = {
-    ...baseSession(appKey, appConfig),
-    appType: 'web',
+  const session = Object.assign(baseSession(appKey, appConfig), {
+    appType: 'web' as const,
     port,
     ready: false,
     timeoutMs,
     access: appConfig.access,
     stripPrefix: appConfig.stripPrefix,
-  };
+  });
 
   registerSession(id, session);
 
@@ -1681,16 +1732,12 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   const banner = `\x1b[90m$ cd ${cwd} && ${resolvedCmd}\x1b[0m\r\n`;
   const bannerBuf = Buffer.from(banner);
   appendScrollback(session, bannerBuf);
-  for (const ws of session.peers.keys()) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(bannerBuf, { binary: true });
-  }
+  broadcast(session, bannerBuf, { binary: true });
 
   const appendOutput = (data: Buffer) => {
     session.lastOutput = Date.now();
     appendScrollback(session, data);
-    for (const ws of session.peers.keys()) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: true });
-    }
+    broadcast(session, data, { binary: true });
   };
 
   child.stdout!.on('data', appendOutput);
@@ -1698,9 +1745,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
 
   child.on('exit', (code) => {
     console.log(`[session ${id}] web process exited (code ${code})`);
-    for (const ws of session.peers.keys()) {
-      if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'Process exited');
-    }
+    broadcastClose(session, WS_CLOSE.OK, 'Process exited');
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
     // Only delete if this session is still the current one (not replaced by -s reuse)
     if (sessions.get(id) === session) sessions.delete(id);
@@ -1717,10 +1762,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   pollUntilReady(port, healthPath, effectiveStartupTimeout).then(() => {
     session.ready = true;
     console.log(`[session ${id}] web app ready`);
-    const readyMsg = JSON.stringify({ type: 'ready' });
-    for (const ws of session.peers.keys()) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(readyMsg);
-    }
+    broadcast(session, JSON.stringify({ type: 'ready' }));
     // Notify catalog pages so they can show a clickable "open" toast
     if (options?.notify) {
       const escJs = (s: string) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -1760,16 +1802,13 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
 
   session.child = child;
 
-  // Banner showing the command being run (unless suppressed)
   if (!appConfig.noBanner) {
     const cwd = resolveCwd(appConfig);
     const banner = `\x1b[90m$ cd ${cwd} && ${appConfig.command}\x1b[0m\r\n`;
     const bannerBuf = Buffer.from(banner);
     appendScrollback(session, bannerBuf);
     fs.writeSync(logFd, bannerBuf);
-    for (const ws of session.peers.keys()) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(bannerBuf, { binary: true });
-    }
+    broadcast(session, bannerBuf, { binary: true });
   }
 
   const appendOutput = (data: Buffer) => {
@@ -1777,9 +1816,7 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
     appendScrollback(session, data);
     fs.writeSync(logFd, data);
     session.emit('output', data);
-    for (const ws of session.peers.keys()) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: true });
-    }
+    broadcast(session, data, { binary: true });
   };
 
   child.stdout!.on('data', appendOutput);
@@ -1792,15 +1829,9 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
     try { fs.closeSync(logFd); } catch {}
     try { fs.writeFileSync(path.join(JOB_LOG_DIR, `${id}.exit`), String(code ?? -1)); } catch {}
 
-    // Notify connected peers that the job finished, then close their connections
-    // so followers (e.g. `wsh logs -f`) can exit cleanly instead of hanging.
-    const exitMsg = JSON.stringify({ type: 'job-exit', code, signal });
-    for (const ws of session.peers.keys()) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(exitMsg);
-        ws.close(1000, 'job-exit');
-      }
-    }
+    // Notify peers first so followers (e.g. `wsh logs -f`) see the exit, then close.
+    broadcast(session, JSON.stringify({ type: 'job-exit', code, signal }));
+    broadcastClose(session, WS_CLOSE.OK, 'job-exit');
 
     session.emit('job-exit', code);
     rotateJobLogs();
@@ -1850,7 +1881,7 @@ function scheduleCleanup(id: string, session: Session): void {
       setTimeout(() => {
         if (sessions.has(id)) {
           console.log(`[session ${id}] process did not exit after SIGTERM, force killing`);
-          if (session.child) { try { process.kill(-session.child.pid!, 'SIGKILL'); } catch {} }
+          if (session.child) killProcessGroup(session.child, 'SIGKILL');
           else if (session.pty) session.pty.kill('SIGKILL');
         }
       }, 5000);
@@ -2171,6 +2202,23 @@ function isLoopback(ip: string | undefined): boolean {
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
 
+// Collapse IPv4-mapped-IPv6 (::ffff:1.2.3.4) to plain IPv4 so the same client
+// isn't tracked under two keys in rate-limit and missAttempts maps.
+function normalizeIp(ip: string | undefined): string | null {
+  if (!ip) return null;
+  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+}
+
+// Prune expired rate-limit entries; bounded memory even under IP churn.
+setInterval(() => {
+  const cutoff = Date.now() - RATE_WINDOW;
+  for (const [ip, timestamps] of missAttempts) {
+    const kept = timestamps.filter(t => t > cutoff);
+    if (kept.length === 0) missAttempts.delete(ip);
+    else if (kept.length !== timestamps.length) missAttempts.set(ip, kept);
+  }
+}, MISS_SWEEP_INTERVAL).unref();
+
 
 function getLanIPs(): string[] {
   const ips: string[] = [];
@@ -2487,7 +2535,7 @@ router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
     lastInput: s.lastInput,
     lastOutput: s.lastOutput,
     pid: s.pty?.pid ?? s.child?.pid ?? null,
-    scrollbackSize: s.scrollback.length,
+    scrollbackSize: s.scrollbackBytes,
     process: s.pty?.process ?? null,
     port: s.port ?? null,
     ready: s.ready ?? null,
@@ -2509,7 +2557,7 @@ router.get('/api/sessions/:id/logs', (req: express.Request, res: express.Respons
   const session = sessions.get(req.params.id);
   if (session) {
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.send(stripEphemeralSequences(session.scrollback));
+    res.send(scrollbackReplay(session) ?? Buffer.alloc(0));
     return;
   }
   res.status(404).json({ error: 'session not found' });
@@ -2568,9 +2616,9 @@ router.get('/api/sessions/:id/stream', (req: express.Request, res: express.Respo
   }
 
   // Non-job sessions: existing fake-peer approach
-  if (session.scrollback.length > 0) {
-    const text = stripEphemeralSequences(session.scrollback).toString('utf8');
-    res.write(`data: ${JSON.stringify({ text })}\n\n`);
+  const replay = scrollbackReplay(session);
+  if (replay) {
+    res.write(`data: ${JSON.stringify({ text: replay.toString('utf8') })}\n\n`);
   }
 
   const fakeWs = {
@@ -2918,9 +2966,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     // Remove from map first so the old exit handler won't delete the new session
     sessions.delete(requestedSession);
     if (existing.cleanupTimer !== null) clearTimeout(existing.cleanupTimer);
-    for (const ws of existing.peers.keys()) {
-      if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'Session replaced');
-    }
+    broadcastClose(existing, WS_CLOSE.OK, 'Session replaced');
     if (existing.child) killProcessGroup(existing.child);
     else if (existing.pty) existing.pty.kill('SIGHUP');
   }
@@ -2992,13 +3038,12 @@ const networkServer = (tls && !NO_TLS) ? https.createServer({ key: tls.key, cert
 const wss = new WebSocketServer({ noServer: true });
 
 function getRoleForSession(req: http.IncomingMessage, sessionId: string): Role | null {
+  const readWriterToken = (): string | null => new URL(req.url ?? '/', 'http://localhost').searchParams.get('wtoken');
   // Trust-proxy mode: role determined by X-WSH-User header from gateway
   if (TRUST_PROXY) {
     const xUser = req.headers['x-wsh-user'] as string | undefined;
     if (xUser === process.env.ABOX_USER || xUser === '*') return 'owner';
-    // Check for shared writer token
-    const url = new URL(req.url ?? '/', 'http://localhost');
-    const wt = url.searchParams.get('wtoken');
+    const wt = readWriterToken();
     if (wt !== null && tls) return wt === writerToken(sessionId) ? 'writer' : null;
     return 'viewer';
   }
@@ -3006,8 +3051,7 @@ function getRoleForSession(req: http.IncomingMessage, sessionId: string): Role |
   const cookies = parseCookies(req.headers.cookie ?? '');
   if (cookies['wsh_token'] === token) return 'owner';
   if (tls) {
-    const url = new URL(req.url ?? '/', 'http://localhost');
-    const wt = url.searchParams.get('wtoken');
+    const wt = readWriterToken();
     if (wt !== null) return wt === writerToken(sessionId) ? 'writer' : null; // reject bad token
   }
   return 'viewer'; // no writer token → viewer (session ID alone is the viewer secret)
@@ -3130,10 +3174,9 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     return;
   }
 
-  // No session ID → server generates one (only owners may create sessions).
   if (!id) {
     const cred = getRoleForSession(req, '') ?? 'viewer';
-    if (cred !== 'owner') { ws.close(4000, 'session ID required'); return; }
+    if (cred !== 'owner') { ws.close(WS_CLOSE.SESSION_REQUIRED, 'session ID required'); return; }
     id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
   }
 
@@ -3171,33 +3214,34 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       ws.send(JSON.stringify({ type: 'ready' }));
     }
     if (session.appType === 'job' && session.child === null && session.exitCode !== undefined) {
-      if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
+      const replay = scrollbackReplay(session);
+      if (replay) ws.send(replay, { binary: true });
       ws.send(JSON.stringify({ type: 'job-exit', code: session.exitCode }));
-      ws.close(1000, 'job-exit');
+      ws.close(WS_CLOSE.OK, 'job-exit');
       return;
     }
-    if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
+    const replay = scrollbackReplay(session);
+    if (replay) ws.send(replay, { binary: true });
   } else {
     // reconnect=1 means "only attach to existing session, don't create a new one"
     if (url.searchParams.get('reconnect') === '1') {
-      ws.close(4003, 'session not found');
+      ws.close(WS_CLOSE.FORBIDDEN, 'session not found');
       return;
     }
-    // New session — only owners may create one.
     if (credential !== 'owner') {
       // Rate-limit invalid session attempts per IP to prevent brute-force scanning.
-      const ip = req.socket.remoteAddress ?? '';
-      if (!isLoopback(ip)) {
+      const ip = normalizeIp(req.socket.remoteAddress);
+      if (ip && !isLoopback(ip)) {
         const now = Date.now();
         const attempts = missAttempts.get(ip)?.filter(t => t > now - RATE_WINDOW) ?? [];
         attempts.push(now);
         missAttempts.set(ip, attempts);
         if (attempts.length > RATE_MAX_MISS) {
-          ws.close(4029, 'too many attempts');
+          ws.close(WS_CLOSE.RATE_LIMIT, 'too many attempts');
           return;
         }
       }
-      ws.close(4003, 'only owners can create sessions');
+      ws.close(WS_CLOSE.FORBIDDEN, 'only owners can create sessions');
       return;
     }
     const wsSkillName = url.searchParams.get('skill') || '';
@@ -3208,7 +3252,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     // don't silently fall back to bash.  Close with 4003 so the client shows
     // "Session not found" instead of spawning an unexpected shell.
     if (!wsSkillName && RESERVED_PATHS.has(requestedApp) && !apps[requestedApp]) {
-      ws.close(4003, 'session not found');
+      ws.close(WS_CLOSE.FORBIDDEN, 'session not found');
       return;
     }
 
@@ -3263,13 +3307,14 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       session.peers.set(ws, sentRole);
       sendRoleMessage(ws, id, session, sentRole, credential);
       if (session.ready) ws.send(JSON.stringify({ type: 'ready' }));
-      if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
+      const replay = scrollbackReplay(session);
+      if (replay) ws.send(replay, { binary: true });
     } else if (effectiveConfig.type === 'job') {
       try {
         session = spawnJobSession(id, sessionLabel, effectiveConfig);
       } catch (err) {
         console.error('Failed to spawn job:', errorMessage(err));
-        ws.close(1011, 'Failed to spawn job');
+        ws.close(WS_CLOSE.INTERNAL_ERROR, 'Failed to spawn job');
         return;
       }
     } else if (effectiveConfig.type === 'web') {
@@ -3278,7 +3323,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
         session = await spawnWebSession(id, sessionLabel, effectiveConfig);
       } catch (err) {
         console.error('Failed to spawn web app:', errorMessage(err));
-        ws.close(1011, 'Failed to spawn web app');
+        ws.close(WS_CLOSE.INTERNAL_ERROR, 'Failed to spawn web app');
         return;
       }
     } else {
@@ -3286,11 +3331,11 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
         session = spawnSession(id, sessionLabel, effectiveConfig);
       } catch (err) {
         console.error('Failed to spawn PTY:', errorMessage(err));
-        ws.close(1011, 'Failed to spawn PTY');
+        ws.close(WS_CLOSE.INTERNAL_ERROR, 'Failed to spawn PTY');
         return;
       }
     }
-    if (!session) { ws.close(1011, 'Failed to create session'); return; }
+    if (!session) { ws.close(WS_CLOSE.INTERNAL_ERROR, 'Failed to create session'); return; }
     // For newly spawned sessions (not singleton joins), attach writer and send role.
     if (!session.peers.has(ws)) {
       session.writer = ws;
@@ -3300,7 +3345,8 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
         session.cleanupTimer = null;
       }
       sendRoleMessage(ws, id, session, credential, credential);
-      if (session.scrollback.length > 0) ws.send(stripEphemeralSequences(session.scrollback), { binary: true });
+      const replay = scrollbackReplay(session);
+      if (replay) ws.send(replay, { binary: true });
     }
   }
 
@@ -3347,7 +3393,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
               spawnPty(id, currentSession, cfg, cols, rows);
             } catch (err) {
               console.error(`[session ${id}] deferred spawn failed:`, errorMessage(err));
-              ws.close(1011, 'Failed to spawn PTY');
+              ws.close(WS_CLOSE.INTERNAL_ERROR, 'Failed to spawn PTY');
             }
           } else if (currentSession.pty) {
             currentSession.pty.resize(cols, rows);
@@ -3359,7 +3405,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
           else if (currentSession.pty) currentSession.pty.kill('SIGHUP');
           break;
         case 'clear':
-          currentSession.scrollback = Buffer.alloc(0);
+          clearScrollback(currentSession);
           if (currentSession.pty) currentSession.pty.write('\f');
           console.log(`[session ${id}] scrollback cleared`);
           break;
@@ -3414,11 +3460,11 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }
   });
   const pingTimer = setInterval(() => {
-    if (!pongReceived) { ws.close(4001, 'pong timeout'); return; }
+    if (!pongReceived) { ws.close(WS_CLOSE.PONG_TIMEOUT, 'pong timeout'); return; }
     pongReceived = false;
     ws.ping();
     pongTimer = setTimeout(() => {
-      if (!pongReceived) ws.close(4001, 'pong timeout');
+      if (!pongReceived) ws.close(WS_CLOSE.PONG_TIMEOUT, 'pong timeout');
     }, PONG_TIMEOUT);
   }, PING_INTERVAL);
 });
