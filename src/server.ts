@@ -1493,6 +1493,12 @@ function appendScrollback(session: Session, data: Buffer): void {
   }
 }
 
+function deriveTitleFromCommand(cmd: string): string {
+  const collapsed = cmd.replace(/\s+/g, ' ').trim();
+  const MAX = 24;
+  return collapsed.length > MAX ? collapsed.slice(0, MAX - 1) + '…' : collapsed;
+}
+
 function baseSession(appKey: string, appConfig: AppConfig): Session {
   const now = Date.now();
   const session = Object.assign(new EventEmitter(), {
@@ -2848,7 +2854,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     effectiveConfig = {
       command: adHocCommand,
       type: (adHocType || 'pty') as 'pty' | 'web' | 'job',
-      title: adHocTitle || adHocCommand.slice(0, 40),
+      title: adHocTitle || deriveTitleFromCommand(adHocCommand),
       ...(cwdOverride ? { cwd: cwdOverride } : {}),
       ...(Object.keys(envOverride).length ? { env: envOverride } : {}),
       ...(adHocNoBanner ? { noBanner: true } : {}),
