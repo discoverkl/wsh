@@ -699,7 +699,96 @@ roleBadge.addEventListener('click', () => {
 
 let flashTimer: ReturnType<typeof setTimeout> | null = null;
 
+// --- Image paste (Ctrl+V / Cmd+V) ---
+// Upload the image to the server; it writes to ~/.wsh/paste/ and returns an absolute path.
+// We then emit the path wrapped in bracketed-paste markers so TUIs (Claude Code, Codex, …)
+// auto-attach it — same semantics as drag-and-drop.
+const isMacPlatform = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+let pastingImage = false;
+
+function canPasteImage(): boolean {
+  return appType !== 'web' && currentRole !== 'viewer';
+}
+
+function findImageInDataTransfer(items: DataTransferItemList | null | undefined): File | null {
+  if (!items) return null;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) return file;
+    }
+  }
+  return null;
+}
+
+async function uploadPastedImage(blob: Blob): Promise<string | null> {
+  if (!sessionId) return null;
+  try {
+    const res = await fetch(`./api/paste-image?session=${encodeURIComponent(sessionId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': blob.type },
+      body: blob,
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { path?: string };
+    return data.path ?? null;
+  } catch { return null; }
+}
+
+function flashConnBanner(): void {
+  if (!connBanner) return;
+  connBanner.classList.add('visible');
+  setTimeout(() => connBanner.classList.remove('visible'), 1500);
+}
+
+async function sendImageAsBracketedPaste(blob: Blob): Promise<boolean> {
+  const path = await uploadPastedImage(blob);
+  if (!path || ws.readyState !== WebSocket.OPEN) { flashConnBanner(); return false; }
+  ws.send('\x1b[200~' + path + '\x1b[201~');
+  return true;
+}
+
+function startImagePaste(blob: Blob): void {
+  if (pastingImage) return;
+  pastingImage = true;
+  sendImageAsBracketedPaste(blob).finally(() => { pastingImage = false; });
+}
+
+// Native paste event covers Cmd+V on macOS and Ctrl+V on Linux/Windows synchronously.
+term.textarea?.addEventListener('paste', (e: ClipboardEvent) => {
+  if (!canPasteImage()) return;
+  const file = findImageInDataTransfer(e.clipboardData?.items);
+  if (!file) return;
+  e.preventDefault();
+  startImagePaste(file);
+});
+
 term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+  // Ctrl+V: on Linux/Windows we just step out of xterm's way so the browser
+  // dispatches a native paste event for the paste hook to handle. On macOS no
+  // native paste event fires for Ctrl+V, so we read the clipboard ourselves.
+  if (e.type === 'keydown' && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
+      && (e.key === 'v' || e.key === 'V') && canPasteImage()) {
+    if (isMacPlatform && navigator.clipboard?.read && !pastingImage) {
+      pastingImage = true;
+      navigator.clipboard.read().then(async items => {
+        for (const item of items) {
+          const imgType = item.types.find(t => t.startsWith('image/'));
+          if (imgType) {
+            const blob = await item.getType(imgType);
+            await sendImageAsBracketedPaste(blob);
+            return;
+          }
+        }
+        if (ws.readyState === WebSocket.OPEN) ws.send('\x16');
+      }).catch(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send('\x16');
+      }).finally(() => { pastingImage = false; });
+    }
+    return false;
+  }
+
   if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
     if (e.type === 'keydown' && ws.readyState === WebSocket.OPEN) ws.send('\x1b[13;2u');
     return false;
