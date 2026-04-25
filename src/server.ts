@@ -48,6 +48,34 @@ const PORT_FILE = path.join(os.homedir(), '.wsh', 'port');
 const JOB_LOG_DIR = path.join(os.homedir(), '.wsh', 'logs');
 const JOB_LOG_MAX = 200; // keep at most 200 log files
 
+/** Directory for pasted image uploads (Ctrl+V in the browser terminal). */
+const PASTE_DIR = path.join(os.homedir(), '.wsh', 'paste');
+const PASTE_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+
+/** Remove paste-image files older than PASTE_MAX_AGE_MS. Fire-and-forget; swallows errors. */
+let isSweepingPaste = false;
+async function sweepPaste(): Promise<void> {
+  if (isSweepingPaste) return;
+  isSweepingPaste = true;
+  try {
+    let entries: string[];
+    try { entries = await fs.promises.readdir(PASTE_DIR); }
+    catch { return; }
+    const cutoff = Date.now() - PASTE_MAX_AGE_MS;
+    await Promise.all(entries.map(async name => {
+      const full = path.join(PASTE_DIR, name);
+      try {
+        const st = await fs.promises.stat(full);
+        if (st.isFile() && st.mtimeMs < cutoff) await fs.promises.unlink(full);
+      } catch {}
+    }));
+  } finally {
+    isSweepingPaste = false;
+  }
+}
+fs.promises.mkdir(PASTE_DIR, { recursive: true }).catch(() => {});
+sweepPaste().catch(() => {});
+
 /** Resolve the wsh server port for CLI subcommands. Priority: --port flag > port file > 7681 default. */
 function resolveServerPort(): number {
   try {
@@ -2875,6 +2903,43 @@ router.post('/api/rpc', (req: express.Request, res: express.Response) => {
 
   sendToTargets(rpcMsg);
 });
+
+const PASTE_MIME_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+};
+
+router.post('/api/paste-image',
+  express.raw({ type: 'image/*', limit: '5mb' }),
+  async (req: express.Request, res: express.Response) => {
+    const sid = (req.query.session as string) || '';
+    if (!isSessionId(sid) || !sessions.get(sid)) {
+      res.status(404).json({ error: 'session not found' }); return;
+    }
+    const mime = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    const ext = PASTE_MIME_EXT[mime];
+    if (!ext) { res.status(415).json({ error: 'unsupported image type' }); return; }
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      res.status(400).json({ error: 'empty body' }); return;
+    }
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const mmdd = pad(d.getMonth() + 1) + pad(d.getDate());
+    const hms  = pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+    const rrr  = Math.random().toString(36).slice(2, 5).padEnd(3, '0');
+    const filename = `${mmdd}-${hms}-${rrr}.${ext}`;
+    const full = path.join(PASTE_DIR, filename);
+    try {
+      await fs.promises.writeFile(full, req.body);
+    } catch (err) {
+      console.error(`[paste] write failed: ${errorMessage(err)}`);
+      res.status(500).json({ error: 'write failed' }); return;
+    }
+    res.json({ path: full });
+    if (Math.random() < 0.05) sweepPaste().catch(() => {});
+  });
 
 router.post('/api/sessions', async (req: express.Request, res: express.Response) => {
   console.log(`[api] POST /api/sessions body=${JSON.stringify(req.body)}`);
