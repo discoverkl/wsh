@@ -168,6 +168,10 @@ Apps must be proxy-aware and configure their own base URL using `$WSH_BASE_URL`.
 
 Environment injected into web app processes: `WSH_PORT` (the port the app should listen on), `WSH_SESSION`, `WSH_BASE_URL`.
 
+## Image Paste
+
+Ctrl+V (Cmd+V on macOS) in the browser terminal uploads clipboard images to `POST /api/paste-image` (raw body, ≤5 MB, png/jpeg/gif/webp). The server writes them to `~/.wsh/paste/MMDD-HHMMSS-rrr.<ext>`, returns the absolute path, and the client emits it over the WebSocket wrapped in bracketed-paste markers (`\x1b[200~…\x1b[201~`) so TUIs like Claude Code and Codex auto-attach. Files are swept after 7 days at startup and on ~5% of uploads. The macOS Ctrl+V case uses `navigator.clipboard.read()` (HTTPS/localhost only); other paths use the synchronous `paste` event with no permission prompt.
+
 ## Port Discovery
 
 The server writes its port to `~/.wsh/port` on startup. CLI subcommands (`ls`, `new`, `logs`, `kill`, `port`, `rpc`) read this file to find the server — no environment variables needed. The `--port` flag overrides if provided.
