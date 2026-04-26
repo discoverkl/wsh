@@ -123,14 +123,26 @@ Evaluated top-to-bottom; first match wins.
 
 **`--trust-proxy` mode** (for reverse-proxy deployments):
 
-Requires `WSH_PROXY_SECRET` env var. Every request must include a matching `X-WSH-Proxy-Secret` header. The proxy sets `X-WSH-User` to identify the caller.
+Requires `WSH_PROXY_SECRET` env var. Every request must include a matching `X-WSH-Proxy-Secret` header. The proxy supplies two trusted claims:
 
-| `X-WSH-User` | Role |
+- `X-WSH-User`: display-only username (used in banners, share-link labels). Carries no authority.
+- `X-Abox-Allowed: 0|1`: the proxy's verdict on whether this caller may access this box.
+
+| Condition | Role |
 |---|---|
-| Matches `ABOX_USER` env or `*` | owner |
-| Other + valid `?wtoken=` | writer |
-| Other | viewer |
-| Missing | **rejected** |
+| `X-Abox-Allowed: 1` | owner |
+| Else, valid `?wtoken=` | writer |
+| Else | viewer |
+| Bad `?wtoken=` | **rejected** |
+| Bad/missing `X-WSH-Proxy-Secret` | **rejected** |
+
+The proxy decides who's allowed; wsh just honors the decision. From wsh's view, "owner" means "the proxy authorized this human for this box" — not "this human happens to share a name with the box."
+
+**Public-app exception.** Apps marked `access: public` in `apps.yaml` (e.g. `tetris`) are reachable by anyone the proxy forwarded, regardless of `X-Abox-Allowed`:
+- `/_a/<key>` HTTP and WebSocket: forwarded; auto-spawn allowed.
+- Parent chrome `/<box>/<appName>`: WebSocket admits non-allowed callers as viewers; the role message tells the client to load the iframe.
+- `/api/apps`: non-allowed callers see only public web apps (Skills and private apps hidden).
+- All other `/api/*` endpoints (rpc, share, sessions, paste-image, events): require `Allowed=1`.
 
 ### Writer Management
 

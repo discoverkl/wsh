@@ -2326,6 +2326,24 @@ function verifyProxySecret(req: http.IncomingMessage): boolean {
   return crypto.timingSafeEqual(Buffer.from(header), Buffer.from(PROXY_SECRET));
 }
 
+/** True iff the gateway approved this caller for box-level access.
+ *
+ * Loopback callers presenting a valid X-WSH-Proxy-Secret are also treated as
+ * approved: PROXY_SECRET is generated per-container and only known inside it,
+ * so secret + loopback = trusted in-box tooling (e.g. `wsh new` from mybox).
+ * This avoids forcing every in-box CLI to forge X-Abox-Allowed itself. */
+function gatewayAllowed(req: http.IncomingMessage): boolean {
+  if (req.headers['x-abox-allowed'] === '1') return true;
+  return isLoopback(req.socket.remoteAddress) && verifyProxySecret(req);
+}
+
+/** True iff the named app is a public web app (per apps.yaml). */
+function isPublicWebApp(appKey: string): boolean {
+  if (!appKey) return false;
+  const app = loadApps()[appKey];
+  return !!app && app.type === 'web' && app.access === 'public';
+}
+
 function makeTokenMiddleware(tok: string): express.RequestHandler {
   return (req, res, next) => {
     const url = new URL(req.url ?? '/', `https://${req.headers.host}`);
@@ -2338,16 +2356,22 @@ function makeTokenMiddleware(tok: string): express.RequestHandler {
       next();
     };
 
-    // Trust-proxy mode: gateway sets X-WSH-User header
+    // Trust-proxy mode: gateway makes the access decision via X-Abox-Allowed.
+    // Proxy/iframe paths (/_a /_p) and the /terminal WS upgrade gate themselves
+    // (they consult appConfig.access / session.access). Other /api/* endpoints
+    // are owner-side and require Allowed=1, except GET /api/apps which serves a
+    // filtered catalog to non-allowed viewers.
     if (TRUST_PROXY) {
       if (!verifyProxySecret(req)) { res.status(401).send('Unauthorized'); return; }
-      if (req.headers['x-wsh-user']) return proceed();
-      if (url.pathname.startsWith(BASE + 'api/')) {
+      const inProxyPrefix = url.pathname.startsWith(BASE + '_a/') || url.pathname.startsWith(BASE + '_p/');
+      if (inProxyPrefix) return next();
+      const inApi = url.pathname.startsWith(BASE + 'api/');
+      const isCatalog = (req.method === 'GET' || req.method === 'HEAD') && url.pathname === BASE + 'api/apps';
+      if (inApi && !isCatalog && !gatewayAllowed(req)) {
         res.status(401).send('Unauthorized');
-      } else {
-        next();
+        return;
       }
-      return;
+      return proceed();
     }
 
     if (isLoopback(req.socket.remoteAddress)) return proceed();
@@ -2432,25 +2456,32 @@ router.get('/api/share', (req: express.Request, res: express.Response) => {
   res.json({ wtoken: writerToken(sessionId) });
 });
 
-router.get('/api/apps', (_req: express.Request, res: express.Response) => {
+router.get('/api/apps', (req: express.Request, res: express.Response) => {
   const warnings: string[] = [];
   const apps = loadApps(warnings);
-  const list = Object.entries(apps)
-    .map(([key, app]) => ({
-      key,
-      title: app.title ?? path.basename(app.command.split(/\s/)[0]),
-      command: app.command,
-      icon: app.icon ?? null,
-      description: app.description ?? null,
-      skill: app.skill ?? null,
-      slashPrefix: app.slashPrefix ?? true,
-      type: app.type ?? 'pty',
-      access: app.access ?? null,
-      hidden: app.hidden ? true : undefined,
-      top: typeof app.top === 'number' && app.top > 0 ? app.top : undefined,
-      tips: Array.isArray(app.tips) && app.tips.length ? app.tips : undefined,
-      _raw: app,
-    }));
+  // Non-allowed viewers (e.g. someone who can only reach this box's public
+  // web apps) see only those public web apps. Skills and private apps are
+  // hidden — the catalog client already collapses empty sections.
+  const allowed = TRUST_PROXY ? gatewayAllowed(req) : true;
+  const entries = Object.entries(apps).filter(([_, app]) => {
+    if (allowed) return true;
+    return app.type === 'web' && app.access === 'public';
+  });
+  const list = entries.map(([key, app]) => ({
+    key,
+    title: app.title ?? path.basename(app.command.split(/\s/)[0]),
+    command: app.command,
+    icon: app.icon ?? null,
+    description: app.description ?? null,
+    skill: app.skill ?? null,
+    slashPrefix: app.slashPrefix ?? true,
+    type: app.type ?? 'pty',
+    access: app.access ?? null,
+    hidden: app.hidden ? true : undefined,
+    top: typeof app.top === 'number' && app.top > 0 ? app.top : undefined,
+    tips: Array.isArray(app.tips) && app.tips.length ? app.tips : undefined,
+    _raw: app,
+  }));
   res.json({ apps: list, ...(warnings.length ? { warnings } : {}) });
 });
 
@@ -2754,12 +2785,11 @@ function proxyHandler(req: express.Request, res: express.Response): void {
     res.status(404).json({ error: 'session not found' });
     return;
   }
-  // Access control: non-public web apps require owner auth
+  // Non-public web apps require owner-level access. In trust-proxy mode the
+  // gateway has already evaluated identity + ACL — we just honor its verdict.
   if (session.access !== 'public') {
     if (TRUST_PROXY) {
-      if (!verifyProxySecret(req)) { res.status(401).send('Unauthorized'); return; }
-      const xUser = req.headers['x-wsh-user'] as string | undefined;
-      if (xUser !== process.env.ABOX_USER && xUser !== '*') {
+      if (!verifyProxySecret(req) || !gatewayAllowed(req)) {
         res.status(401).send('Unauthorized');
         return;
       }
@@ -2808,7 +2838,9 @@ router.all('/_p/:sessionId', proxyHandler as any);
 router.all('/_p/:sessionId/*', proxyHandler as any);
 
 // Stable app-level proxy: /_a/<appKey>/... resolves to the singleton web session.
-// Auto-starts the app if no session is running.
+// Auto-starts the app if no session is running. Public apps are reachable by
+// anyone the gateway forwarded; private apps require Allowed=1 even before
+// auto-spawn (so a stranger can't trigger child processes).
 function appProxyHandler(req: express.Request, res: express.Response): void {
   const appKey = req.params.appKey;
   const apps = loadApps();
@@ -2816,6 +2848,21 @@ function appProxyHandler(req: express.Request, res: express.Response): void {
   if (!appConfig || appConfig.type !== 'web') {
     res.status(404).json({ error: 'web app not found' });
     return;
+  }
+
+  if (appConfig.access !== 'public') {
+    if (TRUST_PROXY) {
+      if (!verifyProxySecret(req) || !gatewayAllowed(req)) {
+        res.status(401).send('Unauthorized');
+        return;
+      }
+    } else if (token && !isLoopback(req.socket.remoteAddress)) {
+      const cookies = parseCookies(req.headers.cookie as string ?? '');
+      if (cookies['wsh_token'] !== token) {
+        res.status(401).send('Unauthorized');
+        return;
+      }
+    }
   }
 
   const existing = findWebSession(appKey);
@@ -3104,10 +3151,11 @@ const wss = new WebSocketServer({ noServer: true });
 
 function getRoleForSession(req: http.IncomingMessage, sessionId: string): Role | null {
   const readWriterToken = (): string | null => new URL(req.url ?? '/', 'http://localhost').searchParams.get('wtoken');
-  // Trust-proxy mode: role determined by X-WSH-User header from gateway
+  // Trust-proxy mode: any caller the gateway authorized is an owner of this
+  // box. X-WSH-User is informational (used for display) and carries no
+  // authority — the source of truth is X-Abox-Allowed.
   if (TRUST_PROXY) {
-    const xUser = req.headers['x-wsh-user'] as string | undefined;
-    if (xUser === process.env.ABOX_USER || xUser === '*') return 'owner';
+    if (gatewayAllowed(req)) return 'owner';
     const wt = readWriterToken();
     if (wt !== null && tls) return wt === writerToken(sessionId) ? 'writer' : null;
     return 'viewer';
@@ -3156,12 +3204,11 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
       socket.destroy();
       return;
     }
-    // Access control: non-public web apps require owner auth
+    // Non-public web apps require owner-level access. Trust the gateway's
+    // verdict in trust-proxy mode; cookie check otherwise.
     if (wsSession.access !== 'public') {
       if (TRUST_PROXY) {
-        if (!verifyProxySecret(req)) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
-        const xUser = req.headers['x-wsh-user'] as string | undefined;
-        if (xUser !== process.env.ABOX_USER && xUser !== '*') {
+        if (!verifyProxySecret(req) || !gatewayAllowed(req)) {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
           socket.destroy();
           return;
@@ -3202,7 +3249,7 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
 
   const sessionId = url.searchParams.get('session') ?? '';
   if (TRUST_PROXY) {
-    if (!verifyProxySecret(req) || !req.headers['x-wsh-user'] || getRoleForSession(req, sessionId) === null) {
+    if (!verifyProxySecret(req) || getRoleForSession(req, sessionId) === null) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
@@ -3239,9 +3286,15 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     return;
   }
 
+  // Public web apps may be joined or auto-spawned by anyone the gateway
+  // forwarded — that's the whole point of marking them public. Track this so
+  // both the new-session and missing-session branches below can permit it.
+  const requestedAppForPublic = url.searchParams.get('app') ?? '';
+  const publicWebApp = isPublicWebApp(requestedAppForPublic);
+
   if (!id) {
     const cred = getRoleForSession(req, '') ?? 'viewer';
-    if (cred !== 'owner') { ws.close(WS_CLOSE.SESSION_REQUIRED, 'session ID required'); return; }
+    if (cred !== 'owner' && !publicWebApp) { ws.close(WS_CLOSE.SESSION_REQUIRED, 'session ID required'); return; }
     id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
   }
 
@@ -3293,7 +3346,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       ws.close(WS_CLOSE.FORBIDDEN, 'session not found');
       return;
     }
-    if (credential !== 'owner') {
+    if (credential !== 'owner' && !publicWebApp) {
       // Rate-limit invalid session attempts per IP to prevent brute-force scanning.
       const ip = normalizeIp(req.socket.remoteAddress);
       if (ip && !isLoopback(ip)) {
