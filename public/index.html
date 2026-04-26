@@ -824,7 +824,7 @@
     /* Narrow: hide title to avoid overlap with enlarged controls */
     html.narrow #title-group { display: none; }
     /* On narrow screens, show the agent button in #actions instead */
-    html.narrow .agent-wrap.agent-actions { display: flex !important; }
+    html.narrow .agent-wrap.agent-actions:not([hidden]) { display: flex !important; }
     html.narrow .agent-wrap.agent-title { display: none !important; }
     .agent-wrap.agent-actions { display: none !important; }
     .agent-wrap.agent-actions[hidden] { display: none !important; }
