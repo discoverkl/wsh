@@ -210,9 +210,326 @@ header {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 16px;
-  padding-bottom: 64px;
+  padding-bottom: 40px;
 }
 .grid[hidden] { display: none; }
+
+.workspace-card { cursor: pointer; }
+.workspace-card:hover .card-icon {
+  box-shadow: 0 0 22px rgba(234, 179, 8, 0.30);
+}
+
+.ws-kebab {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  opacity: 0;
+  z-index: 2;
+  transition: opacity .15s ease, background-color .15s ease, color .15s ease;
+}
+.ws-kebab svg { width: 16px; height: 16px; }
+.workspace-card:hover .ws-kebab,
+.workspace-card:focus-within .ws-kebab,
+.ws-kebab.active { opacity: 1; }
+.ws-kebab:hover, .ws-kebab.active {
+  background: rgba(255,255,255,0.07);
+  color: var(--text-primary);
+}
+
+.workspace-card .card-title.editing {
+  outline: none;
+  background: rgba(99, 102, 241, 0.10);
+  border-radius: 4px;
+  padding: 0 4px;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.30);
+  cursor: text;
+  user-select: text;
+}
+
+.ws-new-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1.5px dashed var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  transition: background-color .2s ease, border-color .2s ease, color .2s ease, transform .15s ease;
+  min-height: 100%;
+  opacity: 0;
+  transform: translateY(8px);
+  user-select: none;
+}
+.ws-new-card.visible { opacity: 1; transform: translateY(0); transition: opacity .35s ease-out, transform .35s ease-out, background-color .2s ease, border-color .2s ease, color .2s ease; }
+.ws-new-card:hover {
+  background: rgba(99, 102, 241, 0.06);
+  border-color: rgba(165, 180, 252, 0.45);
+  border-style: solid;
+  color: var(--text-secondary);
+}
+.ws-new-card:focus-visible {
+  outline: none;
+  border-color: rgba(165, 180, 252, 0.55);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.20);
+}
+.ws-new-card.editing {
+  border-style: solid;
+  border-color: rgba(165, 180, 252, 0.45);
+  background: rgba(99, 102, 241, 0.06);
+  cursor: default;
+  flex-direction: row;
+  gap: 12px;
+  padding: 18px;
+  justify-content: flex-start;
+}
+.ws-new-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,255,255,0.03);
+  flex-shrink: 0;
+  transition: background-color .2s ease, color .2s ease;
+}
+.ws-new-icon svg { width: 22px; height: 22px; }
+.ws-new-card:hover .ws-new-icon { background: rgba(99, 102, 241, 0.14); color: #a5b4fc; }
+.ws-new-card.editing .ws-new-icon { background: rgba(99, 102, 241, 0.16); color: #a5b4fc; }
+.ws-new-label {
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+.ws-new-card.editing .ws-new-label { display: none; }
+.ws-new-input {
+  flex: 1;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 0;
+  letter-spacing: -0.01em;
+  min-width: 0;
+  display: none;
+}
+.ws-new-card.editing .ws-new-input { display: block; }
+.ws-new-input::placeholder { color: var(--text-tertiary); font-weight: 400; }
+
+html.narrow .ws-new-card { padding: 18px; min-height: 80px; }
+html.narrow .ws-new-card.editing { padding: 14px 16px; }
+html.narrow .ws-new-icon { width: 36px; height: 36px; border-radius: 8px; }
+html.narrow .ws-new-icon svg { width: 18px; height: 18px; }
+html.narrow .ws-new-input { font-size: 16px; }
+html.narrow .ws-new-label { font-size: 12px; margin-top: 8px; }
+html.touch .ws-new-card:active { transform: scale(0.98); background: rgba(99, 102, 241, 0.10); }
+
+.ws-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 200px;
+  padding: 6px;
+  background: rgba(34, 34, 46, 0.92);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  box-shadow:
+    0 16px 40px -10px rgba(0,0,0,0.65),
+    0 4px 14px rgba(0,0,0,0.35),
+    inset 0 1px 0 rgba(255,255,255,0.04);
+  animation: ws-menu-in .14s cubic-bezier(.16,1,.3,1);
+  font-family: inherit;
+}
+@keyframes ws-menu-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.ws-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 8px 12px 8px 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  letter-spacing: -0.005em;
+  transition: background-color .1s ease;
+}
+.ws-menu-item svg {
+  width: 14px;
+  height: 14px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  transition: color .1s ease;
+}
+.ws-menu-item:hover { background: rgba(99, 102, 241, 0.20); }
+.ws-menu-item:hover svg { color: #a5b4fc; }
+.ws-menu-item.destructive { color: #f87171; }
+.ws-menu-item.destructive svg { color: #f87171; opacity: 0.8; }
+.ws-menu-item.destructive:hover { background: rgba(248, 113, 113, 0.16); }
+.ws-menu-item.destructive:hover svg { color: #f87171; opacity: 1; }
+.ws-menu-divider {
+  height: 1px;
+  margin: 5px 8px;
+  background: rgba(255,255,255,0.06);
+}
+
+.ws-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 8, 12, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+  animation: ws-fade-in .18s ease-out;
+}
+@keyframes ws-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.ws-modal {
+  background: linear-gradient(180deg, #2a2a38 0%, #232330 100%);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 22px 22px 18px;
+  max-width: 420px;
+  width: calc(100% - 32px);
+  box-shadow:
+    0 24px 80px -10px rgba(0,0,0,0.7),
+    inset 0 1px 0 rgba(255,255,255,0.05);
+  animation: ws-modal-in .22s cubic-bezier(.16,1,.3,1);
+}
+@keyframes ws-modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.ws-modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  margin-bottom: 8px;
+}
+.ws-modal-body {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin-bottom: 18px;
+}
+.ws-modal-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: rgba(255,255,255,0.06);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.ws-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.ws-modal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.04);
+  color: var(--text-secondary);
+  transition: background .15s ease, border-color .15s ease, color .15s ease, transform .1s ease;
+}
+.ws-modal-btn:hover {
+  background: rgba(255,255,255,0.07);
+  color: var(--text-primary);
+}
+.ws-modal-btn.danger {
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.30);
+}
+.ws-modal-btn.danger:hover {
+  background: rgba(248, 113, 113, 0.22);
+  border-color: rgba(248, 113, 113, 0.50);
+  color: #fecaca;
+}
+.ws-modal-btn:active { transform: scale(0.97); }
+
+.workspace-card .card-desc {
+  font-size: 13px;
+  min-height: 0;
+  color: var(--text-tertiary);
+  -webkit-line-clamp: 1;
+}
+.workspace-card .ws-badge {
+  color: #eab308;
+  background: rgba(234, 179, 8, 0.10);
+  border-color: rgba(234, 179, 8, 0.24);
+}
+.workspace-card .ws-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+.workspace-card .ws-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--text-secondary);
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background .15s ease, color .15s ease, border-color .15s ease, transform .1s ease;
+}
+.workspace-card .ws-btn svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+.workspace-card .ws-btn:hover {
+  background: rgba(99, 102, 241, 0.18);
+  border-color: rgba(165, 180, 252, 0.40);
+  color: var(--text-primary);
+}
+.workspace-card .ws-btn:active { transform: scale(0.97); }
 
 .card {
   display: block;
@@ -537,13 +854,14 @@ header {
   padding-left: 4px;
 }
 
-/* Skills grid — 2 columns on desktop, 1 on mobile */
+/* Skills grid — 2 columns on desktop, 1 on mobile; first card always full-width */
 .skills-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(500px, 100%), 1fr));
   gap: 16px;
   padding-bottom: 40px;
 }
+.skills-grid > .skill-card:first-of-type { grid-column: 1 / -1; }
 
 /* Skill card — purple-tinted border, no link behavior */
 .skill-card {
@@ -575,6 +893,7 @@ header {
 .skill-card.project-card .skill-submit.has-input { color: #7c9aef; }
 .skill-card.project-card .skill-submit:hover,
 .skill-card.project-card .skill-submit.has-input:hover { background: rgba(124, 154, 239, 0.15); color: #7c9aef; }
+.skill-card.project-card .skill-newtab { background: rgba(124, 154, 239, 0.08); color: #7c9aef; }
 .skill-card.project-card:hover .skill-newtab { color: #7c9aef; }
 .skill-card.project-card .skill-newtab:hover { background: rgba(124, 154, 239, 0.2); color: #9db8f5; }
 .project-badge {
@@ -707,18 +1026,23 @@ header {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
+  gap: 4px;
   height: 28px;
-  background: transparent;
+  background: rgba(167, 139, 250, 0.08);
   border: none;
   border-radius: 6px;
-  color: var(--text-tertiary);
+  color: #a78bfa;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-  padding: 0;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+  padding: 0 8px 0 6px;
   vertical-align: middle;
   margin-left: 6px;
-  opacity: 0.4;
+  opacity: 0.85;
+}
+.skill-newtab-label {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
 }
 .skill-card:hover .skill-newtab {
   opacity: 1;
@@ -834,13 +1158,42 @@ html.narrow .search-wrapper {
   margin-top: 10px;
 }
 html.narrow .search-wrapper svg { left: 12px; }
+html.narrow .ws-kebab { width: 32px; height: 32px; top: 8px; right: 8px; }
+html.narrow .ws-actions { gap: 6px; margin-top: 10px; padding-top: 0; }
+html.narrow .ws-btn { padding: 8px 8px; }
+html.narrow .ws-btn svg { width: 14px; height: 14px; }
+html.narrow .card-title.editing { font-size: 16px; }
+html.narrow .ws-menu { min-width: 220px; }
+html.narrow .ws-modal { padding: 18px 18px 14px; border-radius: 12px; }
+html.narrow .ws-modal-title { font-size: 14px; }
+html.narrow .ws-modal-body { font-size: 12px; }
 
 /* ── Touch interaction ── */
 html.touch .config-gear { opacity: 0.5; width: 44px; height: 44px; top: 6px; right: 6px; }
 html.touch .card:active { transform: scale(0.98); background: var(--bg-card-hover); transition: none; }
 html.touch .skill-card:active { transform: scale(0.99); background: var(--bg-card-hover); transition: none; }
 html.touch .skill-submit { width: 44px; height: 44px; right: 2px; bottom: 2px; }
-html.touch .skill-newtab { width: 32px; height: 32px; opacity: 0.7; }
+html.touch .skill-newtab { height: 32px; padding: 0 10px 0 8px; opacity: 0.85; }
+html.touch .workspace-card { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; }
+html.touch .ws-kebab {
+  opacity: 0.6;
+  width: 40px;
+  height: 40px;
+  top: 6px;
+  right: 6px;
+  color: var(--text-secondary);
+}
+html.touch .ws-kebab svg { width: 18px; height: 18px; }
+html.touch .ws-kebab:active, html.touch .ws-kebab.active {
+  opacity: 1;
+  background: rgba(255,255,255,0.08);
+  color: var(--text-primary);
+}
+html.touch .ws-btn { padding: 9px 10px; min-height: 36px; }
+html.touch .ws-menu { padding: 8px; }
+html.touch .ws-menu-item { padding: 11px 14px 11px 12px; font-size: 14px; gap: 12px; }
+html.touch .ws-menu-item svg { width: 16px; height: 16px; }
+html.touch .ws-modal-btn { padding: 10px 18px; font-size: 14px; min-height: 40px; }
 html.touch .skill-newtab svg { width: 16px; height: 16px; }
 
 /* ── Swipe cards base (always present, actions hidden until narrow+touch) ── */
@@ -918,6 +1271,10 @@ html.narrow.touch .card-action-btn.action-hide { background: #332b1a; color: #f5
   <div id="apps-section" hidden>
     <div class="section-label">Apps</div>
     <div id="apps-content" class="grid"></div>
+  </div>
+  <div id="workspace-section" hidden>
+    <div class="section-label">Workspace</div>
+    <div id="workspace-content" class="grid"></div>
   </div>
   <div id="search-empty" class="message" hidden>No results</div>
   <div id="loading-content" class="grid">
@@ -1018,7 +1375,8 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
         '<div class="card-icon" style="color:' + (app.slashPrefix === false ? '#7c9aef' : '#a78bfa') + '">' + icons[iconId] + '</div>' +
         '<div class="skill-info">' +
           '<span class="card-title">' + escapeHtml(app.title) + '</span> ' +
-          '<button type="button" class="skill-newtab" tabindex="-1" title="Open in new tab" data-app="' + escapeAttr(app.key) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>' + badges +
+          badges +
+          '<button type="button" class="skill-newtab" tabindex="-1" title="Open in new tab" data-app="' + escapeAttr(app.key) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg><span class="skill-newtab-label">Open</span></button>' +
           '<div class="skill-desc" title="' + escapeAttr(resolveDescription(app)) + '">' + linkify(resolveDescription(app)) + '</div>' +
           (isProject && app.cwd ? '<div class="project-path" title="' + escapeAttr(app.cwd) + '">' + escapeHtml(app.cwd.replace(/^\/root\//, '~/')) + '</div>' : '') +
         '</div>' +
@@ -1663,6 +2021,551 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       });
   };
   window.refreshCatalog();
+
+  function relativeTime(ms) {
+    if (!ms) return '';
+    var diff = Math.max(0, Date.now() - ms);
+    var s = Math.floor(diff / 1000);
+    if (s < 60) return 'just now';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ago';
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ago';
+    var d = Math.floor(h / 24);
+    if (d < 7) return d + 'd ago';
+    var w = Math.floor(d / 7);
+    if (w < 5) return w + 'w ago';
+    var mo = Math.floor(d / 30);
+    if (mo < 12) return mo + 'mo ago';
+    return Math.floor(d / 365) + 'y ago';
+  }
+
+  var workspaceDefaultAgent = null;
+
+  function renderWorkspace(dirs) {
+    var section = document.getElementById('workspace-section');
+    var content = document.getElementById('workspace-content');
+    if (!section || !content) return;
+    dirs = dirs || [];
+    content.innerHTML = '';
+    var folderIcon = icons.folder || icons.default;
+    var folderColor = iconColors.folder || iconColors.default;
+    var filesIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+    var termIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
+    dirs.forEach(function(dir, i) {
+      var card = document.createElement('div');
+      card.className = 'card workspace-card';
+      card.dataset.app = dir.name;
+      card.dataset.title = dir.name;
+      card.dataset.path = dir.path;
+      card.dataset.name = dir.name;
+      card.tabIndex = 0;
+      var rel = relativeTime(dir.mtime);
+      card.dataset.desc = rel;
+      var filesHref = './filebrowser?to=' + encodeURIComponent('/files' + dir.path);
+      var kebabIcon = '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="6" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="18" r="1.6"/></svg>';
+      card.innerHTML =
+        '<button type="button" class="ws-kebab" data-action="menu" tabindex="-1" aria-label="More actions">' + kebabIcon + '</button>' +
+        '<div class="card-header">' +
+          '<div class="card-icon" style="color:' + folderColor + '">' + folderIcon + '</div>' +
+          '<div class="card-title-row">' +
+            '<span class="card-title">' + escapeHtml(dir.name) + '</span>' +
+            '<span class="card-type-badge ws-badge">FOLDER</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="card-desc" title="' + escapeAttr(dir.path) + '">' + (rel ? 'Modified ' + escapeHtml(rel) : ' ') + '</div>' +
+        '<div class="ws-actions">' +
+          '<a class="ws-btn" href="' + escapeAttr(filesHref) + '" target="_blank" data-action="files">' + filesIcon + 'Files</a>' +
+          '<button type="button" class="ws-btn" data-action="terminal" data-path="' + escapeAttr(dir.path) + '" data-name="' + escapeAttr(dir.name) + '">' + termIcon + 'Terminal</button>' +
+        '</div>';
+      content.appendChild(card);
+      setTimeout(function() { card.classList.add('visible'); }, 25 * i);
+    });
+    var newTile = buildNewWorkspaceTile();
+    content.appendChild(newTile);
+    setTimeout(function() { newTile.classList.add('visible'); }, 25 * dirs.length);
+    section.hidden = false;
+  }
+
+  function buildNewWorkspaceTile() {
+    var tile = document.createElement('div');
+    tile.className = 'ws-new-card';
+    tile.tabIndex = 0;
+    tile.setAttribute('role', 'button');
+    tile.setAttribute('aria-label', 'Create new folder');
+    tile.innerHTML =
+      '<div class="ws-new-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>' +
+      '<div class="ws-new-label">New folder</div>' +
+      '<input class="ws-new-input" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Folder name…" maxlength="255">';
+
+    var inFlight = false;
+    function activate() {
+      if (tile.classList.contains('editing')) return;
+      tile.classList.add('editing');
+      var input = tile.querySelector('.ws-new-input');
+      input.value = '';
+      input.focus();
+    }
+    function cancel() {
+      tile.classList.remove('editing');
+      var input = tile.querySelector('.ws-new-input');
+      if (input) input.value = '';
+    }
+    function commit() {
+      if (inFlight) return;
+      var input = tile.querySelector('.ws-new-input');
+      var name = (input.value || '').trim();
+      if (!name) { cancel(); return; }
+      if (/[\/\\]/.test(name) || name.startsWith('.') || name.startsWith('-') || name.length > 255) {
+        api.toast({ html: 'Invalid folder name', variant: 'warn' });
+        input.focus();
+        return;
+      }
+      inFlight = true;
+      input.disabled = true;
+      fetch('./api/workspace/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name })
+      })
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+        .then(function(res) {
+          inFlight = false;
+          input.disabled = false;
+          if (!res.ok || res.data.error) {
+            api.toast({ html: 'Create failed: ' + escapeHtml(res.data.error || 'unknown'), variant: 'warn' });
+            input.focus();
+            return;
+          }
+          cancel();
+          loadWorkspace();
+        })
+        .catch(function(err) {
+          inFlight = false;
+          input.disabled = false;
+          api.toast({ html: 'Create failed: ' + escapeHtml(err.message), variant: 'warn' });
+          input.focus();
+        });
+    }
+
+    tile.addEventListener('click', function(e) {
+      if (tile.classList.contains('editing')) return;
+      if (e.target.closest('.ws-new-input')) return;
+      activate();
+    });
+    tile.addEventListener('keydown', function(e) {
+      if (tile.classList.contains('editing')) return;
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
+    });
+    var input = tile.querySelector('.ws-new-input');
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    });
+    input.addEventListener('blur', function() {
+      // small delay so a click on a non-input area inside the tile doesn't blur+commit before the click registers
+      setTimeout(function() {
+        if (inFlight) return;
+        if (!tile.classList.contains('editing')) return;
+        if (document.activeElement === input) return;
+        var name = (input.value || '').trim();
+        if (!name) cancel();
+        else commit();
+      }, 80);
+    });
+    return tile;
+  }
+
+  // -------- Workspace action menu (kebab + right-click) --------
+  // Action set drives both the kebab popover and the context menu.
+  // To add a new action, push another entry here.
+  var workspaceActionIcons = {
+    open:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>',
+    files:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+    terminal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
+    rename:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>',
+    copy:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>',
+    trash:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>',
+    newFolder:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>'
+  };
+
+  var workspaceActions = [
+    { id: 'open',     label: 'Open with agent',  icon: workspaceActionIcons.open,
+      run: function(dir) { launchDefaultAgent(dir.path, dir.name); } },
+    { id: 'files',    label: 'Open in Files',    icon: workspaceActionIcons.files,
+      run: function(dir, card) { var link = card.querySelector('.ws-btn[data-action="files"]'); if (link) link.click(); } },
+    { id: 'terminal', label: 'Open in Terminal', icon: workspaceActionIcons.terminal,
+      run: function(dir) { launchWorkspaceTerminal(dir.path, dir.name); } },
+    { divider: true },
+    { id: 'rename',   label: 'Rename',           icon: workspaceActionIcons.rename,
+      run: function(dir, card) { beginRename(card); } },
+    { id: 'copy',     label: 'Copy path',        icon: workspaceActionIcons.copy,
+      run: function(dir) { copyPath(dir.path); } },
+    { divider: true },
+    { id: 'delete',   label: 'Delete…',          icon: workspaceActionIcons.trash, destructive: true,
+      run: function(dir, card) { confirmDelete(dir, card); } }
+  ];
+
+  var openMenu = null;
+
+  function dirFromCard(card) {
+    return { name: card.dataset.name, path: card.dataset.path };
+  }
+
+  function openWorkspaceMenu(card, anchor) {
+    closeWorkspaceMenu();
+    var menu = document.createElement('div');
+    menu.className = 'ws-menu';
+    menu.setAttribute('role', 'menu');
+    workspaceActions.forEach(function(a) {
+      if (a.divider) {
+        var d = document.createElement('div');
+        d.className = 'ws-menu-divider';
+        menu.appendChild(d);
+        return;
+      }
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'ws-menu-item' + (a.destructive ? ' destructive' : '');
+      b.setAttribute('role', 'menuitem');
+      b.dataset.id = a.id;
+      b.innerHTML = a.icon + '<span>' + escapeHtml(a.label) + '</span>';
+      b.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        closeWorkspaceMenu();
+        a.run(dirFromCard(card), card);
+      });
+      menu.appendChild(b);
+    });
+    document.body.appendChild(menu);
+
+    // Position the menu, clamped to viewport
+    var rect = menu.getBoundingClientRect();
+    var W = window.innerWidth, H = window.innerHeight;
+    var pos = anchor;
+    var x = pos.x, y = pos.y;
+    if (x + rect.width + 8 > W) x = Math.max(8, W - rect.width - 8);
+    if (y + rect.height + 8 > H) y = Math.max(8, pos.flipY != null ? pos.flipY - rect.height : y - rect.height - (pos.h || 0));
+    if (x < 8) x = 8;
+    if (y < 8) y = 8;
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+
+    var kebab = card.querySelector('.ws-kebab');
+    if (kebab) kebab.classList.add('active');
+    openMenu = { el: menu, card: card, kebab: kebab };
+  }
+
+  function closeWorkspaceMenu() {
+    if (!openMenu) return;
+    if (openMenu.el && openMenu.el.parentNode) openMenu.el.parentNode.removeChild(openMenu.el);
+    if (openMenu.kebab) openMenu.kebab.classList.remove('active');
+    openMenu = null;
+  }
+
+  // Close on outside click, Esc, scroll, resize
+  document.addEventListener('mousedown', function(e) {
+    if (!openMenu) return;
+    if (e.target.closest('.ws-menu')) return;
+    if (e.target.closest('.ws-kebab.active')) return;
+    closeWorkspaceMenu();
+  }, true);
+  document.addEventListener('keydown', function(e) {
+    if (openMenu && e.key === 'Escape') { e.preventDefault(); closeWorkspaceMenu(); }
+  });
+  window.addEventListener('scroll', closeWorkspaceMenu, true);
+  window.addEventListener('resize', closeWorkspaceMenu);
+
+  // Right-click on a workspace card opens the action menu at the cursor.
+  // Right-click on empty grid space (not on a card) opens a small "New folder" menu.
+  document.addEventListener('contextmenu', function(e) {
+    var card = e.target.closest('.workspace-card');
+    if (card) {
+      e.preventDefault();
+      openWorkspaceMenu(card, { x: e.clientX, y: e.clientY });
+      return;
+    }
+    var inGrid = e.target.closest('#workspace-content');
+    if (inGrid && !e.target.closest('.ws-new-card.editing')) {
+      e.preventDefault();
+      openNewFolderMenu({ x: e.clientX, y: e.clientY });
+    }
+  });
+
+  function openNewFolderMenu(anchor) {
+    closeWorkspaceMenu();
+    var menu = document.createElement('div');
+    menu.className = 'ws-menu';
+    menu.setAttribute('role', 'menu');
+    var item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'ws-menu-item';
+    item.setAttribute('role', 'menuitem');
+    item.innerHTML = workspaceActionIcons.newFolder + '<span>New folder…</span>';
+    item.addEventListener('click', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeWorkspaceMenu();
+      var tile = document.querySelector('.ws-new-card');
+      if (tile) tile.click();
+    });
+    menu.appendChild(item);
+    document.body.appendChild(menu);
+    var rect = menu.getBoundingClientRect();
+    var W = window.innerWidth, H = window.innerHeight;
+    var x = anchor.x, y = anchor.y;
+    if (x + rect.width + 8 > W) x = Math.max(8, W - rect.width - 8);
+    if (y + rect.height + 8 > H) y = Math.max(8, H - rect.height - 8);
+    if (x < 8) x = 8;
+    if (y < 8) y = 8;
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+    openMenu = { el: menu, card: null, kebab: null };
+  }
+
+  // -------- Inline rename --------
+  function beginRename(card) {
+    var titleEl = card.querySelector('.card-title');
+    if (!titleEl || titleEl.classList.contains('editing')) return;
+    var original = card.dataset.name;
+    titleEl.classList.add('editing');
+    titleEl.contentEditable = 'plaintext-only';
+    if (titleEl.contentEditable !== 'plaintext-only') titleEl.contentEditable = 'true'; // older browsers
+    titleEl.spellcheck = false;
+    titleEl.focus();
+    var range = document.createRange();
+    range.selectNodeContents(titleEl);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+
+    function cleanup() {
+      titleEl.classList.remove('editing');
+      titleEl.removeAttribute('contenteditable');
+      titleEl.removeEventListener('keydown', onKey);
+      titleEl.removeEventListener('blur', onBlur);
+    }
+    function commit() {
+      var newName = (titleEl.textContent || '').trim();
+      cleanup();
+      if (!newName || newName === original) {
+        titleEl.textContent = original;
+        return;
+      }
+      if (/[\/\\]/.test(newName) || newName.startsWith('.') || newName.startsWith('-')) {
+        titleEl.textContent = original;
+        api.toast({ html: 'Invalid folder name', variant: 'warn' });
+        return;
+      }
+      // Optimistic update
+      titleEl.textContent = newName;
+      fetch('./api/workspace/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: original, to: newName })
+      })
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+        .then(function(res) {
+          if (!res.ok || res.data.error) {
+            titleEl.textContent = original;
+            api.toast({ html: 'Rename failed: ' + escapeHtml(res.data.error || 'unknown'), variant: 'warn' });
+            return;
+          }
+          card.dataset.name = newName;
+          card.dataset.title = newName;
+          card.dataset.app = newName;
+          var newPath = res.data.path;
+          if (newPath) card.dataset.path = newPath;
+          // Refresh the workspace list to re-sort and update Files/Terminal data attrs
+          loadWorkspace();
+        })
+        .catch(function(err) {
+          titleEl.textContent = original;
+          api.toast({ html: 'Rename failed: ' + escapeHtml(err.message), variant: 'warn' });
+        });
+    }
+    function onKey(e) {
+      if (e.key === 'Enter') { e.preventDefault(); titleEl.blur(); }
+      else if (e.key === 'Escape') { e.preventDefault(); titleEl.textContent = original; cleanup(); }
+    }
+    function onBlur() { commit(); }
+    titleEl.addEventListener('keydown', onKey);
+    titleEl.addEventListener('blur', onBlur);
+  }
+
+  // -------- Copy path --------
+  function copyPath(p) {
+    var done = function() { api.toast({ html: 'Copied <code>' + escapeHtml(p) + '</code>' }); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(p).then(done, function() {
+        api.toast({ html: 'Copy failed', variant: 'warn' });
+      });
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = p;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { api.toast({ html: 'Copy failed', variant: 'warn' }); }
+      ta.remove();
+    }
+  }
+
+  // -------- Delete with confirm modal --------
+  function confirmDelete(dir, card) {
+    var overlay = document.createElement('div');
+    overlay.className = 'ws-modal-overlay';
+    overlay.innerHTML =
+      '<div class="ws-modal" role="dialog" aria-modal="true">' +
+        '<div class="ws-modal-title">Delete folder?</div>' +
+        '<div class="ws-modal-body">Move <code>' + escapeHtml(dir.path.replace(/^\/root\//, '~/')) + '</code> to the workspace trash. You can restore it from <code>~/.workspace-trash</code>.</div>' +
+        '<div class="ws-modal-actions">' +
+          '<button type="button" class="ws-modal-btn" data-action="cancel">Cancel</button>' +
+          '<button type="button" class="ws-modal-btn danger" data-action="delete">Delete</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    function close() {
+      overlay.removeEventListener('keydown', onKey);
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); close(); }
+      else if (e.key === 'Enter') { e.preventDefault(); doDelete(); }
+    }
+    function doDelete() {
+      var deleteBtn = overlay.querySelector('[data-action="delete"]');
+      var cancelBtn = overlay.querySelector('[data-action="cancel"]');
+      deleteBtn.disabled = true;
+      cancelBtn.disabled = true;
+      deleteBtn.textContent = 'Deleting…';
+      fetch('./api/workspace/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: dir.name })
+      })
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+        .then(function(res) {
+          if (!res.ok || res.data.error) {
+            api.toast({ html: 'Delete failed: ' + escapeHtml(res.data.error || 'unknown'), variant: 'warn' });
+            close();
+            return;
+          }
+          close();
+          card.classList.add('removing');
+          setTimeout(function() { loadWorkspace(); }, 360);
+        })
+        .catch(function(err) {
+          api.toast({ html: 'Delete failed: ' + escapeHtml(err.message), variant: 'warn' });
+          close();
+        });
+    }
+    overlay.addEventListener('click', function(e) {
+      if (e.target === overlay) close();
+      else if (e.target.closest('[data-action="cancel"]')) close();
+      else if (e.target.closest('[data-action="delete"]')) doDelete();
+    });
+    overlay.tabIndex = -1;
+    overlay.addEventListener('keydown', onKey);
+    overlay.focus();
+  }
+
+  // -------- Workspace card click handler --------
+  // - Kebab → open menu
+  // - Terminal/Files buttons → handled
+  // - Anywhere else → launch default agent
+  document.addEventListener('click', function(e) {
+    var kebab = e.target.closest('.workspace-card .ws-kebab');
+    if (kebab) {
+      e.preventDefault();
+      e.stopPropagation();
+      // Toggle: if this kebab already opened the current menu, close it
+      if (openMenu && openMenu.kebab === kebab) {
+        closeWorkspaceMenu();
+        return;
+      }
+      var card = kebab.closest('.workspace-card');
+      var rect = kebab.getBoundingClientRect();
+      openWorkspaceMenu(card, { x: rect.right - 200, y: rect.bottom + 6, h: rect.height, flipY: rect.top });
+      return;
+    }
+    var termBtn = e.target.closest('.workspace-card .ws-btn[data-action="terminal"]');
+    if (termBtn) {
+      e.preventDefault();
+      launchWorkspaceTerminal(termBtn.dataset.path, termBtn.dataset.name);
+      return;
+    }
+    if (e.target.closest('.workspace-card .ws-btn[data-action="files"]')) return;
+    var card2 = e.target.closest('.workspace-card');
+    if (!card2) return;
+    // Don't trigger when clicking on title during rename
+    if (e.target.closest('.card-title.editing')) return;
+    launchDefaultAgent(card2.dataset.path, card2.dataset.name);
+  });
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter') return;
+    var card = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('workspace-card')
+      ? document.activeElement : null;
+    if (!card) return;
+    e.preventDefault();
+    launchDefaultAgent(card.dataset.path, card.dataset.name);
+  });
+
+  function launchDefaultAgent(dirPath, dirName) {
+    var agent = workspaceDefaultAgent || 'claude-code';
+    fetch('./api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app: agent, cwd: dirPath, title: dirName })
+    })
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        if (data.url) {
+          try { var u = new URL(data.url); window.open(u.pathname + u.hash, '_blank'); }
+          catch(e) { window.open(data.url, '_blank'); }
+        } else if (data.error) {
+          api.toast({ html: 'Failed to open agent: ' + escapeHtml(data.error), variant: 'warn' });
+        }
+      })
+      .catch(function(err) {
+        api.toast({ html: 'Failed to open agent: ' + escapeHtml(err.message), variant: 'warn' });
+      });
+  }
+
+  function launchWorkspaceTerminal(dirPath, dirName) {
+    fetch('./api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app: 'bash', cwd: dirPath, title: dirName })
+    })
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        if (data.url) {
+          try { var u = new URL(data.url); window.open(u.pathname + u.hash, '_blank'); }
+          catch(e) { window.open(data.url, '_blank'); }
+        } else if (data.error) {
+          api.toast({ html: 'Failed to open terminal: ' + escapeHtml(data.error), variant: 'warn' });
+        }
+      })
+      .catch(function(err) {
+        api.toast({ html: 'Failed to open terminal: ' + escapeHtml(err.message), variant: 'warn' });
+      });
+  }
+
+  function loadWorkspace() {
+    fetch('./api/workspace')
+      .then(function(res) { return res.ok ? res.json() : { dirs: [], defaultAgent: null }; })
+      .then(function(data) {
+        workspaceDefaultAgent = data.defaultAgent || null;
+        renderWorkspace(data.dirs || []);
+      })
+      .catch(function() {});
+  }
+  loadWorkspace();
 
   // RPC control connection for server broadcasts
   connectRpc();
