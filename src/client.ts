@@ -100,6 +100,22 @@ function getSessionParams(): { sessionId: string | null; wtoken: string | null }
 
 let { sessionId, wtoken } = getSessionParams();
 
+// --- Initial inner path for web apps (?to=<path>) ---
+// One-shot deep link into a specific path inside the iframe. Used only on the
+// initial iframe src; stripped from the parent URL after read so reconnects and
+// the hash sync don't see it. Path-channel only — `to` sets the iframe's path,
+// while the hash sync sets its fragment, so the two are orthogonal.
+function consumeInitialInnerPath(): string {
+  const url = new URL(location.href);
+  const to = url.searchParams.get('to');
+  if (!to) return '';
+  url.searchParams.delete('to');
+  history.replaceState(null, '', url.pathname + url.search + location.hash);
+  return to.startsWith('/') ? to : '';
+}
+
+const initialInnerPath = consumeInitialInnerPath();
+
 // --- Hash passthrough for web apps ---
 // The parent URL hash has the form #sessionId/app/path. The part after the
 // first '/' is the "app hash" which is relayed to/from the web app iframe.
@@ -407,7 +423,8 @@ function connect(): void {
         if (msg.type === 'ready' && appType === 'web') {
           const iframe = document.getElementById('web-frame') as HTMLIFrameElement;
           const currentAppHash = getAppHash();
-          const targetSrc = `./_a/${appName}/${currentAppHash ? '#' + currentAppHash : ''}`;
+          const innerPath = initialInnerPath || '/';
+          const targetSrc = `./_a/${appName}${innerPath}${currentAppHash ? '#' + currentAppHash : ''}`;
           if (!iframe.src || iframe.src === 'about:blank') {
             iframe.src = targetSrc;
             iframe.addEventListener('load', () => {

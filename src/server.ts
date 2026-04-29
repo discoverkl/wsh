@@ -2581,6 +2581,118 @@ router.post('/api/apps/:key/untop', (req: express.Request, res: express.Response
   res.json({ ok: true });
 });
 
+router.get('/api/workspace', (req: express.Request, res: express.Response) => {
+  const allowed = TRUST_PROXY ? gatewayAllowed(req) : true;
+  if (!allowed) { res.json({ dirs: [], defaultAgent: null }); return; }
+  const root = path.join(os.homedir(), 'workspace');
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    res.json({ dirs: [], defaultAgent: null });
+    return;
+  }
+  const dirs = entries
+    .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+    .map((e) => {
+      const full = path.join(root, e.name);
+      let mtime = 0;
+      try { mtime = fs.statSync(full).mtimeMs; } catch {}
+      return { name: e.name, path: full, mtime };
+    })
+    .sort((a, b) => b.mtime - a.mtime);
+
+  // Resolve the default agent from _skills.agent (user yaml takes precedence over system)
+  let defaultAgent: string | null = null;
+  for (const config of [loadConfigFile(path.join(os.homedir(), '.wsh')), loadConfigFile(SYSTEM_CONFIG_DIR)]) {
+    const raw = (config as any)?._skills;
+    if (raw && typeof raw === 'object' && typeof raw.agent === 'string' && raw.agent) {
+      defaultAgent = raw.agent;
+      break;
+    }
+  }
+  if (!defaultAgent) defaultAgent = 'claude-code';
+
+  res.json({ dirs, defaultAgent });
+});
+
+function safeWorkspaceName(name: unknown): string | null {
+  if (typeof name !== 'string' || !name) return null;
+  if (name.length > 255) return null;
+  if (name === '.' || name === '..') return null;
+  if (name.startsWith('.') || name.startsWith('-')) return null;
+  if (/[\/\\\x00-\x1f]/.test(name)) return null;
+  return name;
+}
+
+router.post('/api/workspace/create', express.json(), (req: express.Request, res: express.Response) => {
+  const allowed = TRUST_PROXY ? gatewayAllowed(req) : true;
+  if (!allowed) { res.status(403).json({ error: 'Forbidden' }); return; }
+  const name = safeWorkspaceName(req.body?.name);
+  if (!name) { res.status(400).json({ error: 'Invalid name' }); return; }
+  const root = path.join(os.homedir(), 'workspace');
+  const target = path.join(root, name);
+  if (fs.existsSync(target)) { res.status(409).json({ error: 'A directory with that name already exists' }); return; }
+  try {
+    fs.mkdirSync(root, { recursive: true });
+    fs.mkdirSync(target);
+    res.json({ ok: true, name, path: target });
+  } catch (e) {
+    res.status(500).json({ error: 'Create failed: ' + errorMessage(e) });
+  }
+});
+
+router.post('/api/workspace/rename', express.json(), (req: express.Request, res: express.Response) => {
+  const allowed = TRUST_PROXY ? gatewayAllowed(req) : true;
+  if (!allowed) { res.status(403).json({ error: 'Forbidden' }); return; }
+  const fromName = safeWorkspaceName(req.body?.from);
+  const toName = safeWorkspaceName(req.body?.to);
+  if (!fromName || !toName) { res.status(400).json({ error: 'Invalid name' }); return; }
+  if (fromName === toName) { res.json({ ok: true }); return; }
+  const root = path.join(os.homedir(), 'workspace');
+  const fromPath = path.join(root, fromName);
+  const toPath = path.join(root, toName);
+  try {
+    const stat = fs.statSync(fromPath);
+    if (!stat.isDirectory()) { res.status(400).json({ error: 'Not a directory' }); return; }
+  } catch {
+    res.status(404).json({ error: 'Directory not found' }); return;
+  }
+  if (fs.existsSync(toPath)) { res.status(409).json({ error: 'A directory with that name already exists' }); return; }
+  try {
+    fs.renameSync(fromPath, toPath);
+    res.json({ ok: true, name: toName, path: toPath });
+  } catch (e) {
+    res.status(500).json({ error: 'Rename failed: ' + errorMessage(e) });
+  }
+});
+
+router.post('/api/workspace/delete', express.json(), (req: express.Request, res: express.Response) => {
+  const allowed = TRUST_PROXY ? gatewayAllowed(req) : true;
+  if (!allowed) { res.status(403).json({ error: 'Forbidden' }); return; }
+  const name = safeWorkspaceName(req.body?.name);
+  if (!name) { res.status(400).json({ error: 'Invalid name' }); return; }
+  const root = path.join(os.homedir(), 'workspace');
+  const fromPath = path.join(root, name);
+  try {
+    const stat = fs.statSync(fromPath);
+    if (!stat.isDirectory()) { res.status(400).json({ error: 'Not a directory' }); return; }
+  } catch {
+    res.status(404).json({ error: 'Directory not found' }); return;
+  }
+  // Move to a trash dir instead of deleting outright — recoverable
+  const trashRoot = path.join(os.homedir(), '.workspace-trash');
+  try { fs.mkdirSync(trashRoot, { recursive: true }); } catch {}
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const trashPath = path.join(trashRoot, `${stamp}-${name}`);
+  try {
+    fs.renameSync(fromPath, trashPath);
+    res.json({ ok: true, trashPath });
+  } catch (e) {
+    res.status(500).json({ error: 'Delete failed: ' + errorMessage(e) });
+  }
+});
+
 router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
   const list = [...sessions.entries()].map(([id, s]) => ({
     id,
