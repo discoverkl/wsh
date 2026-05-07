@@ -2583,7 +2583,7 @@ router.post('/api/apps/:key/untop', (req: express.Request, res: express.Response
 
 router.get('/api/workspace', (req: express.Request, res: express.Response) => {
   const allowed = TRUST_PROXY ? gatewayAllowed(req) : true;
-  if (!allowed) { res.json({ dirs: [], defaultAgent: null }); return; }
+  if (!allowed) { res.status(403).json({ error: 'Forbidden' }); return; }
   const root = path.join(os.homedir(), 'workspace');
   let entries: fs.Dirent[];
   try {
