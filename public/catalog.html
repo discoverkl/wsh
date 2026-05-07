@@ -2558,8 +2558,9 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
 
   function loadWorkspace() {
     fetch('./api/workspace')
-      .then(function(res) { return res.ok ? res.json() : { dirs: [], defaultAgent: null }; })
+      .then(function(res) { return res.ok ? res.json() : null; })
       .then(function(data) {
+        if (!data) return;
         workspaceDefaultAgent = data.defaultAgent || null;
         renderWorkspace(data.dirs || []);
       })
