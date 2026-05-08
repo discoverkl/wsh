@@ -467,14 +467,14 @@ python3:
     '  --env KEY=VALUE         Set environment variable (repeatable)',
     '  --skill <name>          Run a skill instead of an app',
     '  --notify                Show a toast on the catalog page when ready',
-    '  --id-only               Print only the session ID (no URL)',
-    '  --no-banner             Suppress command banner in job output',
+    '  --id-only               Print only the session ID (no URL). Implicit for --type job.',
+    '  --banner                Prepend "$ cd <cwd> && <cmd>" line to job output (off by default)',
     '', 'Examples:',
     '  wsh new                              # open default shell (bash)',
     '  wsh new htop                         # open a registered app by name',
     '  wsh new --type pty -c "python3"      # run an ad-hoc pty command',
     '  wsh new --type web -c "python3 -m http.server 8080"  # ad-hoc web app',
-    '  wsh new --type job -c "sleep 10"     # run a background job',
+    '  wsh new --type job -c "sleep 10"     # run a background job (prints session ID)',
     '  echo "ls -la" | wsh new --type pty    # pipe command via stdin',
     '  wsh new --env FOO=bar my-app         # pass env vars to an app',
   ]);
@@ -542,8 +542,10 @@ python3:
   const idOnly = subArgs.includes('--id-only');
   if (idOnly) subArgs.splice(subArgs.indexOf('--id-only'), 1);
 
-  const noBanner = subArgs.includes('--no-banner');
-  if (noBanner) subArgs.splice(subArgs.indexOf('--no-banner'), 1);
+  const banner = subArgs.includes('--banner');
+  if (banner) subArgs.splice(subArgs.indexOf('--banner'), 1);
+  // --no-banner accepted for backwards compatibility (now the default — silently consumed).
+  while (subArgs.includes('--no-banner')) subArgs.splice(subArgs.indexOf('--no-banner'), 1);
 
   const notifyIdx = subArgs.indexOf('--notify');
   const notify = notifyIdx !== -1;
@@ -593,7 +595,7 @@ python3:
   if (typeFlag) payload.type = typeFlag;
   if (commandFlag) payload.command = commandFlag;
   if (titleFlag) payload.title = titleFlag;
-  if (noBanner) payload.noBanner = true;
+  if (banner) payload.banner = true;
   const jsonData = JSON.stringify(payload);
   let lastErr: any;
   for (const scheme of ['http', 'https'] as const) {
@@ -613,7 +615,9 @@ python3:
         process.exit(1);
       }
       const parsed = JSON.parse(responseBody);
-      if (idOnly) {
+      // Jobs default to id-only output: their URL points to a terminal page that
+      // can't attach (jobs reject WebSocket). Use `wsh logs -f <id>` to follow.
+      if (idOnly || typeFlag === 'job') {
         console.log(parsed.id);
       } else if (process.env.WSH_URL) {
         // Behind a proxy: construct URL from external origin + relative path
@@ -671,26 +675,28 @@ python3:
   if (aboxUser) userHeader += ` -H 'X-WSH-User: ${aboxUser}'`;
 
   // Resolve target: if it matches a session ID, use it; otherwise look up by app name.
-  function resolveSessionId(): string {
+  // Returns appType so follow mode can pick WS (pty/web) vs SSE (job).
+  function resolveSession(): { id: string; appType: 'pty' | 'web' | 'job' | null } {
     for (const scheme of ['http', 'https'] as const) {
       const url = `${scheme}://127.0.0.1:${port}${basePath}api/sessions`;
       const flags = scheme === 'https' ? '-sSk' : '-sS';
       try {
         const body = execSync(`curl ${flags} ${userHeader} '${url}'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-        const data = JSON.parse(body) as { sessions: { id: string; app: string }[] };
+        const data = JSON.parse(body) as { sessions: { id: string; app: string; appType?: 'pty' | 'web' | 'job' }[] };
         // Exact session ID match (only if target looks like a 6-char session ID)
         if (isSessionId(target!)) {
           const byId = data.sessions.find(s => s.id === target);
-          if (byId) return byId.id;
-          // Session not active — return ID anyway so the logs endpoint can try disk fallback
-          return target!;
+          if (byId) return { id: byId.id, appType: byId.appType ?? null };
+          // Session not active — return ID anyway so the logs endpoint can try disk fallback.
+          // Treat as job since only job logs persist on disk after the session is gone.
+          return { id: target!, appType: 'job' };
         }
         // App name match (most recently created)
         const byApp = data.sessions.filter(s => s.app === target);
-        if (byApp.length > 0) return byApp[byApp.length - 1].id;
+        if (byApp.length > 0) return { id: byApp[byApp.length - 1].id, appType: byApp[byApp.length - 1].appType ?? null };
         // Partial app name match
         const byPartial = data.sessions.filter(s => s.app.includes(target!));
-        if (byPartial.length === 1) return byPartial[0].id;
+        if (byPartial.length === 1) return { id: byPartial[0].id, appType: byPartial[0].appType ?? null };
         if (byPartial.length > 1) {
           console.error(`Multiple sessions match "${target}": ${byPartial.map(s => `${s.id} (${s.app})`).join(', ')}`);
           process.exit(1);
@@ -707,9 +713,9 @@ python3:
         process.exit(1);
       }
     }
-    return ''; // unreachable
+    return { id: '', appType: null }; // unreachable
   }
-  const sessionId = resolveSessionId();
+  const { id: sessionId, appType: sessionAppType } = resolveSession();
 
   if (!follow) {
     // One-shot: fetch scrollback via HTTP and print
@@ -739,8 +745,54 @@ python3:
       console.error('Error:', lastErr?.stderr?.toString().trim() || lastErr?.message);
     }
     process.exit(1);
+  } else if (sessionAppType === 'job') {
+    // Job follow: SSE stream from disk + live output. No WebSocket.
+    function tryConnectSse(scheme: 'http' | 'https'): void {
+      const lib = scheme === 'https' ? https : http;
+      const headers: Record<string, string> = { Accept: 'text/event-stream' };
+      if (proxySecret) headers['X-WSH-Proxy-Secret'] = proxySecret;
+      if (aboxUser) headers['X-WSH-User'] = aboxUser;
+      const reqOpts = { host: '127.0.0.1', port, path: `${basePath}api/sessions/${sessionId}/stream`, headers, rejectUnauthorized: false } as any;
+      const sseReq = lib.get(reqOpts, (res) => {
+        if (res.statusCode === 404) { console.error(`Session "${sessionId}" not found.`); process.exit(1); }
+        if ((res.statusCode ?? 0) >= 400) { console.error(`Error: server returned ${res.statusCode}`); process.exit(1); }
+        let buf = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+          buf += chunk;
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) !== -1) {
+            const block = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const dataLine = block.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).replace(/^ /, '')).join('\n');
+            if (!dataLine) continue;
+            if (dataLine === '[DONE]') { process.exit(0); }
+            try {
+              const parsed = JSON.parse(dataLine);
+              if (typeof parsed.text === 'string') process.stdout.write(parsed.text);
+              // exit field is informational; [DONE] follows and triggers process.exit
+            } catch {}
+          }
+        });
+        res.on('end', () => process.exit(0));
+        res.on('error', () => process.exit(0));
+      });
+      sseReq.on('error', (err: NodeJS.ErrnoException) => {
+        if (scheme === 'http') { tryConnectSse('https'); return; }
+        if (err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET') {
+          console.error(`No wsh server running on localhost:${port}`);
+        } else {
+          console.error('Error:', err.message);
+        }
+        process.exit(1);
+      });
+      process.on('SIGINT', () => { sseReq.destroy(); process.exit(0); });
+      process.on('SIGTERM', () => { sseReq.destroy(); process.exit(0); });
+    }
+    tryConnectSse('http');
+    (globalThis as any).__wshFollowMode = true;
   } else {
-    // Follow mode: connect via WebSocket, print scrollback then stream live output
+    // PTY/web follow: WebSocket — preserves raw binary output for terminal apps.
     function tryConnect(scheme: 'ws' | 'wss'): void {
       const wsUrl = `${scheme}://127.0.0.1:${port}${basePath}terminal?session=${sessionId}&yield=1&reconnect=1`;
       const headers: Record<string, string> = {};
@@ -1339,7 +1391,6 @@ rotateEvents();
 
 const MAX_SCROLLBACK     = 5 * 1024 * 1024; // 5 MB
 const MAX_SCROLLBACK_WEB = 512 * 1024;      // 512 KB (web app logs)
-const MAX_SCROLLBACK_JOB = 1 * 1024 * 1024; // 1 MB (job output)
 const SESSION_TTL     = 10 * 60 * 1000;     // 10 minutes
 const WEB_SESSION_TTL = 60 * 60 * 1000;     // 1 hour
 const PING_INTERVAL = 30_000;           // 30 seconds
@@ -1538,9 +1589,7 @@ function readJobLog(id: string): Buffer | null {
 }
 
 function scrollbackLimit(session: Session): number {
-  return session.appType === 'web' ? MAX_SCROLLBACK_WEB
-       : session.appType === 'job' ? MAX_SCROLLBACK_JOB
-       : MAX_SCROLLBACK;
+  return session.appType === 'web' ? MAX_SCROLLBACK_WEB : MAX_SCROLLBACK;
 }
 
 // Chunk-list scrollback: O(1) amortized append, O(n) only on replay (and the
@@ -1809,7 +1858,8 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
   const session = baseSession(appKey, appConfig);
   session.appType = 'job';
 
-  registerSession(id, session);
+  // Jobs have no idle TTL — the child's 'close' handler is the only path to deletion.
+  sessions.set(id, session);
 
   // Open log file for incremental writes
   fs.mkdirSync(JOB_LOG_DIR, { recursive: true });
@@ -1830,21 +1880,16 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
 
   session.child = child;
 
-  if (!appConfig.noBanner) {
+  if (appConfig.banner) {
     const cwd = resolveCwd(appConfig);
     const banner = `\x1b[90m$ cd ${cwd} && ${appConfig.command}\x1b[0m\r\n`;
-    const bannerBuf = Buffer.from(banner);
-    appendScrollback(session, bannerBuf);
-    fs.writeSync(logFd, bannerBuf);
-    broadcast(session, bannerBuf, { binary: true });
+    fs.writeSync(logFd, Buffer.from(banner));
   }
 
   const appendOutput = (data: Buffer) => {
     session.lastOutput = Date.now();
-    appendScrollback(session, data);
     fs.writeSync(logFd, data);
     session.emit('output', data);
-    broadcast(session, data, { binary: true });
   };
 
   child.stdout!.on('data', appendOutput);
@@ -1856,10 +1901,6 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
     session.child = null;
     try { fs.closeSync(logFd); } catch {}
     try { fs.writeFileSync(path.join(JOB_LOG_DIR, `${id}.exit`), String(code ?? -1)); } catch {}
-
-    // Notify peers first so followers (e.g. `wsh logs -f`) see the exit, then close.
-    broadcast(session, JSON.stringify({ type: 'job-exit', code, signal }));
-    broadcastClose(session, WS_CLOSE.OK, 'job-exit');
 
     session.emit('job-exit', code);
     rotateJobLogs();
@@ -1891,7 +1932,6 @@ function scheduleCleanup(id: string, session: Session): void {
   }
   session.cleanupTimer = null;
   if (session.pinned) return;
-  if (session.appType === 'job') return; // jobs manage their own cleanup via exit handler
   const ttl = session.timeoutMs ?? (session.appType === 'web' ? WEB_SESSION_TTL : SESSION_TTL);
   session.cleanupTimer = setTimeout(() => {
     console.log(`[session ${id}] TTL expired`);
@@ -2038,7 +2078,7 @@ interface AppConfig {
   stripPrefix?: boolean;
   healthCheck?: string;
   startupTimeout?: string;
-  noBanner?: boolean;
+  banner?: boolean;
   prefixCommand?: string;
   tips?: string[];
 }
@@ -3113,7 +3153,9 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   const adHocCommand = (req.body?.command as string) || '';
   const adHocType = (req.body?.type as string) || '';
   const adHocTitle = (req.body?.title as string) || '';
-  const adHocNoBanner = !!req.body?.noBanner;
+  // Banner defaults off for jobs. `banner: true` opts back in.
+  // Legacy `noBanner` is silently consumed (it was the default-on inverter; now redundant).
+  const adHocBanner = !!req.body?.banner;
   const snapshot = (req.body?.snapshot as string) || '';
   const targetApp = (req.body?.targetApp as string) || '';
   const targetSession = (req.body?.targetSession as string) || '';
@@ -3129,7 +3171,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
       title: adHocTitle || deriveTitleFromCommand(adHocCommand),
       ...(cwdOverride ? { cwd: cwdOverride } : {}),
       ...(Object.keys(envOverride).length ? { env: envOverride } : {}),
-      ...(adHocNoBanner ? { noBanner: true } : {}),
+      ...(adHocBanner ? { banner: true } : {}),
     };
     sessionLabel = appKey || adHocType || 'pty';
   } else if (skillName) {
@@ -3419,6 +3461,13 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
 
   let session = sessions.get(id);
 
+  // Job sessions are non-interactive — they have no WS surface. Use SSE
+  // (`/api/sessions/:id/stream`) or HTTP (`/api/sessions/:id/logs`) instead.
+  if (session?.appType === 'job') {
+    ws.close(WS_CLOSE.FORBIDDEN, 'jobs are not viewable via WebSocket');
+    return;
+  }
+
   if (session) {
     // Cancel cleanup timer when anyone reconnects.
     if (session.cleanupTimer !== null) {
@@ -3442,13 +3491,6 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     sendRoleMessage(ws, id, session, sentRole, credential);
     if (session.appType === 'web' && session.ready) {
       ws.send(JSON.stringify({ type: 'ready' }));
-    }
-    if (session.appType === 'job' && session.child === null && session.exitCode !== undefined) {
-      const replay = scrollbackReplay(session);
-      if (replay) ws.send(replay, { binary: true });
-      ws.send(JSON.stringify({ type: 'job-exit', code: session.exitCode }));
-      ws.close(WS_CLOSE.OK, 'job-exit');
-      return;
     }
     const replay = scrollbackReplay(session);
     if (replay) ws.send(replay, { binary: true });
@@ -3540,13 +3582,9 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       const replay = scrollbackReplay(session);
       if (replay) ws.send(replay, { binary: true });
     } else if (effectiveConfig.type === 'job') {
-      try {
-        session = spawnJobSession(id, sessionLabel, effectiveConfig);
-      } catch (err) {
-        console.error('Failed to spawn job:', errorMessage(err));
-        ws.close(WS_CLOSE.INTERNAL_ERROR, 'Failed to spawn job');
-        return;
-      }
+      // Jobs cannot be spawned via WebSocket — use POST /api/sessions instead.
+      ws.close(WS_CLOSE.FORBIDDEN, 'jobs must be created via POST /api/sessions');
+      return;
     } else if (effectiveConfig.type === 'web') {
       try {
         ws.send(JSON.stringify({ type: 'status', status: 'starting' }));
@@ -3594,7 +3632,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     }
     if (currentSession.writer !== ws) return; // only the active writer may send input
     if (isBinary) {
-      if (currentSession.appType === 'web' || currentSession.appType === 'job') return; // no PTY input for web/job sessions
+      if (currentSession.appType === 'web') return; // no PTY input for web sessions (jobs are rejected at connect)
       currentSession.lastInput = Date.now();
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
       currentSession.pty!.write(buf.toString('binary'));

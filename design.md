@@ -55,22 +55,21 @@ child exits      --> all peers closed, session deleted immediately
 ### Job Sessions
 
 ```
-created via API  --> child process spawned, stdout/stderr tee'd to scrollback + disk (~/.wsh/logs/<id>.log)
-                     no port, no health check, no keyboard input
-WS peers connect --> receive scrollback replay + live output (read-only)
-wsh logs <id>    --> reads from disk file (works during and after execution, survives server restarts)
-wsh logs -f <id> --> reads disk file for catch-up, then EventEmitter for live chunks
-child exits      --> 'job-exit' event emitted, fd closed, session deleted immediately
+created via API  --> child process spawned, stdout/stderr written incrementally to disk (~/.wsh/logs/<id>.log)
+                     no port, no health check, no keyboard input, no WebSocket
+wsh logs <id>    --> GET /api/sessions/:id/logs — reads disk file (works during and after execution, survives server restarts)
+wsh logs -f <id> --> GET /api/sessions/:id/stream (SSE) — disk file for catch-up, then EventEmitter for live chunks
+child exits      --> exit code stamped to ~/.wsh/logs/<id>.exit, 'job-exit' EventEmitter signal, fd closed, session deleted immediately
 ```
 
-Jobs are non-interactive background tasks (cron runs, chat agent invocations). Output is written to disk incrementally via `fs.writeSync` so it survives server restarts. They are visible in `wsh ls` with `appType: 'job'` and provide box-level activity tracking for idle detection and graceful upgrades.
+Jobs are non-interactive background tasks (cron runs, chat agent invocations). They have **no WebSocket surface** — `/terminal` rejects job sessions with close code 4003, and jobs cannot be created via WS. Output goes straight to disk via `fs.writeSync` (no in-memory scrollback) and is exposed only over HTTP (`/api/sessions/:id/logs`) and SSE (`/api/sessions/:id/stream`). They are visible in `wsh ls` with `appType: 'job'` and provide box-level activity tracking for idle detection and graceful upgrades.
 
-The cleanup timer starts from the moment of disconnect, not from last activity. Sessions created via API (with no initial viewer) also get a timer at creation via `registerSession()`, ensuring they are cleaned up if no peer ever connects.
+`scheduleCleanup()` short-circuits for jobs (`appType === 'job'` → no timer): the only path to deletion is the child's `'close'` event. Sessions created via API with no peer never accumulate state beyond what's needed for `wsh ls` and the SSE/HTTP endpoints.
 
 ### Common Rules
 
 - Only owners can create sessions; non-owners get rejected with WS close code 4003
-- On reconnect, the full scrollback buffer is replayed (up to 5 MB for TUI, 512 KB for web, 1 MB for job). Job logs are also persisted to disk for durability. Terminal query sequences (DSR, DA, DECRQM, DECRQSS, window-size ops, OSC color queries) and their responses are stripped from replayed scrollback — stale queries would otherwise trigger xterm.js to generate responses that flow back to PTY stdin as garbage text, since the originating program is no longer listening.
+- On WebSocket reconnect, the full scrollback buffer is replayed (up to 5 MB for TUI, 512 KB for web). Jobs do not use WebSocket and have no scrollback — their output lives only on disk. Terminal query sequences (DSR, DA, DECRQM, DECRQSS, window-size ops, OSC color queries) and their responses are stripped from replayed scrollback — stale queries would otherwise trigger xterm.js to generate responses that flow back to PTY stdin as garbage text, since the originating program is no longer listening.
 - Only one active writer at a time; a new writer demotes the current one to viewer
 - Only owners can close sessions or toggle pin state; writers can resize and clear
 - Pin state is in-memory only; a server restart resets it (processes die anyway)
@@ -171,6 +170,8 @@ The positional arg meaning depends on mode:
 | **App** (default) | `[app-key]` — app to run (default `bash`). Extra positionals are an error. |
 | **Skill** (`--skill`) | `[words...]` — all joined → `$INPUT` env var |
 | **Ad-hoc** (`--type`/`-c`) | None. Command via `-c`/`--command` or stdin. Positionals are an error. |
+
+**Output format**: `wsh new` prints a clickable URL by default. For `--type job` the URL is non-functional (jobs reject WebSocket), so job sessions print just the session ID — `--id-only` is implicit. Use `wsh logs -f <id>` to follow job output.
 
 ## Web App Proxy
 
