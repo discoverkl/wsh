@@ -118,6 +118,19 @@ func TestCLI(t *testing.T) {
 		}
 	})
 
+	t.Run("new --type job defaults to id-only output", func(t *testing.T) {
+		// Job URLs are non-functional (jobs reject WebSocket), so `wsh new --type job`
+		// prints just the session id by default — no URL, no --id-only flag needed.
+		out := runCLI(t, "new", "-p", port, "--type", "job", "--command", "echo job-default-output")
+		id := strings.TrimSpace(out)
+		if len(id) != 6 {
+			t.Fatalf("expected 6-char session ID (id-only default for jobs), got %q", out)
+		}
+		if strings.Contains(out, "://") || strings.Contains(out, "#") {
+			t.Fatalf("job output should be id, not URL: %q", out)
+		}
+	})
+
 	t.Run("new --type job --command", func(t *testing.T) {
 		out := runCLI(t, "new", "-p", port, "--id-only", "--type", "job", "--command", "echo cli-job-test")
 		id := strings.TrimSpace(out)

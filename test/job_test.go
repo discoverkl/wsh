@@ -3,26 +3,27 @@ package wsh_test
 // ┌───────────────────────────────────────┬───────────────────────────────────────────────────┐
 // │ Test                                  │ Description                                       │
 // ├───────────────────────────────────────┼───────────────────────────────────────────────────┤
-// │ TestJobSessions                       │ Job session lifecycle                             │
+// │ TestJobSessions                       │ Job session lifecycle (HTTP/SSE only — no WS)     │
 // │  ├ create job via API                 │ POST with type=job creates a job session          │
 // │  ├ job appears in session list        │ GET /api/sessions includes job with appType=job   │
-// │  ├ job output via WebSocket           │ WS client receives stdout from job                │
-// │  ├ job exit message                   │ WS client receives job-exit with exit code        │
+// │  ├ job output via SSE                 │ SSE stream emits stdout from job                  │
+// │  ├ job exit via SSE                   │ SSE emits exit code event                         │
 // │  ├ logs endpoint                      │ GET /api/sessions/:id/logs returns output         │
-// │  ├ input ignored                      │ binary input to job session is silently dropped   │
-// │  ├ multiple viewers                   │ two WS clients both receive job output            │
-// │  ├ nonzero exit code                  │ failing command reports correct exit code          │
+// │  ├ WebSocket rejected                 │ /terminal close 4003 for job sessions             │
+// │  ├ multiple SSE viewers               │ two SSE clients both receive job output           │
+// │  ├ nonzero exit code                  │ failing command reports correct exit code         │
 // │  └ delete job                         │ DELETE /api/sessions/:id kills and removes job    │
 // └───────────────────────────────────────┴───────────────────────────────────────────────────┘
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestJobSessions(t *testing.T) {
@@ -70,38 +71,32 @@ func TestJobSessions(t *testing.T) {
 		srv.deleteJSONRaw(t, fmt.Sprintf("/api/sessions/%s", id))
 	})
 
-	t.Run("job output via WebSocket", func(t *testing.T) {
+	t.Run("job output via SSE", func(t *testing.T) {
 		resp := srv.postJSON(t, "/api/sessions", map[string]any{
 			"type":    "job",
 			"command": "echo job-output-marker",
 		})
 		id := resp["id"].(string)
 
-		ws := srv.connectTerminal(t, id)
-		role := ws.readRole(t)
-		assertEqual(t, role.AppType, "job")
-
-		found := ws.readUntil(t, "job-output-marker", 5*time.Second)
-		if !found {
-			t.Fatal("did not receive job output")
+		sc := srv.streamSession(t, id)
+		if !sc.readUntil(t, "job-output-marker", 5*time.Second) {
+			t.Fatalf("did not receive job output; accum=%q", sc.accum)
 		}
 	})
 
-	t.Run("job exit message", func(t *testing.T) {
+	t.Run("job exit via SSE", func(t *testing.T) {
 		resp := srv.postJSON(t, "/api/sessions", map[string]any{
 			"type":    "job",
 			"command": "echo done",
 		})
 		id := resp["id"].(string)
 
-		ws := srv.connectTerminal(t, id)
-		ws.readRole(t)
-
-		// Read messages until we get the job-exit message
-		found := ws.readUntil(t, `"job-exit"`, 5*time.Second)
-		if !found {
-			t.Fatal("did not receive job-exit message")
+		sc := srv.streamSession(t, id)
+		code, ok := sc.waitExit(t, 5*time.Second)
+		if !ok {
+			t.Fatal("did not receive job exit event")
 		}
+		assertEqual(t, code, 0)
 	})
 
 	t.Run("logs endpoint", func(t *testing.T) {
@@ -127,46 +122,51 @@ func TestJobSessions(t *testing.T) {
 		}
 	})
 
-	t.Run("input ignored", func(t *testing.T) {
+	t.Run("WebSocket rejected", func(t *testing.T) {
 		resp := srv.postJSON(t, "/api/sessions", map[string]any{
 			"type":    "job",
-			"command": "sleep 2 && echo input-test-done",
+			"command": "sleep 5",
 		})
 		id := resp["id"].(string)
+		defer srv.deleteJSONRaw(t, fmt.Sprintf("/api/sessions/%s", id))
 
-		ws := srv.connectTerminal(t, id)
-		ws.readRole(t)
-
-		// Send binary input — should be silently ignored (no crash)
-		ws.sendBinary(t, []byte("this should be ignored\n"))
-
-		// Job should still complete normally
-		found := ws.readUntil(t, "input-test-done", 5*time.Second)
-		if !found {
-			t.Fatal("job did not complete after sending input")
+		url := fmt.Sprintf("ws://127.0.0.1:%d%sterminal?session=%s", srv.port, srv.base, id)
+		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+		if err != nil {
+			// Some WS dialers fail on a 4003 close before handshake. Either is fine.
+			return
+		}
+		defer conn.Close()
+		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, _, readErr := conn.ReadMessage()
+		if readErr == nil {
+			t.Fatal("expected WS connection to be rejected for job session")
+		}
+		ce, ok := readErr.(*websocket.CloseError)
+		if !ok {
+			// Connection drop without a clean close is also acceptable.
+			return
+		}
+		if ce.Code != 4003 {
+			t.Fatalf("expected close code 4003, got %d (%s)", ce.Code, ce.Text)
 		}
 	})
 
-	t.Run("multiple viewers", func(t *testing.T) {
+	t.Run("multiple SSE viewers", func(t *testing.T) {
 		resp := srv.postJSON(t, "/api/sessions", map[string]any{
 			"type":    "job",
 			"command": "for i in 1 2 3; do echo multi-$i; sleep 0.2; done",
 		})
 		id := resp["id"].(string)
 
-		ws1 := srv.connectTerminal(t, id)
-		ws1.readRole(t)
+		sc1 := srv.streamSession(t, id)
+		sc2 := srv.streamSession(t, id)
 
-		ws2 := srv.connectTerminal(t, id)
-		ws2.readRole(t)
-
-		found1 := ws1.readUntil(t, "multi-3", 5*time.Second)
-		found2 := ws2.readUntil(t, "multi-3", 5*time.Second)
-		if !found1 {
-			t.Fatal("viewer 1 did not receive output")
+		if !sc1.readUntil(t, "multi-3", 5*time.Second) {
+			t.Fatalf("viewer 1 did not receive output; accum=%q", sc1.accum)
 		}
-		if !found2 {
-			t.Fatal("viewer 2 did not receive output")
+		if !sc2.readUntil(t, "multi-3", 5*time.Second) {
+			t.Fatalf("viewer 2 did not receive output; accum=%q", sc2.accum)
 		}
 	})
 
@@ -177,31 +177,12 @@ func TestJobSessions(t *testing.T) {
 		})
 		id := resp["id"].(string)
 
-		ws := srv.connectTerminal(t, id)
-		ws.readRole(t)
-
-		// Read until we get the job-exit JSON
-		ws.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		defer ws.conn.SetReadDeadline(time.Time{})
-		for {
-			_, data, err := ws.conn.ReadMessage()
-			if err != nil {
-				t.Fatal("did not receive job-exit message")
-			}
-			var msg map[string]any
-			if err := json.Unmarshal(data, &msg); err != nil {
-				continue
-			}
-			if msg["type"] == "job-exit" {
-				// JSON numbers decode as float64
-				code, ok := msg["code"].(float64)
-				if !ok {
-					t.Fatalf("exit code not a number: %v", msg["code"])
-				}
-				assertEqual(t, int(code), 42)
-				return
-			}
+		sc := srv.streamSession(t, id)
+		code, ok := sc.waitExit(t, 5*time.Second)
+		if !ok {
+			t.Fatal("did not receive job exit event")
 		}
+		assertEqual(t, code, 42)
 	})
 
 	t.Run("delete job kills process", func(t *testing.T) {
@@ -211,18 +192,14 @@ func TestJobSessions(t *testing.T) {
 		})
 		id := resp["id"].(string)
 
-		// Connect a WS to observe the exit
-		ws := srv.connectTerminal(t, id)
-		ws.readRole(t)
+		sc := srv.streamSession(t, id)
 
 		code, body := srv.deleteJSONRaw(t, fmt.Sprintf("/api/sessions/%s", id))
 		assertEqual(t, code, http.StatusOK)
 		assertField(t, body, "ok", true)
 
-		// Should receive job-exit from the killed process
-		found := ws.readUntil(t, `"job-exit"`, 5*time.Second)
-		if !found {
-			t.Fatal("did not receive job-exit after delete")
+		if _, ok := sc.waitExit(t, 5*time.Second); !ok {
+			t.Fatal("did not receive exit event after delete")
 		}
 	})
 }

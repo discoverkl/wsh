@@ -46,7 +46,9 @@ package wsh_test
 // └─────────────────────────────┴────────────────────────────────────────────────────────┘
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -312,6 +314,150 @@ func (tc *termConn) readUntil(t *testing.T, substr string, timeout time.Duration
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SSE: session output stream (jobs use this; pty/web fall back to fake-peer)
+// ---------------------------------------------------------------------------
+
+type streamEvent struct {
+	text    string
+	exit    *int // nil means the process was killed by signal (no exit code)
+	hasExit bool
+	done    bool
+}
+
+type streamConn struct {
+	cancel  context.CancelFunc
+	events  chan streamEvent
+	accum   string
+	exit    int
+	gotExit bool
+}
+
+// streamSession opens an SSE stream to /api/sessions/:id/stream and parses
+// `data: {...}` events into a channel. Auto-cleans up when the test ends.
+func (s *server) streamSession(t *testing.T, sessionID string) *streamConn {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	url := fmt.Sprintf("http://127.0.0.1:%d%sapi/sessions/%s/stream", s.port, s.base, sessionID)
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		cancel()
+		t.Fatalf("SSE connect %s: %v", url, err)
+	}
+	if resp.StatusCode != 200 {
+		resp.Body.Close()
+		cancel()
+		t.Fatalf("SSE %s: status %d", url, resp.StatusCode)
+	}
+	sc := &streamConn{cancel: cancel, events: make(chan streamEvent, 64)}
+	t.Cleanup(func() { cancel(); resp.Body.Close() })
+
+	go func() {
+		defer close(sc.events)
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 1024*1024), 4*1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if data == "[DONE]" {
+				sc.events <- streamEvent{done: true}
+				return
+			}
+			// Parse with RawMessage so we can distinguish between
+			// "exit key absent" and "exit key present but null" (signal kill).
+			var msg map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(data), &msg); err != nil {
+				continue
+			}
+			if raw, ok := msg["text"]; ok {
+				var text string
+				if json.Unmarshal(raw, &text) == nil && text != "" {
+					sc.events <- streamEvent{text: text}
+				}
+			}
+			if raw, ok := msg["exit"]; ok {
+				var code *int
+				_ = json.Unmarshal(raw, &code)
+				sc.events <- streamEvent{exit: code, hasExit: true}
+			}
+		}
+	}()
+	return sc
+}
+
+// readUntil reads SSE events until the accumulated text contains substr or timeout fires.
+func (sc *streamConn) readUntil(t *testing.T, substr string, timeout time.Duration) bool {
+	t.Helper()
+	if strings.Contains(sc.accum, substr) {
+		return true
+	}
+	deadline := time.After(timeout)
+	for {
+		select {
+		case ev, ok := <-sc.events:
+			if !ok {
+				return strings.Contains(sc.accum, substr)
+			}
+			sc.accum += ev.text
+			if ev.hasExit {
+				sc.exit = exitOrSignal(ev.exit)
+				sc.gotExit = true
+			}
+			if strings.Contains(sc.accum, substr) {
+				return true
+			}
+		case <-deadline:
+			return false
+		}
+	}
+}
+
+// waitExit reads SSE events until an exit-code event arrives or timeout fires.
+// Returns (code, true) on success, (0, false) on timeout. A signal-killed job
+// reports exit code -1 since Node delivers `null` for signal terminations.
+func (sc *streamConn) waitExit(t *testing.T, timeout time.Duration) (int, bool) {
+	t.Helper()
+	if sc.gotExit {
+		return sc.exit, true
+	}
+	deadline := time.After(timeout)
+	for {
+		select {
+		case ev, ok := <-sc.events:
+			if !ok {
+				if sc.gotExit {
+					return sc.exit, true
+				}
+				return 0, false
+			}
+			sc.accum += ev.text
+			if ev.hasExit {
+				sc.exit = exitOrSignal(ev.exit)
+				sc.gotExit = true
+				return sc.exit, true
+			}
+		case <-deadline:
+			return 0, false
+		}
+	}
+}
+
+func exitOrSignal(code *int) int {
+	if code == nil {
+		return -1
+	}
+	return *code
+}
+
+func (sc *streamConn) close() { sc.cancel() }
+
+// ---------------------------------------------------------------------------
 
 // handleRPC starts a goroutine that reads messages and responds to RPC requests.
 func (tc *termConn) handleRPC(handler func(rpcMessage) *rpcResult) {
