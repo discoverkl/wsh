@@ -55,16 +55,45 @@ child exits      --> all peers closed, session deleted immediately
 ### Job Sessions
 
 ```
-created via API  --> child process spawned, stdout/stderr written incrementally to disk (~/.wsh/logs/<id>.log)
-                     no port, no health check, no keyboard input, no WebSocket
-wsh logs <id>    --> GET /api/sessions/:id/logs — reads disk file (works during and after execution, survives server restarts)
-wsh logs -f <id> --> GET /api/sessions/:id/stream (SSE) — disk file for catch-up, then EventEmitter for live chunks
-child exits      --> exit code stamped to ~/.wsh/logs/<id>.exit, 'job-exit' EventEmitter signal, fd closed, session deleted immediately
+created via API   --> child process spawned, stdout/stderr written incrementally to disk (~/.wsh/logs/<id>.log)
+                      no port, no health check, no keyboard input, no WebSocket
+wsh logs <id>     --> GET /api/sessions/:id/logs — reads disk file (works during and after execution, survives server restarts)
+wsh logs -f <id>  --> GET /api/sessions/:id/stream (SSE) — tails ~/.wsh/logs/<id>.log on a 100ms poll; finishes when ~/.wsh/logs/<id>.exit appears
+wsh exitcode <id> --> GET /api/sessions/:id/exit — returns {"code":N} from ~/.wsh/logs/<id>.exit, or 404 while still running
+child exits       --> exit code stamped to ~/.wsh/logs/<id>.exit, fd closed, session deleted immediately
 ```
+
+`wsh logs` defaults to **job mode** (`--type job`): the target is taken verbatim as a session ID and the disk log is canonical — no `/api/sessions` lookup. Pass `--type web` to view a live web-app session's in-memory scrollback (target may be an app name; resolved via `/api/sessions`). Both modes share the same one-shot endpoint (`/logs`) and follow transport (`/stream` SSE) — the server dispatches by live `appType` (job → tail disk; pty/web → fake-peer feed of scrollback + live output, control messages stripped).
 
 Jobs are non-interactive background tasks (cron runs, chat agent invocations). They have **no WebSocket surface** — `/terminal` rejects job sessions with close code 4003, and jobs cannot be created via WS. Output goes straight to disk via `fs.writeSync` (no in-memory scrollback) and is exposed only over HTTP (`/api/sessions/:id/logs`) and SSE (`/api/sessions/:id/stream`). They are visible in `wsh ls` with `appType: 'job'` and provide box-level activity tracking for idle detection and graceful upgrades.
 
 `scheduleCleanup()` short-circuits for jobs (`appType === 'job'` → no timer): the only path to deletion is the child's `'close'` event. Sessions created via API with no peer never accumulate state beyond what's needed for `wsh ls` and the SSE/HTTP endpoints.
+
+The SSE handler always tails the on-disk `.log` rather than subscribing to in-memory output events. Disk is the source of truth — every byte hits the log fd before any `'output'` event would fire — so polling avoids subscribe/cleanup races and works identically whether the job is still running or already cleaned out of the `sessions` map. Non-job (pty/web) sessions are dispatched by their in-memory `appType` first, so a stale `.log` / `.exit` left from a previous job with a colliding ID can never reroute a live session into the job branch.
+
+### Caveats (job sessions as `bash -c` substitute)
+
+When using `wsh new --type job -c "<cmd>"` + `wsh logs -f <id>` + `wsh exitcode <id>` as a drop-in for `bash -c`:
+
+- **No stdin.** Jobs are spawned without a stdin connection to the caller. `echo foo | wsh new --type job -c cat` will not pipe `foo` into `cat`. Use `--type pty` or shell out to `bash -c` directly when stdin must be forwarded.
+- **No tty.** Job output is captured to a file and replayed; there is no allocated pseudo-terminal. Programs that probe `isatty(1)` (color, paging, progress bars, full-screen apps like `htop`/`vim`) will see a non-tty and either disable interactive features or fail to render. Use `--type pty` for those.
+- **~100ms tail latency.** `wsh logs -f` polls the log file every 100 ms, so a long stream of fast prints arrives in chunks rather than byte-by-byte. The total bytes are correct; only the cadence is coarsened.
+- **Ctrl-C only kills the follower.** SIGINT to `wsh logs -f` exits the follower but leaves the job running in the background — the caller must `wsh kill <id>` to actually cancel. Wrappers that want bash-c-like cancel semantics should `trap INT TERM` and forward to `wsh kill`.
+
+### Detaching from a job
+
+A job is a child of the **wsh server process** (not of `wsh logs -f` or whatever wrapper started it), so the job survives anything that kills only the follower:
+
+| Event | Job survives? | How |
+|---|---|---|
+| Terminal closes (SIGHUP) | yes | follower dies, job's stdout fd points at the disk log, server keeps the child |
+| SSH session drops | yes | same as above |
+| Ctrl-\ (SIGQUIT) on the follower | yes | follower dies, server unaffected |
+| Ctrl-C (SIGINT) on the follower | depends on wrapper | bare `wsh logs -f` exits and the job survives; a wrapper with a `trap INT → wsh kill` forwards the kill |
+| `kill -9` of the follower | yes | server keeps the child |
+| wsh server crashes | no | child orphaned to PID 1; real exit code lost. `/stream` and `/exit` both lazily synthesize `-1` in `.exit` on the next attach (when `.log` exists, `.exit` doesn't, and the session is gone from memory) so followers terminate cleanly instead of hanging on a frozen log |
+
+Re-attach from any new shell with `wsh logs -f <sid>` (replays the full log from offset 0, then waits for `[DONE]`) and read the final status with `wsh exitcode <sid>` (works any time after the job ends — the `.exit` file is durable). Find the sid via `wsh ls` (titles set with `--title` show what each job is) or by inspecting `~/.wsh/logs/`.
 
 ### Common Rules
 
