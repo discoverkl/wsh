@@ -1548,10 +1548,33 @@ const ephemeralRe = new RegExp([
   '\\x1b\\](?:1[012]|4;\\d+);\\?(?:\\x07|\\x1b\\\\)', // OSC color queries
 ].join('|'), 'g');
 function stripEphemeralSequences(buf: Buffer): Buffer {
+  // Byte-level pre-check: skip the UTF-8 decode entirely when there are no
+  // escape characters. indexOf is C++-implemented; toString allocates a string
+  // the size of the buffer, which dominates for large logs without escapes.
+  if (buf.indexOf(0x1b) === -1) return buf;
   const str = buf.toString('utf8');
-  if (!str.includes('\x1b')) return buf;
   const stripped = str.replace(ephemeralRe, '');
   return stripped.length === str.length ? buf : Buffer.from(stripped, 'utf8');
+}
+
+// Returns the index of the first byte of any trailing incomplete UTF-8
+// codepoint, or buf.length if the buffer ends on a complete codepoint.
+// Used to defer split codepoints to the next chunk so toString('utf8')
+// doesn't emit U+FFFD across read boundaries.
+function utf8SafeEnd(buf: Buffer): number {
+  // A 4-byte codepoint can have at most 3 trailing continuation bytes pending.
+  for (let back = 1; back <= 3 && buf.length - back >= 0; back++) {
+    const b = buf[buf.length - back];
+    if ((b & 0xc0) === 0x80) continue;        // continuation byte; keep walking
+    if ((b & 0x80) === 0x00) return buf.length; // ASCII; whole buffer is safe
+    const need =
+      (b & 0xe0) === 0xc0 ? 2 :
+      (b & 0xf0) === 0xe0 ? 3 :
+      (b & 0xf8) === 0xf0 ? 4 : 0;
+    if (need === 0) return buf.length;        // invalid lead; let toString replace
+    return back === need ? buf.length : buf.length - back;
+  }
+  return buf.length;
 }
 
 /** Keep only the most recent JOB_LOG_MAX files. */
@@ -1577,15 +1600,6 @@ function rotateJobLogs(): void {
       });
     }
   });
-}
-
-/** Read a persisted job log from disk, or null if not found. */
-function readJobLog(id: string): Buffer | null {
-  try {
-    return fs.readFileSync(path.join(JOB_LOG_DIR, `${id}.log`));
-  } catch {
-    return null;
-  }
 }
 
 function scrollbackLimit(session: Session): number {
@@ -1897,12 +1911,14 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
 
   child.on('close', (code, signal) => {
     console.log(`[session ${id}] job exited (code ${code}, signal ${signal})`);
-    session.exitCode = code;
+    // POSIX convention: signal-killed processes exit with 128 + signal number.
+    // Node passes code=null in that case; without this, callers see -1 (which
+    // bash wraps to 255) and lose all signal info.
+    const exitVal = code ?? (signal ? 128 + (os.constants.signals[signal] ?? 0) : -1);
+    session.exitCode = exitVal;
     session.child = null;
     try { fs.closeSync(logFd); } catch {}
-    try { fs.writeFileSync(path.join(JOB_LOG_DIR, `${id}.exit`), String(code ?? -1)); } catch {}
-
-    session.emit('job-exit', code);
+    try { fs.writeFileSync(path.join(JOB_LOG_DIR, `${id}.exit`), String(exitVal)); } catch {}
     rotateJobLogs();
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
     if (sessions.get(id) === session) sessions.delete(id);
@@ -2757,14 +2773,21 @@ router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
 });
 
 router.get('/api/sessions/:id/logs', (req: express.Request, res: express.Response) => {
-  // Try disk first (covers running and finished jobs)
-  const diskLog = readJobLog(req.params.id);
-  if (diskLog) {
+  // Job log on disk: stream via held-open fd so rotation can't yank the file
+  // mid-read (POSIX keeps the inode alive while the fd is open). Avoids the
+  // O(file-size) memory peak and event-loop block of readFileSync.
+  const logPath = path.join(JOB_LOG_DIR, `${req.params.id}.log`);
+  let fd: number | null = null;
+  try { fd = fs.openSync(logPath, 'r'); } catch {}
+  if (fd !== null) {
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.send(stripEphemeralSequences(diskLog));
+    const stream = fs.createReadStream('', { fd, autoClose: true });
+    stream.on('error', () => { if (!res.headersSent) res.status(500); res.end(); });
+    stream.pipe(res);
     return;
   }
-  // Fall back to scrollback buffer (non-job sessions)
+  // Fall back to scrollback buffer (non-job sessions). In-memory and bounded
+  // by MAX_SCROLLBACK, so synchronous send is fine.
   const session = sessions.get(req.params.id);
   if (session) {
     res.setHeader('Content-Type', 'application/octet-stream');
@@ -2777,87 +2800,197 @@ router.get('/api/sessions/:id/logs', (req: express.Request, res: express.Respons
 router.get('/api/sessions/:id/stream', (req: express.Request, res: express.Response) => {
   const id = req.params.id;
   const session = sessions.get(id);
-  if (!session) { res.status(404).json({ error: 'session not found' }); return; }
+
+  // Pty/web (in-memory, non-job) sessions: existing fake-peer path. Dispatching
+  // by live appType ensures stale on-disk .log/.exit from a previous job with a
+  // colliding ID can never reroute a live session into the job branch.
+  if (session && session.appType !== 'job') {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    const replay = scrollbackReplay(session);
+    if (replay) {
+      res.write(`data: ${JSON.stringify({ text: replay.toString('utf8') })}\n\n`);
+    }
+
+    const fakeWs = {
+      readyState: WebSocket.OPEN,
+      send(data: Buffer | string, _opts?: any) {
+        if (res.destroyed) return;
+        const text = Buffer.isBuffer(data) ? data.toString('utf8') : typeof data === 'string' ? data : '';
+        if (text.startsWith('{')) {
+          try {
+            const parsed = JSON.parse(text);
+            if (parsed.type) return; // Skip control messages
+          } catch {}
+        }
+        if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
+      },
+      close() {
+        if (!res.destroyed) {
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }
+      },
+    } as unknown as WebSocket;
+
+    session.peers.set(fakeWs, 'viewer');
+
+    req.on('close', () => {
+      session.peers.delete(fakeWs);
+    });
+    return;
+  }
+
+  // Job branch: live or finished. For finished jobs the session is gone from
+  // memory but .log / .exit persist; either is enough proof this id was a job.
+  const logPath = path.join(JOB_LOG_DIR, `${id}.log`);
+  const exitPath = path.join(JOB_LOG_DIR, `${id}.exit`);
+  if (!session && !fs.existsSync(logPath) && !fs.existsSync(exitPath)) {
+    res.status(404).json({ error: 'session not found' });
+    return;
+  }
+
+  // Lazy reap: session-not-in-map + log-on-disk + no-.exit can only mean a
+  // prior wsh-server crash mid-job — child.on('close') always writes .exit
+  // before evicting from `sessions`. Synthesize a sentinel so tryFinish can
+  // unblock waiting clients instead of polling forever.
+  if (!session && fs.existsSync(logPath) && !fs.existsSync(exitPath)) {
+    try { fs.writeFileSync(exitPath, '-1'); } catch {}
+  }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  // Job sessions: read from disk + EventEmitter for live updates
-  if (session.appType === 'job') {
-    const onOutput = (data: Buffer) => {
-      if (res.destroyed) return;
-      const text = stripEphemeralSequences(data).toString('utf8');
-      if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
-    };
-    const onExit = (code: number | null) => {
-      if (res.destroyed) return;
-      res.write(`data: ${JSON.stringify({ exit: code })}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-    };
-
-    // Subscribe first, then read file — same tick, no gap
-    session.on('output', onOutput);
-    session.on('job-exit', onExit);
-
-    // Send existing content from disk (sync read — no events fire during this)
-    const existing = readJobLog(id);
-    if (existing?.length) {
-      const text = stripEphemeralSequences(existing).toString('utf8');
-      if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
-    }
-
-    // If already exited, send exit and close
-    if (session.child === null) {
-      session.off('output', onOutput);
-      session.off('job-exit', onExit);
-      res.write(`data: ${JSON.stringify({ exit: session.exitCode ?? null })}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-      return;
-    }
-
-    req.on('close', () => {
-      session.off('output', onOutput);
-      session.off('job-exit', onExit);
-    });
+  // Tail the disk log; finish when the .exit file appears. Disk is the source
+  // of truth — every byte hits the log fd before any in-memory event would
+  // fire — so polling the file works identically for live and finished jobs
+  // and avoids subscribe/cleanup races. The fd is held open across ticks so
+  // continued reads still work even after the job's writer fd is closed and
+  // the file is potentially unlinked by rotateJobLogs.
+  let logFd: number;
+  try { logFd = fs.openSync(logPath, 'r'); }
+  catch {
+    // No log yet (brand-new job in the millisecond before first write). Close
+    // cleanly with an empty body — the client can retry.
+    if (!res.destroyed) { res.write('data: [DONE]\n\n'); res.end(); }
     return;
   }
 
-  // Non-job sessions: existing fake-peer approach
-  const replay = scrollbackReplay(session);
-  if (replay) {
-    res.write(`data: ${JSON.stringify({ text: replay.toString('utf8') })}\n\n`);
+  const MAX_READ_PER_TICK = 1 << 20; // 1 MiB cap protects against a job dumping gigabytes between ticks
+  let offset = 0;
+  let timer: NodeJS.Timeout | null = null;
+  // Carries any incomplete trailing UTF-8 codepoint from one tick to the next
+  // so toString('utf8') doesn't replace split bytes with U+FFFD.
+  let utf8Pending: Buffer = Buffer.alloc(0);
+  const cleanup = () => { if (timer) { clearTimeout(timer); timer = null; } try { fs.closeSync(logFd); } catch {} };
+
+  // Returns true iff new bytes were emitted; drives the tryFinish gate below.
+  const flush = (): boolean => {
+    let stat;
+    try { stat = fs.fstatSync(logFd); }
+    catch (err) { console.error(`[session ${id}] stream stat failed:`, err); return false; }
+    if (stat.size <= offset) return false;
+    const want = Math.min(stat.size - offset, MAX_READ_PER_TICK);
+    // allocUnsafe: readSync overwrites all `want` bytes (clamped to file size,
+    // regular file → no short reads), so the zero-fill from alloc is wasted.
+    const buf = Buffer.allocUnsafe(want);
+    try { fs.readSync(logFd, buf, 0, want, offset); }
+    catch (err) { console.error(`[session ${id}] stream read failed:`, err); return false; }
+    offset += want;
+    if (res.destroyed) return true;
+    const raw = utf8Pending.length ? Buffer.concat([utf8Pending, buf]) : buf;
+    const safeEnd = utf8SafeEnd(raw);
+    utf8Pending = raw.subarray(safeEnd);
+    const decodable = raw.subarray(0, safeEnd);
+    if (decodable.length === 0) return true;  // nothing emittable; keep tail for next tick
+    const text = stripEphemeralSequences(decodable).toString('utf8');
+    if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
+    return true;
+  };
+
+  const tryFinish = (): boolean => {
+    // Fast path: session still alive and not exited yet. exitCode is set by
+    // child.on('close') *before* .exit is written and *before* the session
+    // is removed from the map, so undefined here is a reliable "still running".
+    if (session && session.exitCode === undefined) return false;
+    let exitContents;
+    try { exitContents = fs.readFileSync(exitPath, 'utf8'); }
+    catch { return false; }
+    flush(); // drain any bytes appended after the .exit file was written
+    if (!res.destroyed) {
+      // Job ended; any bytes still in utf8Pending are genuinely truncated
+      // (mid-codepoint at EOF). Emit them so toString can substitute U+FFFD —
+      // that's the right answer for a malformed log.
+      if (utf8Pending.length) {
+        const tail = stripEphemeralSequences(utf8Pending).toString('utf8');
+        if (tail) res.write(`data: ${JSON.stringify({ text: tail })}\n\n`);
+        utf8Pending = Buffer.alloc(0);
+      }
+      res.write(`data: ${JSON.stringify({ exit: parseInt(exitContents.trim(), 10) })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+    cleanup();
+    return true;
+  };
+
+  // Recursive setTimeout (not setInterval) so a slow flush can't queue up
+  // overlapping ticks. If the 1 MiB cap clipped this tick, reschedule
+  // immediately to drain the backlog; otherwise back off to 100 ms.
+  // Backpressure: park on 'drain' when the consumer is slow, so we don't
+  // pump 1 MiB/tick into Node's HTTP send buffer for a stalled client.
+  const tick = () => {
+    if (res.destroyed) return;
+    if (res.writableNeedDrain) {
+      res.once('drain', tick);
+      return;
+    }
+    const grew = flush();
+    if (!grew && tryFinish()) return;
+    let backlog = false;
+    if (grew) {
+      try { backlog = offset < fs.fstatSync(logFd).size; } catch {}
+    }
+    timer = setTimeout(tick, backlog ? 0 : 100);
+  };
+
+  if (flush() || !tryFinish()) {
+    tick();
   }
+  req.on('close', cleanup);
+});
 
-  const fakeWs = {
-    readyState: WebSocket.OPEN,
-    send(data: Buffer | string, _opts?: any) {
-      if (res.destroyed) return;
-      const text = Buffer.isBuffer(data) ? data.toString('utf8') : typeof data === 'string' ? data : '';
-      if (text.startsWith('{')) {
-        try {
-          const parsed = JSON.parse(text);
-          if (parsed.type) return; // Skip control messages
-        } catch {}
-      }
-      if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
-    },
-    close() {
-      if (!res.destroyed) {
-        res.write('data: [DONE]\n\n');
-        res.end();
-      }
-    },
-  } as unknown as WebSocket;
-
-  session.peers.set(fakeWs, 'viewer');
-
-  req.on('close', () => {
-    session.peers.delete(fakeWs);
-  });
+router.get('/api/sessions/:id/exit', (req: express.Request, res: express.Response) => {
+  // Job exit code from disk. Durable: works any time after the job ends, and
+  // survives wsh-server restarts. 404 distinguishes "still running" or "never
+  // existed" from "ended with code N".
+  const id = req.params.id;
+  const exitPath = path.join(JOB_LOG_DIR, `${id}.exit`);
+  let raw;
+  try { raw = fs.readFileSync(exitPath, 'utf8'); }
+  catch {
+    // No .exit yet. child.on('close') always writes .exit before evicting from
+    // sessions, so the only way (.exit missing && session not in map) can hold
+    // is a wsh-server crash mid-job. Synthesize -1 in that case so callers
+    // (re-attached followers, exitcode probes) terminate cleanly instead of
+    // hanging or polling forever. Mirrors the lazy reap in /stream.
+    if (sessions.get(id)) { res.status(404).json({ error: 'session still running' }); return; }
+    const logPath = path.join(JOB_LOG_DIR, `${id}.log`);
+    if (fs.existsSync(logPath)) {
+      try { fs.writeFileSync(exitPath, '-1'); } catch {}
+      res.json({ code: -1 });
+      return;
+    }
+    res.status(404).json({ error: 'session not found' });
+    return;
+  }
+  const code = parseInt(raw.trim(), 10);
+  if (Number.isNaN(code)) { res.status(500).json({ error: 'corrupt exit file' }); return; }
+  res.json({ code });
 });
 
 // --- Events ---
