@@ -639,14 +639,21 @@ python3:
   }
   process.exit(1);
 } else if (process.argv[2] === 'logs') {
-  if (wantsHelp) subHelp('Usage: wsh logs [-f] <session-id>', [
-    '', 'Print session scrollback (stdout/stderr output).',
+  if (wantsHelp) subHelp('Usage: wsh logs [-f] [--type job|web] <session-id | app-name>', [
+    '', 'Print session output (stdout/stderr).',
+    '', 'Defaults to job mode: target is treated as a verbatim session ID and',
+    'the log is read from disk (works during and after the job, survives',
+    'wsh-server restarts). Use --type web for live web-app sessions; the',
+    'target may then be an app name and the in-memory scrollback is returned.',
     '', 'Options:',
     '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)',
     '  -f, --follow       Stream new output in real time (like tail -f)',
+    '  --type <type>      Session type: job (default) or web',
     '', 'Examples:',
-    '  wsh logs abc123             # print full scrollback',
-    '  wsh logs -f abc123          # follow live output',
+    '  wsh logs abc123                    # job log (one-shot)',
+    '  wsh logs -f abc123                 # follow job log',
+    '  wsh logs --type web my-app         # web app scrollback by name',
+    '  wsh logs -f --type web my-app      # follow live web app output',
   ]);
   const subArgs = process.argv.slice(3);
 
@@ -661,8 +668,17 @@ python3:
   const follow = followIdx !== -1;
   if (followIdx !== -1) subArgs.splice(followIdx, 1);
 
+  let typeFlag: 'job' | 'web' = 'job';
+  const typeIdx = subArgs.findIndex(a => a === '--type');
+  if (typeIdx !== -1 && subArgs[typeIdx + 1]) {
+    const v = subArgs[typeIdx + 1];
+    if (v !== 'job' && v !== 'web') { console.error(`Error: --type must be "job" or "web", got "${v}".`); process.exit(1); }
+    typeFlag = v;
+    subArgs.splice(typeIdx, 2);
+  }
+
   const target = subArgs.find(a => !a.startsWith('-'));
-  if (!target) { console.error('Usage: wsh logs <session-id | app-name>'); process.exit(1); }
+  if (!target) { console.error('Usage: wsh logs [-f] [--type job|web] <session-id | app-name>'); process.exit(1); }
 
   let basePath = process.env.WSH_BASE_PATH || '/';
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
@@ -674,29 +690,27 @@ python3:
   if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
   if (aboxUser) userHeader += ` -H 'X-WSH-User: ${aboxUser}'`;
 
-  // Resolve target: if it matches a session ID, use it; otherwise look up by app name.
-  // Returns appType so follow mode can pick WS (pty/web) vs SSE (job).
-  function resolveSession(): { id: string; appType: 'pty' | 'web' | 'job' | null } {
+  // Resolve target to a session ID. Job mode: skip the /api/sessions roundtrip
+  // — the disk log is the canonical source and the target is taken verbatim.
+  // Web mode: query /api/sessions and match by id, app name, or partial match.
+  function resolveSession(): string {
+    if (typeFlag === 'job') return target!;
     for (const scheme of ['http', 'https'] as const) {
       const url = `${scheme}://127.0.0.1:${port}${basePath}api/sessions`;
       const flags = scheme === 'https' ? '-sSk' : '-sS';
       try {
         const body = execSync(`curl ${flags} ${userHeader} '${url}'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
         const data = JSON.parse(body) as { sessions: { id: string; app: string; appType?: 'pty' | 'web' | 'job' }[] };
-        // Exact session ID match (only if target looks like a 6-char session ID)
         if (isSessionId(target!)) {
           const byId = data.sessions.find(s => s.id === target);
-          if (byId) return { id: byId.id, appType: byId.appType ?? null };
-          // Session not active — return ID anyway so the logs endpoint can try disk fallback.
-          // Treat as job since only job logs persist on disk after the session is gone.
-          return { id: target!, appType: 'job' };
+          if (byId) return byId.id;
+          console.error(`No session found for "${target}".`);
+          process.exit(1);
         }
-        // App name match (most recently created)
         const byApp = data.sessions.filter(s => s.app === target);
-        if (byApp.length > 0) return { id: byApp[byApp.length - 1].id, appType: byApp[byApp.length - 1].appType ?? null };
-        // Partial app name match
+        if (byApp.length > 0) return byApp[byApp.length - 1].id;
         const byPartial = data.sessions.filter(s => s.app.includes(target!));
-        if (byPartial.length === 1) return { id: byPartial[0].id, appType: byPartial[0].appType ?? null };
+        if (byPartial.length === 1) return byPartial[0].id;
         if (byPartial.length > 1) {
           console.error(`Multiple sessions match "${target}": ${byPartial.map(s => `${s.id} (${s.app})`).join(', ')}`);
           process.exit(1);
@@ -713,12 +727,13 @@ python3:
         process.exit(1);
       }
     }
-    return { id: '', appType: null }; // unreachable
+    return ''; // unreachable
   }
-  const { id: sessionId, appType: sessionAppType } = resolveSession();
+  const sessionId = resolveSession();
 
   if (!follow) {
-    // One-shot: fetch scrollback via HTTP and print
+    // One-shot: GET /api/sessions/:id/logs. Job: reads disk file. Web: returns
+    // in-memory scrollback (bounded by MAX_SCROLLBACK).
     let lastErr: any;
     for (const scheme of ['http', 'https'] as const) {
       const url = `${scheme}://127.0.0.1:${port}${basePath}api/sessions/${sessionId}/logs`;
@@ -726,7 +741,6 @@ python3:
       try {
         const result = execSync(`curl ${flags} ${userHeader} -w '\\n%{http_code}' '${url}'`, { stdio: ['pipe', 'pipe', 'pipe'] });
         const raw = result.toString('utf8');
-        // Last line is HTTP status code
         const lastNl = raw.lastIndexOf('\n');
         const httpCode = parseInt(raw.slice(lastNl + 1), 10);
         const body = raw.slice(0, lastNl);
@@ -745,8 +759,10 @@ python3:
       console.error('Error:', lastErr?.stderr?.toString().trim() || lastErr?.message);
     }
     process.exit(1);
-  } else if (sessionAppType === 'job') {
-    // Job follow: SSE stream from disk + live output. No WebSocket.
+  } else {
+    // Follow: SSE from /api/sessions/:id/stream. Server dispatches by live
+    // appType — job sessions tail the disk log, pty/web sessions get a
+    // fake-peer feed of scrollback + live output (control messages stripped).
     function tryConnectSse(scheme: 'http' | 'https'): void {
       const lib = scheme === 'https' ? https : http;
       const headers: Record<string, string> = { Accept: 'text/event-stream' };
@@ -791,54 +807,51 @@ python3:
     }
     tryConnectSse('http');
     (globalThis as any).__wshFollowMode = true;
-  } else {
-    // PTY/web follow: WebSocket — preserves raw binary output for terminal apps.
-    function tryConnect(scheme: 'ws' | 'wss'): void {
-      const wsUrl = `${scheme}://127.0.0.1:${port}${basePath}terminal?session=${sessionId}&yield=1&reconnect=1`;
-      const headers: Record<string, string> = {};
-      if (proxySecret) headers['X-WSH-Proxy-Secret'] = proxySecret;
-      if (aboxUser) headers['X-WSH-User'] = aboxUser;
-      let opened = false;
-      let abandoned = false;
-      const ws = new WebSocket(wsUrl, { headers, rejectUnauthorized: false });
-      ws.on('open', () => { opened = true; });
-      ws.on('message', (data: Buffer, isBinary: boolean) => {
-        if (isBinary) process.stdout.write(data);
-      });
-      ws.on('close', (code: number) => {
-        if (abandoned) return;
-        if (code === 4003) { console.error(`Session "${sessionId}" not found.`); process.exit(1); }
-        if (!opened) { console.error(`No wsh server running on localhost:${port}`); process.exit(1); }
-        process.exit(0);
-      });
-      ws.on('error', () => {
-        if (!opened && scheme === 'ws') { abandoned = true; ws.terminate(); tryConnect('wss'); return; }
-        if (!opened) { console.error(`No wsh server running on localhost:${port}`); process.exit(1); }
-        process.exit(1);
-      });
-      process.on('SIGINT', () => { ws.close(); process.exit(0); });
-      process.on('SIGTERM', () => { ws.close(); process.exit(0); });
-    }
-    tryConnect('ws');
-    (globalThis as any).__wshFollowMode = true;
   }
 } else if (process.argv[2] === 'exitcode') {
   const sid = process.argv[3];
   if (!sid || wantsHelp) subHelp('Usage: wsh exitcode <session-id>', [
-    '', 'Print the exit code of a finished session.',
+    '', 'Print the exit code of a finished job session.',
     '', 'Returns the exit code of the process that ran in the session.',
     'Exits with code 1 if the session is not found or still running.',
     '', 'Examples:',
     '  wsh exitcode abc123         # e.g. 0',
     '  wsh exitcode abc123 && echo "success"',
   ]);
-  try {
-    const code = fs.readFileSync(path.join(JOB_LOG_DIR, `${sid}.exit`), 'utf8').trim();
-    console.log(code);
-    process.exit(0);
-  } catch {
-    process.exit(1);
+  const port = resolveServerPort();
+  let basePath = process.env.WSH_BASE_PATH || '/';
+  if (!basePath.startsWith('/')) basePath = '/' + basePath;
+  if (!basePath.endsWith('/')) basePath += '/';
+  const aboxUser = process.env.ABOX_USER;
+  const proxySecret = process.env.WSH_PROXY_SECRET;
+  let userHeader = '';
+  if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
+  if (aboxUser) userHeader += ` -H 'X-WSH-User: ${aboxUser}'`;
+  let lastErr: any;
+  for (const scheme of ['http', 'https'] as const) {
+    const url = `${scheme}://127.0.0.1:${port}${basePath}api/sessions/${sid}/exit`;
+    const flags = scheme === 'https' ? '-sSk' : '-sS';
+    try {
+      const result = execSync(`curl ${flags} ${userHeader} -w '\\n%{http_code}' '${url}'`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+      const lines = result.trimEnd().split('\n');
+      const httpCode = parseInt(lines.pop()!, 10);
+      const body = lines.join('\n');
+      if (httpCode === 404) process.exit(1);
+      if (httpCode >= 400) { console.error(`Error: server returned ${httpCode}`); process.exit(1); }
+      const parsed = JSON.parse(body);
+      console.log(parsed.code);
+      process.exit(0);
+    } catch (err: any) {
+      lastErr = err;
+      if (scheme === 'http') continue;
+    }
   }
+  if (lastErr?.stderr?.toString().includes('onnect') || lastErr?.stderr?.toString().includes('refused')) {
+    console.error(`No wsh server running on localhost:${port}`);
+  } else {
+    console.error('Error:', lastErr?.stderr?.toString().trim() || lastErr?.message);
+  }
+  process.exit(1);
 } else if (process.argv[2] === 'ls' || process.argv[2] === 'kill' || process.argv[2] === 'port') {
   const subcommand = process.argv[2];
   if (wantsHelp) {
@@ -1384,7 +1397,7 @@ if (firstArg && !firstArg.startsWith('-') && !knownCommands.has(firstArg)) {
   process.exit(1);
 }
 
-// `wsh logs -f` keeps the process alive via WebSocket — skip server startup.
+// `wsh logs -f` keeps the process alive via SSE — skip server startup.
 if ((globalThis as any).__wshFollowMode) { /* event loop stays alive */ } else {
 
 rotateEvents();
