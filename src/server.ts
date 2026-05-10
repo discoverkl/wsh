@@ -1705,10 +1705,28 @@ function baseEnv(): Record<string, string> {
   return env;
 }
 
+// Trusted cwd path: comes from apps.yaml or system defaults. Auto-creates so
+// declarative app definitions are self-bootstrapping on first run.
 function resolveCwd(appConfig: AppConfig): string {
   const dir = appConfig.cwd ? expandHome(appConfig.cwd) : (process.env.HOME ?? process.cwd());
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+// Untrusted cwd path: comes from a POST /api/sessions body. Must already exist
+// — auto-creating would silently turn typos like "/tpm/work" into junk dirs.
+// Returns an error string on failure; null on success.
+function validateRequestCwd(cwd: string): string | null {
+  const expanded = expandHome(cwd);
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(expanded);
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') return `cwd does not exist: ${cwd}`;
+    return `cwd: ${e?.message ?? String(e)}`;
+  }
+  if (!st.isDirectory()) return `cwd is not a directory: ${cwd}`;
+  return null;
 }
 
 /** Spawn a PTY and wire it into an existing session. */
@@ -3296,6 +3314,10 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   const notify = !!req.body?.notify;
   const requestedSession = (req.body?.session as string) || '';
   const cwdOverride = (req.body?.cwd as string) || '';
+  if (cwdOverride) {
+    const err = validateRequestCwd(cwdOverride);
+    if (err) { res.status(400).json({ error: err }); return; }
+  }
   const envOverride: Record<string, string> = (req.body?.env as Record<string, string>) ?? {};
   const adHocCommand = (req.body?.command as string) || '';
   const adHocType = (req.body?.type as string) || '';

@@ -9,7 +9,9 @@ package wsh_test
 // │  ├ pty starts in overridden cwd       │ POST with cwd=/tmp, verify pwd output              │
 // │  ├ env override in pty                │ POST with env, verify echo output                  │
 // │  ├ default cwd without override       │ POST without cwd, session still has cwd field      │
-// │  └ cwd and env combined               │ POST with both, verify both work                   │
+// │  ├ cwd and env combined               │ POST with both, verify both work                   │
+// │  ├ missing cwd rejected               │ POST with non-existent cwd, expect 400             │
+// │  └ cwd is a file rejected             │ POST with cwd pointing at a file, expect 400       │
 // │ TestCLICwdEnv                         │ CLI --cwd and --env flags                          │
 // │  ├ new with --cwd                     │ wsh new --cwd /tmp bash returns URL                │
 // │  └ new with --env                     │ wsh new --env FOO=bar bash returns URL             │
@@ -17,6 +19,9 @@ package wsh_test
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -113,6 +118,35 @@ func TestCwdEnvOverrides(t *testing.T) {
 			}
 		}
 		t.Fatalf("session %s not found in list", id)
+	})
+
+	t.Run("missing cwd rejected", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "does-not-exist")
+		code, resp := srv.postJSONRaw(t, "/api/sessions", map[string]any{
+			"app": "bash",
+			"cwd": missing,
+		})
+		assertEqual(t, code, 400)
+		errMsg, _ := resp["error"].(string)
+		if !strings.Contains(errMsg, "does not exist") {
+			t.Fatalf("expected 'does not exist' in error, got %q", errMsg)
+		}
+	})
+
+	t.Run("cwd is a file rejected", func(t *testing.T) {
+		f := filepath.Join(t.TempDir(), "file.txt")
+		if err := os.WriteFile(f, []byte("hi"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, resp := srv.postJSONRaw(t, "/api/sessions", map[string]any{
+			"app": "bash",
+			"cwd": f,
+		})
+		assertEqual(t, code, 400)
+		errMsg, _ := resp["error"].(string)
+		if !strings.Contains(errMsg, "not a directory") {
+			t.Fatalf("expected 'not a directory' in error, got %q", errMsg)
+		}
 	})
 
 	t.Run("cwd and env combined", func(t *testing.T) {
