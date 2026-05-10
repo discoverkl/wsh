@@ -2475,6 +2475,7 @@ let clientOrigin: string | null = null;
 // --- Express app + server ---
 
 const app = express();
+app.set('json spaces', 2);
 app.use((_req, res, next) => { res.setHeader('X-App-Version', version); next(); });
 if (token) app.use(makeTokenMiddleware(token));
 
