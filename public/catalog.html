@@ -2793,17 +2793,22 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     var existing = inlineTerminals[appKey];
     if (existing && existing.isAlive() && !newTabFlag) {
       if (!input) { existing.send('\r'); ta.value = ''; ta.style.height = 'auto'; saveDraft(appKey, ''); return; }
-      var raw = input[0] === '/' || input[0] === '?' || input[0] === '!';
+      var first = input[0];
+      var raw = first === '/' || first === '?' || first === '!' || first === '$';
       var usePrefix = card.dataset.slashPrefix !== '0';
-      existing.send(raw ? input + '\r' : (usePrefix ? '/' + appKey + ' ' : '') + input + '\r');
+      // Codex uses '$' for slash commands; translate prepended prefix and a leading '/'.
+      var isCodex = workspaceDefaultAgent === 'codex';
+      var slashChar = isCodex ? '$' : '/';
+      var rawOut = (isCodex && first === '/') ? '$' + input.slice(1) : input;
+      existing.send(raw ? rawOut + '\r' : (usePrefix ? slashChar + appKey + ' ' : '') + input + '\r');
       ta.value = '';
       ta.style.height = 'auto';
       saveDraft(appKey, '');
       return;
     }
 
-    // Raw commands (/, ?, !) require a live session — hint the user
-    if (input && (input[0] === '/' || input[0] === '?' || input[0] === '!')) {
+    // Raw commands (/, ?, !, $) require a live session — hint the user
+    if (input && (input[0] === '/' || input[0] === '?' || input[0] === '!' || input[0] === '$')) {
       var origPlaceholder = ta.getAttribute('placeholder');
       ta.value = '';
       ta.style.height = 'auto';
