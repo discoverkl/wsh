@@ -2577,7 +2577,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
   var refreshDebounce = null;
   api.refreshCatalog = function() {
     clearTimeout(refreshDebounce);
-    refreshDebounce = setTimeout(function() { window.refreshCatalog(); }, 300);
+    refreshDebounce = setTimeout(function() { window.refreshCatalog(); loadWorkspace(); }, 300);
   };
 
   // api.sessionReady — called by server when a web app session is ready
