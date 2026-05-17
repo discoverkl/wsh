@@ -210,6 +210,8 @@ Apps must be proxy-aware and configure their own base URL using `$WSH_BASE_URL`.
 
 Environment injected into web app processes: `WSH_PORT` (the port the app should listen on), `WSH_SESSION`, `WSH_BASE_URL`.
 
+**Initial focus.** After the iframe fires `load`, the host calls `iframe.focus()` and then re-focuses the first `[autofocus]` element inside the iframe (same-origin only). Web apps that want a specific input focused on load should use the `autofocus` attribute — a JS `.focus()` call from inside the iframe alone is unreliable, because the host's subsequent `iframe.focus()` can reset the active element to the iframe itself.
+
 ## Image Paste
 
 Ctrl+V (Cmd+V on macOS) in the browser terminal uploads clipboard images to `POST /api/paste-image` (raw body, ≤5 MB, png/jpeg/gif/webp). The server writes them to `~/.wsh/paste/MMDD-HHMMSS-rrr.<ext>`, returns the absolute path, and the client emits it over the WebSocket wrapped in bracketed-paste markers (`\x1b[200~…\x1b[201~`) so TUIs like Claude Code and Codex auto-attach. Files are swept after 7 days at startup and on ~5% of uploads. The macOS Ctrl+V case uses `navigator.clipboard.read()` (HTTPS/localhost only); other paths use the synchronous `paste` event with no permission prompt.
