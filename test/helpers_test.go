@@ -91,9 +91,11 @@ func startServer(t *testing.T) *server {
 	cmd.Dir = root
 	cmd.Stdout = os.Stderr // forward server logs for debugging
 	cmd.Stderr = os.Stderr
-	// Determine base path from ABOX_USER (server uses /<user>/ as base)
+	// Determine base path from ABOX_NAME (server uses /<name>/ as base; ABOX_USER is a deprecated alias)
 	base := "/"
-	if u := os.Getenv("ABOX_USER"); u != "" {
+	if u := os.Getenv("ABOX_NAME"); u != "" {
+		base = "/" + u + "/"
+	} else if u := os.Getenv("ABOX_USER"); u != "" {
 		base = "/" + u + "/"
 	}
 	if err := cmd.Start(); err != nil {
