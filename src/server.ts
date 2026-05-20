@@ -278,7 +278,7 @@ if (process.argv[2] === 'version') {
   const basePath = process.env.WSH_BASE_PATH || '/';
   try {
     const proxySecret = process.env.WSH_PROXY_SECRET;
-    const aboxUser = process.env.ABOX_USER;
+    const aboxUser = process.env.WSH_ORIGIN_USER || '';
     let headers = "-H 'Content-Type: application/json'";
     if (proxySecret) headers += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
     if (aboxUser) headers += ` -H 'X-WSH-User: ${aboxUser}'`;
@@ -581,7 +581,7 @@ python3:
   let basePath = process.env.WSH_BASE_PATH || '/';
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
   if (!basePath.endsWith('/')) basePath += '/';
-  const aboxUser = process.env.ABOX_USER;
+  const aboxUser = process.env.WSH_ORIGIN_USER || '';
   const proxySecret = process.env.WSH_PROXY_SECRET;
   let userHeader = '';
   if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
@@ -684,7 +684,7 @@ python3:
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
   if (!basePath.endsWith('/')) basePath += '/';
 
-  const aboxUser = process.env.ABOX_USER;
+  const aboxUser = process.env.WSH_ORIGIN_USER || '';
   const proxySecret = process.env.WSH_PROXY_SECRET;
   let userHeader = '';
   if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
@@ -822,7 +822,7 @@ python3:
   let basePath = process.env.WSH_BASE_PATH || '/';
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
   if (!basePath.endsWith('/')) basePath += '/';
-  const aboxUser = process.env.ABOX_USER;
+  const aboxUser = process.env.WSH_ORIGIN_USER || '';
   const proxySecret = process.env.WSH_PROXY_SECRET;
   let userHeader = '';
   if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
@@ -896,7 +896,7 @@ python3:
   if (!basePath.startsWith('/')) basePath = '/' + basePath;
   if (!basePath.endsWith('/')) basePath += '/';
 
-  const aboxUser = process.env.ABOX_USER;
+  const aboxUser = process.env.WSH_ORIGIN_USER || '';
   const proxySecret = process.env.WSH_PROXY_SECRET;
   let userHeader = '';
   if (proxySecret) userHeader += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
@@ -953,12 +953,12 @@ python3:
 
     const now = Date.now();
     const base = (s: any) => [
-      s.id, s.app ?? '', s.appType ?? 'pty', s.title, s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
+      s.id, s.app ?? '', s.appType ?? 'pty', s.title, s.createdBy || '-', s.pinned ? 'yes' : 'no', String(s.peers), s.hasWriter ? 'yes' : 'no',
       formatDuration(now - s.createdAt),
     ];
     const headers = extended
-      ? ['ID', 'APP', 'TYPE', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IN', 'OUT', 'PID', 'SIZE', 'PROCESS']
-      : ['ID', 'APP', 'TYPE', 'TITLE', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IDLE'];
+      ? ['ID', 'APP', 'TYPE', 'TITLE', 'USER', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IN', 'OUT', 'PID', 'SIZE', 'PROCESS']
+      : ['ID', 'APP', 'TYPE', 'TITLE', 'USER', 'PINNED', 'PEERS', 'WRITER', 'UPTIME', 'IDLE'];
     const rows = data.sessions.map((s: any) => extended
       ? [...base(s), formatDuration(now - s.lastInput), formatDuration(now - s.lastOutput), String(s.pid), formatSize(s.scrollbackSize), s.process ?? '']
       : [...base(s), formatDuration(now - Math.max(s.lastInput, s.lastOutput))],
@@ -1067,7 +1067,7 @@ python3:
   if (!basePath.endsWith('/')) basePath += '/';
 
   const proxySecret = process.env.WSH_PROXY_SECRET;
-  const aboxUser = process.env.ABOX_USER;
+  const aboxUser = process.env.WSH_ORIGIN_USER || '';
   let headers = "-H 'Content-Type: application/json'";
   if (proxySecret) headers += ` -H 'X-WSH-Proxy-Secret: ${proxySecret}'`;
   if (aboxUser) headers += ` -H 'X-WSH-User: ${aboxUser}'`;
@@ -1257,7 +1257,7 @@ python3:
   if (!basePath.endsWith('/')) basePath += '/';
 
   const proxySecret = process.env.WSH_PROXY_SECRET;
-  const aboxUser = process.env.ABOX_USER;
+  const aboxUser = process.env.WSH_ORIGIN_USER || '';
 
   // Build SSE URL
   const clientAck = !!(name && execCmd);
@@ -1450,6 +1450,8 @@ interface SessionFields {
   exitCode?: number | null;
   /** When set, PTY spawn is deferred until the first resize message. */
   pendingConfig?: AppConfig;
+  /** X-WSH-User header value at session creation, or '' if no upstream identity was carried. */
+  createdBy: string;
 }
 
 type Session = SessionFields & EventEmitter;
@@ -1662,7 +1664,7 @@ function deriveTitleFromCommand(cmd: string): string {
   return collapsed.length > MAX ? collapsed.slice(0, MAX - 1) + '…' : collapsed;
 }
 
-function baseSession(appKey: string, appConfig: AppConfig): Session {
+function baseSession(appKey: string, appConfig: AppConfig, createdBy = ''): Session {
   const now = Date.now();
   return Object.assign(new EventEmitter(), {
     pty: null,
@@ -1682,6 +1684,7 @@ function baseSession(appKey: string, appConfig: AppConfig): Session {
     lastOutput: now,
     appType: 'pty' as const,
     child: null,
+    createdBy,
   }) as Session;
 }
 
@@ -1741,6 +1744,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       WSH_SESSION: id,
+      WSH_ORIGIN_USER: session.createdBy || '',
       ...(appConfig.env ?? {}),
     } as Record<string, string>,
   });
@@ -1769,16 +1773,16 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
   console.log(`[session ${id}] spawned (${cols}x${rows}) cmd: ${appConfig.command}`);
 }
 
-function spawnSession(id: string, appKey: string, appConfig: AppConfig, cols = 80, rows = 24): Session {
-  const session = baseSession(appKey, appConfig);
+function spawnSession(id: string, appKey: string, appConfig: AppConfig, createdBy = '', cols = 80, rows = 24): Session {
+  const session = baseSession(appKey, appConfig, createdBy);
   registerSession(id, session);
   spawnPty(id, session, appConfig, cols, rows);
   return session;
 }
 
 /** Create a pending session that defers PTY spawn until the first resize. */
-function createPendingSession(id: string, appKey: string, appConfig: AppConfig): Session {
-  const session = baseSession(appKey, appConfig);
+function createPendingSession(id: string, appKey: string, appConfig: AppConfig, createdBy = ''): Session {
+  const session = baseSession(appKey, appConfig, createdBy);
   session.pendingConfig = appConfig;
   registerSession(id, session);
   console.log(`[session ${id}] created (pending — waiting for resize to spawn PTY)`);
@@ -1813,11 +1817,11 @@ function pollUntilReady(port: number, healthPath = '/', timeoutMs = 30000): Prom
   });
 }
 
-async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig, options?: { notify?: boolean }): Promise<Session> {
+async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig, createdBy = '', options?: { notify?: boolean }): Promise<Session> {
   const port = await findFreePort();
   const configuredTimeout = appConfig.timeout ? parseTimeout(appConfig.timeout) : undefined;
   const timeoutMs = (configuredTimeout != null && !isNaN(configuredTimeout)) ? configuredTimeout : WEB_SESSION_TTL;
-  const session = Object.assign(baseSession(appKey, appConfig), {
+  const session = Object.assign(baseSession(appKey, appConfig, createdBy), {
     appType: 'web' as const,
     port,
     ready: false,
@@ -1834,6 +1838,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
     WSH_PORT: String(port),
     WSH_SESSION: id,
     WSH_BASE_URL: BASE + '_a/' + appKey + '/',
+    WSH_ORIGIN_USER: session.createdBy || '',
   };
 
   const child = spawn('/bin/sh', ['-c', appConfig.command], {
@@ -1899,8 +1904,8 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   return session;
 }
 
-function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Session {
-  const session = baseSession(appKey, appConfig);
+function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, createdBy = ''): Session {
+  const session = baseSession(appKey, appConfig, createdBy);
   session.appType = 'job';
 
   // Jobs have no idle TTL — the child's 'close' handler is the only path to deletion.
@@ -1914,6 +1919,7 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig): Sess
     ...baseEnv(),
     ...(appConfig.env ?? {}),
     WSH_SESSION: id,
+    WSH_ORIGIN_USER: session.createdBy || '',
   };
 
   const child = spawn('/bin/sh', ['-c', appConfig.command], {
@@ -2800,6 +2806,7 @@ router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
     ready: s.ready ?? null,
     exitCode: s.exitCode ?? null,
     cwd: s.cwd ?? null,
+    createdBy: s.createdBy ?? '',
   }));
   res.json({ sessions: list });
 });
@@ -3307,6 +3314,7 @@ router.post('/api/paste-image',
 
 router.post('/api/sessions', async (req: express.Request, res: express.Response) => {
   console.log(`[api] POST /api/sessions body=${JSON.stringify(req.body)}`);
+  const createdBy = (req.headers['x-wsh-user'] as string) || '';
   const skillName = (req.body?.skill as string) || '';
   const appKey = (req.body?.app as string) || (skillName ? '' : 'bash');
   const input = (req.body?.input as string) || '';
@@ -3423,14 +3431,14 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
 
   if (effectiveConfig.type === 'job') {
     try {
-      spawnJobSession(id, sessionLabel, effectiveConfig);
+      spawnJobSession(id, sessionLabel, effectiveConfig, createdBy);
     } catch (err) {
       console.error('Failed to spawn job:', errorMessage(err));
       res.status(500).json({ error: 'Failed to spawn session' }); return;
     }
   } else if (effectiveConfig.type === 'web') {
     try {
-      await spawnWebSession(id, sessionLabel, effectiveConfig, { notify });
+      await spawnWebSession(id, sessionLabel, effectiveConfig, createdBy, { notify });
     } catch (err) {
       console.error('Failed to spawn web app:', errorMessage(err));
       res.status(500).json({ error: 'Failed to spawn session' }); return;
@@ -3440,10 +3448,10 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     // the correct terminal dimensions (avoids expensive SIGWINCH re-render).
     // Skill sessions skip deferral — start immediately so the agent boots
     // while the new tab is still loading (saves ~200-500ms to first output).
-    createPendingSession(id, sessionLabel, effectiveConfig);
+    createPendingSession(id, sessionLabel, effectiveConfig, createdBy);
   } else {
     try {
-      spawnSession(id, sessionLabel, effectiveConfig);
+      spawnSession(id, sessionLabel, effectiveConfig, createdBy);
     } catch (err) {
       console.error('Failed to spawn PTY:', errorMessage(err));
       res.status(500).json({ error: 'Failed to spawn session' }); return;
@@ -3593,6 +3601,7 @@ if (networkServer) networkServer.on('upgrade', handleUpgrade);
 
 wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+  const createdBy = ((req.headers['x-wsh-user'] as string) || '').toString();
   let id  = url.searchParams.get('session');
 
   // Control-only connection: receives broadcast RPCs, no session needed.
@@ -3757,7 +3766,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     } else if (effectiveConfig.type === 'web') {
       try {
         ws.send(JSON.stringify({ type: 'status', status: 'starting' }));
-        session = await spawnWebSession(id, sessionLabel, effectiveConfig);
+        session = await spawnWebSession(id, sessionLabel, effectiveConfig, createdBy);
       } catch (err) {
         console.error('Failed to spawn web app:', errorMessage(err));
         ws.close(WS_CLOSE.INTERNAL_ERROR, 'Failed to spawn web app');
@@ -3765,7 +3774,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       }
     } else {
       try {
-        session = spawnSession(id, sessionLabel, effectiveConfig);
+        session = spawnSession(id, sessionLabel, effectiveConfig, createdBy);
       } catch (err) {
         console.error('Failed to spawn PTY:', errorMessage(err));
         ws.close(WS_CLOSE.INTERNAL_ERROR, 'Failed to spawn PTY');
