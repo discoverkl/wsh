@@ -15,6 +15,8 @@ package wsh_test
 // └───────────────────────────────────────┴───────────────────────────────────────────────────┘
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -48,6 +50,47 @@ func TestSessions(t *testing.T) {
 		s := sessions[0].(map[string]any)
 		assertEqual(t, s["id"], id)
 		assertEqual(t, s["app"], "bash")
+		// No X-WSH-User on this POST → createdBy is the empty string.
+		assertEqual(t, s["createdBy"], "")
+	})
+
+	t.Run("createdBy captures X-WSH-User header", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{"type": "job", "command": "true"})
+		req, err := http.NewRequest(http.MethodPost, srv.url("/api/sessions"), bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-WSH-User", "alice")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		id, ok := out["id"].(string)
+		if !ok || id == "" {
+			t.Fatalf("expected session id, got %v", out)
+		}
+		t.Cleanup(func() { srv.deleteJSONRaw(t, fmt.Sprintf("/api/sessions/%s", id)) })
+
+		list := srv.getJSON(t, "/api/sessions")
+		sessions := list["sessions"].([]any)
+		var found map[string]any
+		for _, s := range sessions {
+			m := s.(map[string]any)
+			if m["id"] == id {
+				found = m
+				break
+			}
+		}
+		if found == nil {
+			t.Fatalf("session %s not in list", id)
+		}
+		assertEqual(t, found["createdBy"], "alice")
 	})
 
 	t.Run("delete", func(t *testing.T) {
