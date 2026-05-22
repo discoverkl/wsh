@@ -17,6 +17,7 @@ import type { IPty } from 'node-pty';
 import YAML from 'yaml';
 import { version } from '../package.json';
 import { emit as emitEvent, on as onEvent, readSince, getCursor, setCursor, rotate as rotateEvents, trim as trimEvents, isValidEventType, LOG_FILE as EVENT_LOG_FILE, CURSOR_DIR as EVENT_CURSOR_DIR, WshEvent } from './events';
+import * as metrics from './metrics';
 
 // --- Error handling ---
 
@@ -1435,6 +1436,8 @@ interface SessionFields {
   pinned: boolean;
   title: string;
   app: string;
+  /** Program name spawned for the session: basename of the resolved command's first token. */
+  binary: string;
   cwd: string;
   createdAt: number;
   lastInput: number;
@@ -1452,6 +1455,12 @@ interface SessionFields {
   pendingConfig?: AppConfig;
   /** X-WSH-User header value at session creation, or '' if no upstream identity was carried. */
   createdBy: string;
+  /** Cumulative bytes client→PTY / client→proxy since creation. Always 0 for jobs (no stdin). */
+  bytesIn: number;
+  /** Cumulative bytes PTY→client / proxy→client / stdout→job-log since creation. */
+  bytesOut: number;
+  /** Last (bytesIn+bytesOut) total emitted by the metrics tick; lets the tick skip idle sessions. */
+  metricsLastTickBytes?: number;
 }
 
 type Session = SessionFields & EventEmitter;
@@ -1664,8 +1673,14 @@ function deriveTitleFromCommand(cmd: string): string {
   return collapsed.length > MAX ? collapsed.slice(0, MAX - 1) + '…' : collapsed;
 }
 
+/** Program name spawned for a session: basename of the command's first token. */
+function commandBinary(command: string): string {
+  return path.basename(command.trim().split(/\s+/)[0] || '');
+}
+
 function baseSession(appKey: string, appConfig: AppConfig, createdBy = ''): Session {
   const now = Date.now();
+  const binary = commandBinary(appConfig.command);
   return Object.assign(new EventEmitter(), {
     pty: null,
     scrollbackChunks: [] as Buffer[],
@@ -1675,9 +1690,10 @@ function baseSession(appKey: string, appConfig: AppConfig, createdBy = ''): Sess
     peers: new Map(),
     cleanupTimer: null,
     pinned: false,
-    title: appConfig.title ?? path.basename(appConfig.command.split(/\s/)[0]),
+    title: appConfig.title ?? binary,
     icon: appConfig.icon,
     app: appKey,
+    binary,
     cwd: resolveCwd(appConfig),
     createdAt: now,
     lastInput: now,
@@ -1685,6 +1701,8 @@ function baseSession(appKey: string, appConfig: AppConfig, createdBy = ''): Sess
     appType: 'pty' as const,
     child: null,
     createdBy,
+    bytesIn: 0,
+    bytesOut: 0,
   }) as Session;
 }
 
@@ -1757,12 +1775,14 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
     if (m) session.title = m[1];
     session.lastOutput = Date.now();
     const buf = Buffer.from(data, 'utf8');
+    session.bytesOut += buf.length;
     appendScrollback(session, buf);
     broadcast(session, buf, { binary: true });
   });
 
   ptyProcess.onExit(({ exitCode, signal }) => {
     console.log(`[session ${id}] PTY exited (code=${exitCode} signal=${signal})`);
+    metrics.recordClosed(id, session);
     session.pty = null;
     broadcastClose(session, WS_CLOSE.OK, 'PTY process exited');
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
@@ -1872,6 +1892,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
 
   child.on('exit', (code) => {
     console.log(`[session ${id}] web process exited (code ${code})`);
+    metrics.recordClosed(id, session);
     broadcastClose(session, WS_CLOSE.OK, 'Process exited');
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
     // Only delete if this session is still the current one (not replaced by -s reuse)
@@ -1939,6 +1960,7 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
 
   const appendOutput = (data: Buffer) => {
     session.lastOutput = Date.now();
+    session.bytesOut += data.length;
     fs.writeSync(logFd, data);
     session.emit('output', data);
   };
@@ -1948,6 +1970,7 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
 
   child.on('close', (code, signal) => {
     console.log(`[session ${id}] job exited (code ${code}, signal ${signal})`);
+    metrics.recordClosed(id, session);
     // POSIX convention: signal-killed processes exit with 128 + signal number.
     // Node passes code=null in that case; without this, callers see -1 (which
     // bash wraps to 255) and lose all signal info.
@@ -2339,6 +2362,22 @@ setInterval(() => {
     else if (kept.length !== timestamps.length) missAttempts.set(ip, kept);
   }
 }, MISS_SWEEP_INTERVAL).unref();
+
+// Metrics: one shared checkpoint timer for all sessions. Short-lived sessions
+// never reach it — they emit a `closed` event instead. Only sessions older
+// than the interval with a non-zero byte delta since the last tick emit one,
+// so idle terminals cost nothing.
+const METRICS_TICK_INTERVAL = 60_000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, s] of sessions) {
+    if (now - s.createdAt < METRICS_TICK_INTERVAL) continue;
+    const total = (s.bytesIn ?? 0) + (s.bytesOut ?? 0);
+    if (total <= (s.metricsLastTickBytes ?? 0)) continue;
+    s.metricsLastTickBytes = total;
+    metrics.recordTick(id, s);
+  }
+}, METRICS_TICK_INTERVAL).unref();
 
 
 function getLanIPs(): string[] {
@@ -2807,8 +2846,35 @@ router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
     exitCode: s.exitCode ?? null,
     cwd: s.cwd ?? null,
     createdBy: s.createdBy ?? '',
+    bytesIn: s.bytesIn ?? 0,
+    bytesOut: s.bytesOut ?? 0,
   }));
   res.json({ sessions: list });
+});
+
+// Metrics: live-session snapshot. Drives the dashboard's "active right now"
+// gauges. Cumulative byte totals; the rollup pipeline uses /api/metrics/events.
+router.get('/api/metrics/sessions', (_req: express.Request, res: express.Response) => {
+  const list = [...sessions.entries()].map(([id, s]) => ({
+    id,
+    app: s.app,
+    binary: s.binary,
+    appType: s.appType,
+    user: s.createdBy || '',
+    openedAt: Math.floor(s.createdAt / 1000),
+    bytesIn: s.bytesIn ?? 0,
+    bytesOut: s.bytesOut ?? 0,
+  }));
+  res.json({ ts: Math.floor(Date.now() / 1000), sessions: list });
+});
+
+// Metrics: cursor-paged read of the event log for the host collector. Each
+// event carries its own resume cursor so the caller can stop on any line.
+// `since` is opaque; "" starts from the oldest retained segment.
+router.get('/api/metrics/events', (req: express.Request, res: express.Response) => {
+  const since = typeof req.query.since === 'string' ? req.query.since : '';
+  const { events, nextCursor } = metrics.readEvents(since);
+  res.json({ events, nextCursor });
 });
 
 router.get('/api/sessions/:id/logs', (req: express.Request, res: express.Response) => {
@@ -3147,6 +3213,7 @@ function proxyHandler(req: express.Request, res: express.Response): void {
     method: req.method,
     headers: req.headers,
   }, (proxyRes) => {
+    proxyRes.on('data', (chunk: Buffer) => { session.bytesOut += chunk.length; });
     res.writeHead(proxyRes.statusCode!, proxyRes.headers);
     proxyRes.pipe(res);
   });
@@ -3155,6 +3222,7 @@ function proxyHandler(req: express.Request, res: express.Response): void {
     if (!res.headersSent) res.status(502).send('Bad Gateway');
   });
 
+  req.on('data', (chunk: Buffer) => { session.bytesIn += chunk.length; });
   req.pipe(proxyReq);
 }
 
@@ -3813,6 +3881,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       if (currentSession.appType === 'web') return; // no PTY input for web sessions (jobs are rejected at connect)
       currentSession.lastInput = Date.now();
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      currentSession.bytesIn += buf.length;
       currentSession.pty!.write(buf.toString('binary'));
       return;
     }
