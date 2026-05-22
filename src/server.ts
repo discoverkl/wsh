@@ -3936,7 +3936,14 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
           break;
       }
     } else {
-      if (currentSession.pty) currentSession.pty.write(text);
+      // Plain PTY input (keystrokes, paste, shortcut bar) arrives as a text
+      // frame — term.onData on the client sends a string. This, not the
+      // binary branch above, is the real client→PTY path: count it.
+      if (currentSession.pty) {
+        currentSession.lastInput = Date.now();
+        currentSession.bytesIn += Buffer.byteLength(text);
+        currentSession.pty.write(text);
+      }
     }
   });
 
