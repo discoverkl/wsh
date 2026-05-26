@@ -14,6 +14,11 @@ import * as os from 'os';
 import * as path from 'path';
 
 const METRICS_DIR = path.join(os.homedir(), '.wsh', 'metrics');
+// Box-user opt-out: presence of ~/.wsh/metrics.off makes recordTick/recordClosed
+// no-ops, so no events ever enter the on-disk segment. Toggle by touch/rm; the
+// next event reflects the change without restarting wsh. Undocumented for now
+// (we'd rather users keep metrics on); operators should not flip this remotely.
+const METRICS_OFF_FILE = path.join(os.homedir(), '.wsh', 'metrics.off');
 const SEGMENT_MAX_BYTES = 100 * 1024 * 1024; // rotate at 100 MB
 const SEGMENTS_KEPT = 2;                     // current + 1 previous
 const FLUSH_BYTES = 64 * 1024;               // flush early when buffer hits 64 KB
@@ -106,6 +111,9 @@ function maybeRotate(): void {
 }
 
 function append(obj: Record<string, unknown>): void {
+  // One stat per event is cheap (the file lives in the same dir we just wrote
+  // to, so it's hot in the page cache). Checking here covers every caller.
+  if (fs.existsSync(METRICS_OFF_FILE)) return;
   init();
   let line: string;
   try {
@@ -119,9 +127,15 @@ function append(obj: Record<string, unknown>): void {
   else scheduleFlush();
 }
 
-/** Record a session that has just ended. Captures final cumulative byte totals. */
-export function recordClosed(sid: string, s: MetricsSession): void {
-  append({
+/** Record a session that has just ended. Captures final cumulative byte
+ *  totals plus, when the session's binary is a known agent, a per-model
+ *  cumulative token map collected at close time. */
+export function recordClosed(
+  sid: string,
+  s: MetricsSession,
+  tokens?: Record<string, { in: number; out: number }>,
+): void {
+  const evt: Record<string, unknown> = {
     t: 'closed',
     sid,
     app: s.app,
@@ -132,12 +146,20 @@ export function recordClosed(sid: string, s: MetricsSession): void {
     closedAt: Math.floor(Date.now() / 1000),
     bytesIn: s.bytesIn,
     bytesOut: s.bytesOut,
-  });
+  };
+  if (tokens && Object.keys(tokens).length > 0) evt.tokens = tokens;
+  append(evt);
 }
 
-/** Record a periodic checkpoint for a still-running session. */
-export function recordTick(sid: string, s: MetricsSession): void {
-  append({
+/** Record a periodic checkpoint for a still-running session. Tokens, when
+ *  present, are cumulative per model since session start; the host collector
+ *  turns them into per-(sid, model) deltas the same way it does for bytes. */
+export function recordTick(
+  sid: string,
+  s: MetricsSession,
+  tokens?: Record<string, { in: number; out: number }>,
+): void {
+  const evt: Record<string, unknown> = {
     t: 'tick',
     sid,
     app: s.app,
@@ -148,7 +170,9 @@ export function recordTick(sid: string, s: MetricsSession): void {
     ts: Math.floor(Date.now() / 1000),
     bytesIn: s.bytesIn,
     bytesOut: s.bytesOut,
-  });
+  };
+  if (tokens && Object.keys(tokens).length > 0) evt.tokens = tokens;
+  append(evt);
 }
 
 /** One event line plus the cursor to resume *after* it. */

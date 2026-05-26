@@ -18,6 +18,7 @@ import YAML from 'yaml';
 import { version } from '../package.json';
 import { emit as emitEvent, on as onEvent, readSince, getCursor, setCursor, rotate as rotateEvents, trim as trimEvents, isValidEventType, LOG_FILE as EVENT_LOG_FILE, CURSOR_DIR as EVENT_CURSOR_DIR, WshEvent } from './events';
 import * as metrics from './metrics';
+import { agentOf, captureTokens, dropSession } from './agentTokens';
 
 // --- Error handling ---
 
@@ -1785,7 +1786,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
 
   ptyProcess.onExit(({ exitCode, signal }) => {
     console.log(`[session ${id}] PTY exited (code=${exitCode} signal=${signal})`);
-    metrics.recordClosed(id, session);
+    void recordClosedWithTokens(id, session);
     session.pty = null;
     broadcastClose(session, WS_CLOSE.OK, 'PTY process exited');
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
@@ -1896,7 +1897,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
 
   child.on('exit', (code) => {
     console.log(`[session ${id}] web process exited (code ${code})`);
-    metrics.recordClosed(id, session);
+    void recordClosedWithTokens(id, session);
     broadcastClose(session, WS_CLOSE.OK, 'Process exited');
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
     // Only delete if this session is still the current one (not replaced by -s reuse)
@@ -1974,7 +1975,7 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
 
   child.on('close', (code, signal) => {
     console.log(`[session ${id}] job exited (code ${code}, signal ${signal})`);
-    metrics.recordClosed(id, session);
+    void recordClosedWithTokens(id, session);
     // POSIX convention: signal-killed processes exit with 128 + signal number.
     // Node passes code=null in that case; without this, callers see -1 (which
     // bash wraps to 255) and lose all signal info.
@@ -2374,16 +2375,64 @@ setInterval(() => {
 // than the interval with a non-zero byte delta since the last tick emit one,
 // so idle terminals cost nothing.
 const METRICS_TICK_INTERVAL = 60_000;
-setInterval(() => {
+setInterval(() => { void tickAllSessions(); }, METRICS_TICK_INTERVAL).unref();
+
+// Prewarm agent-token discovery for sessions still in their first 30 s:
+// the regular 60 s tick is too slow to catch `claude --resume` cases where
+// the user types a new prompt within seconds of opening the session. Each
+// call is cheap (a /proc walk plus a directory listing) and short-circuits
+// the moment a transcript is adopted (state.files non-empty → adapter
+// honours its 5 s throttle thereafter).
+const AGENT_PREWARM_INTERVAL = 1_000;
+const AGENT_PREWARM_WINDOW = 30_000;
+setInterval(() => { void prewarmAgentTokens(); }, AGENT_PREWARM_INTERVAL).unref();
+
+async function prewarmAgentTokens(): Promise<void> {
   const now = Date.now();
+  const tasks: Promise<unknown>[] = [];
+  for (const [id, s] of sessions) {
+    if (!agentOf(s.binary)) continue;
+    const age = now - s.createdAt;
+    if (age < 200 || age > AGENT_PREWARM_WINDOW) continue;
+    tasks.push(maybeAgentTokens(id, s).catch(() => undefined));
+  }
+  if (tasks.length) await Promise.all(tasks);
+}
+
+async function tickAllSessions(): Promise<void> {
+  const now = Date.now();
+  const tasks: Promise<void>[] = [];
   for (const [id, s] of sessions) {
     if (now - s.createdAt < METRICS_TICK_INTERVAL) continue;
     const total = (s.bytesIn ?? 0) + (s.bytesOut ?? 0);
     if (total <= (s.metricsLastTickBytes ?? 0)) continue;
     s.metricsLastTickBytes = total;
-    metrics.recordTick(id, s);
+    tasks.push(tickOne(id, s));
   }
-}, METRICS_TICK_INTERVAL).unref();
+  if (tasks.length) await Promise.all(tasks);
+}
+
+async function tickOne(id: string, session: Session): Promise<void> {
+  metrics.recordTick(id, session, await maybeAgentTokens(id, session));
+}
+
+async function recordClosedWithTokens(id: string, session: Session): Promise<void> {
+  metrics.recordClosed(id, session, await maybeAgentTokens(id, session));
+  dropSession(id);
+}
+
+// maybeAgentTokens returns the per-model cumulative token snapshot for an
+// agent session, or undefined when the session's binary isn't a registered
+// agent. Non-agent sessions skip the file IO entirely.
+async function maybeAgentTokens(id: string, s: Session): Promise<Record<string, { in: number; out: number }> | undefined> {
+  if (!agentOf(s.binary)) return undefined;
+  return await captureTokens({
+    sid: id,
+    binary: s.binary,
+    createdAt: s.createdAt,
+    pid: s.pty?.pid ?? s.child?.pid ?? null,
+  });
+}
 
 
 function getLanIPs(): string[] {
