@@ -1465,6 +1465,9 @@ interface SessionFields {
   bytesOut: number;
   /** Last (bytesIn+bytesOut) total emitted by the metrics tick; lets the tick skip idle sessions. */
   metricsLastTickBytes?: number;
+  /** ms-epoch of the last tick this session emitted; drives the idle heartbeat so
+   *  `active_seconds` is bucketed at ≤METRICS_HEARTBEAT_INTERVAL granularity. */
+  metricsLastTickTs?: number;
 }
 
 type Session = SessionFields & EventEmitter;
@@ -2371,10 +2374,14 @@ setInterval(() => {
 }, MISS_SWEEP_INTERVAL).unref();
 
 // Metrics: one shared checkpoint timer for all sessions. Short-lived sessions
-// never reach it — they emit a `closed` event instead. Only sessions older
-// than the interval with a non-zero byte delta since the last tick emit one,
-// so idle terminals cost nothing.
+// never reach it — they emit a `closed` event instead. A session emits a tick
+// when either (a) bytes grew since its last tick or (b) it has been idle for
+// METRICS_HEARTBEAT_INTERVAL. The heartbeat clause bounds the bucket-attribution
+// error for `active_seconds` on purely idle sessions; at hourly storage, K=30 min
+// caps the worst-case hour-boundary mis-credit at 30 min while costing only
+// ~150 B per session per K.
 const METRICS_TICK_INTERVAL = 60_000;
+const METRICS_HEARTBEAT_INTERVAL = 30 * 60_000;
 setInterval(() => { void tickAllSessions(); }, METRICS_TICK_INTERVAL).unref();
 
 // Prewarm agent-token discovery for sessions still in their first 30 s:
@@ -2405,8 +2412,12 @@ async function tickAllSessions(): Promise<void> {
   for (const [id, s] of sessions) {
     if (now - s.createdAt < METRICS_TICK_INTERVAL) continue;
     const total = (s.bytesIn ?? 0) + (s.bytesOut ?? 0);
-    if (total <= (s.metricsLastTickBytes ?? 0)) continue;
+    const bytesGrew = total > (s.metricsLastTickBytes ?? 0);
+    const lastEmit = s.metricsLastTickTs ?? s.createdAt;
+    const idleEnough = now - lastEmit >= METRICS_HEARTBEAT_INTERVAL;
+    if (!bytesGrew && !idleEnough) continue;
     s.metricsLastTickBytes = total;
+    s.metricsLastTickTs = now;
     tasks.push(tickOne(id, s));
   }
   if (tasks.length) await Promise.all(tasks);
