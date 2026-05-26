@@ -85,7 +85,10 @@ function makeResponder(ws) {
 }
 function doConnect() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = new URL('./terminal', location.href);
+    // Resolve against document.baseURI (the <base href>) — location.href may
+    // include an app subpath like /<app>/files/proj/ that would otherwise make
+    // './terminal' land in the subpath.
+    const url = new URL('./terminal', document.baseURI);
     url.protocol = proto;
     url.search = 'session=_rpc';
     controlWs = new WebSocket(url.href);

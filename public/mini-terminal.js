@@ -379,7 +379,10 @@ window.MiniTerminal = {
             fitAddon.fit();
             // WebSocket connection
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = new URL('./terminal', location.href);
+            // Resolve against document.baseURI (the <base href>) — location.href may
+            // include an app subpath like /<app>/files/proj/ that would otherwise
+            // make './terminal' land in the subpath.
+            const wsUrl = new URL('./terminal', document.baseURI);
             wsUrl.protocol = proto;
             const wsParams = { session: sessionId };
             if (reconnect)

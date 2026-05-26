@@ -93,28 +93,42 @@ function getSessionParams(): { sessionId: string | null; wtoken: string | null }
   }
   const appHash = slash >= 0 ? beforeQuery.slice(slash + 1) : '';
   // Rewrite the hash to strip ?wt= (if present) so it doesn't leak
-  // into getAppHash() or become visible to embedded web apps.
-  history.replaceState(null, '', `#${id}${appHash ? '/' + appHash : ''}`);
+  // into getAppHash() or become visible to embedded web apps. The full
+  // pathname is included because `<base href>` makes a hash-only URL like
+  // `#abc` resolve against BASE (stripping the appName segment).
+  history.replaceState(null, '', `${location.pathname}#${id}${appHash ? '/' + appHash : ''}`);
   return { sessionId: id, wtoken: params?.get('wt') ?? null };
 }
 
 let { sessionId, wtoken } = getSessionParams();
 
-// --- Initial inner path for web apps (?to=<path>) ---
-// One-shot deep link into a specific path inside the iframe. Used only on the
-// initial iframe src; stripped from the parent URL after read so reconnects and
-// the hash sync don't see it. Path-channel only — `to` sets the iframe's path,
-// while the hash sync sets its fragment, so the two are orthogonal.
-function consumeInitialInnerPath(): string {
+// --- Parse appName + initial inner path from the parent URL ---
+// The parent URL is ${BASE}<appName>[/<innerPath>]. When a subpath is present
+// the parent URL mirrors the iframe's inner path, so refresh / bookmark /
+// share preserve the user's position; an empty subpath falls through to the
+// app's configured `path:` (or '/'). BASE comes from <base href> (read via
+// document.baseURI), so the parser stays correct under any mount point.
+const baseUrl = new URL(document.baseURI);
+const afterBase = location.pathname.slice(baseUrl.pathname.length).replace(/^\/+/, '');
+const firstSlash = afterBase.indexOf('/');
+let appName = (firstSlash >= 0 ? afterBase.slice(0, firstSlash) : afterBase) || 'bash';
+let initialInnerPath = firstSlash >= 0 ? afterBase.slice(firstSlash) : '';
+
+// `?to=<path>` query param — deprecated, slated for removal in a future wsh
+// release. On load we rewrite the URL to ${BASE}<appName><to> via replaceState
+// so the URL subpath becomes the single canonical channel for the iframe's
+// inner path. The hash sync (location.hash) stays an orthogonal fragment-only
+// channel, just like before.
+{
   const url = new URL(location.href);
   const to = url.searchParams.get('to');
-  if (!to) return '';
-  url.searchParams.delete('to');
-  history.replaceState(null, '', url.pathname + url.search + location.hash);
-  return to.startsWith('/') ? to : '';
+  if (to && to.startsWith('/')) {
+    console.warn(`wsh: ?to= is deprecated; use the URL subpath instead (e.g. ${baseUrl.pathname}${appName}${to})`);
+    url.searchParams.delete('to');
+    initialInnerPath = to;
+    history.replaceState(null, '', baseUrl.pathname + appName + to + url.search + location.hash);
+  }
 }
-
-const initialInnerPath = consumeInitialInnerPath();
 
 // --- Hash passthrough for web apps ---
 // The parent URL hash has the form #sessionId/app/path. The part after the
@@ -131,13 +145,15 @@ function getAppHash(): string {
 }
 
 /** Update the parent URL hash.
- *  TUI apps: #sessionId/appHash.  Web apps: #appHash (no session prefix). */
+ *  TUI apps: #sessionId/appHash.  Web apps: #appHash (no session prefix).
+ *  Pathname is included explicitly because `<base href>` makes a hash-only
+ *  URL like `#abc` resolve against BASE (stripping the appName subpath). */
 function setParentHash(appHash: string): void {
   if (appType === 'web') {
-    history.replaceState(null, '', appHash ? `#${appHash}` : location.pathname);
+    history.replaceState(null, '', appHash ? `${location.pathname}#${appHash}` : location.pathname);
   } else {
     const newHash = appHash ? `${sessionId}/${appHash}` : (sessionId || '');
-    history.replaceState(null, '', `#${newHash}`);
+    history.replaceState(null, '', `${location.pathname}#${newHash}`);
   }
 }
 
@@ -177,9 +193,72 @@ function setupHashSync(iframe: HTMLIFrameElement): void {
   });
 }
 
-// Extract app name from pathname (e.g., /python3 → "python3").
-const pathParts = location.pathname.replace(/\/+$/g, '').split('/');
-let appName = pathParts[pathParts.length - 1] || 'bash';
+/** Read the iframe's current inner path (everything after ${BASE}_a/<app>),
+ *  defensively wrapped against cross-origin / detached states.
+ *  Returns null when the iframe is not actually pointed at the inner prefix
+ *  (e.g. TUI apps where #web-frame stays at about:blank — without this guard
+ *  the pagehide handler would mirror "about:blank" → "/" and rewrite the
+ *  parent URL to `/<app>/`). */
+function readIframeInnerPath(iframe: HTMLIFrameElement): { path: string; search: string } | null {
+  try {
+    const w = iframe.contentWindow;
+    if (!w) return null;
+    const innerPrefix = baseUrl.pathname + '_a/' + appName;
+    const p = w.location.pathname;
+    if (!p.startsWith(innerPrefix)) return null;
+    const path = p.slice(innerPrefix.length) || '/';
+    return { path, search: w.location.search };
+  } catch (_) { return null; }
+}
+
+/** Mirror the iframe's current inner path into the parent URL via
+ *  history.replaceState. No-op when nothing changed; uses replaceState so we
+ *  never pollute the parent's browser history. */
+function mirrorIframePathToParent(iframe: HTMLIFrameElement): void {
+  const r = readIframeInnerPath(iframe);
+  if (!r) return;
+  const newParent = baseUrl.pathname + appName + r.path + r.search + location.hash;
+  const current = location.pathname + location.search + location.hash;
+  if (newParent !== current) history.replaceState(null, '', newParent);
+}
+
+/** Mirror the iframe's inner path into the parent URL on every iframe
+ *  navigation. Path-channel only — orthogonal to setupHashSync's fragment
+ *  channel. Called fresh on each iframe `load` because the contentWindow
+ *  (and its history object) is a new instance per load. */
+function setupPathSync(iframe: HTMLIFrameElement): void {
+  let w: Window | null;
+  try { w = iframe.contentWindow; } catch (_) { return; }
+  if (!w) return;
+  try {
+    const h = w.history;
+    const origPush = h.pushState.bind(h);
+    const origReplace = h.replaceState.bind(h);
+    h.pushState = function (state, title, url) {
+      const r = origPush(state, title, url);
+      mirrorIframePathToParent(iframe);
+      return r;
+    };
+    h.replaceState = function (state, title, url) {
+      const r = origReplace(state, title, url);
+      mirrorIframePathToParent(iframe);
+      return r;
+    };
+    w.addEventListener('popstate', () => mirrorIframePathToParent(iframe));
+    // Initial mirror in case the app navigated before our patches attached.
+    mirrorIframePathToParent(iframe);
+  } catch (_) { /* same-origin assumption broke — give up silently */ }
+}
+
+// pagehide fallback: covers callsites that bypass the patched history methods
+// (direct location.href set, mobile bfcache eviction, etc.). One last mirror
+// before the page goes away so the saved URL reflects the user's final view.
+window.addEventListener('pagehide', () => {
+  const iframe = document.getElementById('web-frame') as HTMLIFrameElement | null;
+  if (iframe) mirrorIframePathToParent(iframe);
+});
+
+// (appName parsed above from the parent URL via document.baseURI.)
 windowTitle.textContent = appName;
 document.title = appName;
 
@@ -338,7 +417,10 @@ function scheduleWebReconnect(): void {
 }
 
 function connect(): void {
-  const wsBase = new URL('./terminal', location.href);
+  // Use document.baseURI (not location.href) so we resolve against the <base href>
+  // — the document URL may have an app-subpath like /<app>/files/proj/ that
+  // would otherwise make './terminal' resolve inside the subpath.
+  const wsBase = new URL('./terminal', document.baseURI);
   wsBase.protocol = proto + ':';
   wsBase.search = buildWsQuery().toString();
   ws = new WebSocket(wsBase.href);
@@ -364,7 +446,7 @@ function connect(): void {
     } else if (typeof event.data === 'string') {
       if (handleWshRpc(event, document, makeResponder(ws))) return;
       try {
-        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; cwd?: string; base?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string; session?: string; icon?: string; title?: string };
+        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; cwd?: string; base?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string; session?: string; icon?: string; title?: string; path?: string };
         if (msg.type === 'role' && msg.role) {
           if (msg.cwd) sessionCwd = msg.cwd;
           if (msg.base) serverBase = msg.base.replace(/\/+$/, '');
@@ -376,8 +458,10 @@ function connect(): void {
             initRoleKey(sessionId);
             // Put session ID in hash for TUI apps (needed for share links / reconnect).
             // Web apps don't need it — singletons are found by app name.
+            // Pathname is included because `<base href>` makes `#abc` resolve
+            // against BASE (stripping the appName segment).
             if (appType !== 'web') {
-              history.replaceState(null, '', `#${sessionId}`);
+              history.replaceState(null, '', `${location.pathname}#${sessionId}`);
             }
           }
           ws.send(JSON.stringify({ type: 'origin', origin: location.origin }));
@@ -423,7 +507,9 @@ function connect(): void {
         if (msg.type === 'ready' && appType === 'web') {
           const iframe = document.getElementById('web-frame') as HTMLIFrameElement;
           const currentAppHash = getAppHash();
-          const innerPath = initialInnerPath || '/';
+          // Path precedence: URL subpath (already in `initialInnerPath`) > configured `path:` > '/'.
+          const configuredPath = typeof msg.path === 'string' && msg.path.startsWith('/') ? msg.path : '';
+          const innerPath = initialInnerPath || configuredPath || '/';
           const targetSrc = `./_a/${appName}${innerPath}${currentAppHash ? '#' + currentAppHash : ''}`;
           if (!iframe.src || iframe.src === 'about:blank') {
             iframe.src = targetSrc;
@@ -436,6 +522,7 @@ function connect(): void {
               focusWebFrame();
               startHealthCheck();
               setupHashSync(iframe);
+              setupPathSync(iframe);
             });
           } else {
             // Reconnect after server restart — reload the iframe
