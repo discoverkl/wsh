@@ -388,7 +388,10 @@ interface MiniTerminalHandle {
 
       // WebSocket connection
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = new URL('./terminal', location.href);
+      // Resolve against document.baseURI (the <base href>) — location.href may
+      // include an app subpath like /<app>/files/proj/ that would otherwise
+      // make './terminal' land in the subpath.
+      const wsUrl = new URL('./terminal', document.baseURI);
       wsUrl.protocol = proto;
       const wsParams: Record<string, string> = { session: sessionId };
       if (reconnect) wsParams.reconnect = '1';

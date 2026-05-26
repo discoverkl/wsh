@@ -349,6 +349,7 @@ python3:
 #   title: Jupyter Lab
 #   icon: python
 #   healthCheck: /api
+#   path: /lab          # iframe opens here instead of the app's "/" root
 #   startupTimeout: 60s
 
 # ── Visibility ───────────────────────────────────────────
@@ -1449,6 +1450,8 @@ interface SessionFields {
   timeoutMs?: number;
   access?: 'public' | 'private';
   stripPrefix?: boolean;
+  /** type:web — configured initial inner path for the iframe (AppConfig.path). */
+  webPath?: string;
   icon?: string;
   exitCode?: number | null;
   /** When set, PTY spawn is deferred until the first resize message. */
@@ -1848,6 +1851,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
     timeoutMs,
     access: appConfig.access,
     stripPrefix: appConfig.stripPrefix,
+    webPath: appConfig.path,
   });
 
   registerSession(id, session);
@@ -1910,7 +1914,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   pollUntilReady(port, healthPath, effectiveStartupTimeout).then(() => {
     session.ready = true;
     console.log(`[session ${id}] web app ready`);
-    broadcast(session, JSON.stringify({ type: 'ready' }));
+    broadcast(session, JSON.stringify({ type: 'ready', path: session.webPath }));
     // Notify catalog pages so they can show a clickable "open" toast
     if (options?.notify) {
       const escJs = (s: string) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -2153,6 +2157,8 @@ interface AppConfig {
   access?: 'public' | 'private';
   stripPrefix?: boolean;
   healthCheck?: string;
+  /** type:web only — initial inner path the iframe opens at (e.g. "/files/"). Must start with "/". */
+  path?: string;
   startupTimeout?: string;
   banner?: boolean;
   prefixCommand?: string;
@@ -3531,13 +3537,24 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   res.json({ id, url: `${base}${BASE}${urlPath}#${id}` });
 });
 
-router.get('/:appName', (req: express.Request, res: express.Response, next: express.NextFunction) => {
+// Serve the per-app shell HTML. The same handler covers the bare app URL
+// (/:appName) and any subpath under it (/:appName/*). When a subpath is
+// present, it's the iframe's initial inner path — the parent URL mirrors
+// what's inside the iframe so refreshes / bookmarks / shares preserve the
+// user's position. {{base}} → BASE inside index.html so all relative URLs
+// in the document resolve against ${BASE} via <base href>, regardless of
+// how deep the document URL is.
+const serveAppHtml = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const apps = loadApps();
   if (!apps[req.params.appName] && !RESERVED_PATHS.has(req.params.appName)) { next(); return; }
-  // Web app singleton redirect is handled client-side via WebSocket { type: 'redirect' } message,
-  // because the server cannot see the hash fragment — a server-side 302 would loop.
-  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
-});
+  // Singleton/session resolution happens client-side via the WebSocket handshake —
+  // the server can't see the hash fragment, so a server-side 302 would loop.
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const escAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  res.type('html').send(html.replace(/\{\{base\}\}/g, escAttr(BASE)));
+};
+router.get('/:appName',     serveAppHtml);
+router.get('/:appName/*',   serveAppHtml);
 
 router.use(express.static(path.join(__dirname, '..', 'public'), { etag: true, lastModified: true, maxAge: 0 }));
 
@@ -3736,7 +3753,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     session.peers.set(ws, sentRole);
     sendRoleMessage(ws, id, session, sentRole, credential);
     if (session.appType === 'web' && session.ready) {
-      ws.send(JSON.stringify({ type: 'ready' }));
+      ws.send(JSON.stringify({ type: 'ready', path: session.webPath }));
     }
     const replay = scrollbackReplay(session);
     if (replay) ws.send(replay, { binary: true });
@@ -3824,7 +3841,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       const sentRole = (yields && !effectiveWriter) ? 'viewer' : credential;
       session.peers.set(ws, sentRole);
       sendRoleMessage(ws, id, session, sentRole, credential);
-      if (session.ready) ws.send(JSON.stringify({ type: 'ready' }));
+      if (session.ready) ws.send(JSON.stringify({ type: 'ready', path: session.webPath }));
       const replay = scrollbackReplay(session);
       if (replay) ws.send(replay, { binary: true });
     } else if (effectiveConfig.type === 'job') {

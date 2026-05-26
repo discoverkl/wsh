@@ -3,6 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- {{base}} is substituted by the server (server.ts:serveAppHtml). With <base>
+       in place, every relative URL in the document resolves against ${BASE},
+       so a deep document URL like /leo/<app>/files/proj/ still loads assets
+       from /leo/ and lets fetch('./api/...') reach /leo/api/.... -->
+  <base href="{{base}}" />
   <title>bash</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%231e1e2e'/><text x='4' y='24' font-family='monospace' font-size='18' font-weight='bold' fill='%23a6e3a1'>&#x3e;_</text></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />

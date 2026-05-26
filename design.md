@@ -208,6 +208,8 @@ Apps must be proxy-aware and configure their own base URL using `$WSH_BASE_URL`.
 
 `stripPrefix: true` is available for simple apps that use relative paths (SPAs, static file servers).
 
+**Initial inner path.** The `path` config field sets the inner path a web app's iframe opens at (e.g. `path: /files/` for File Browser, whose `/` root doesn't render). It rides the `ready` message to the client; a one-shot `?to=<path>` URL param overrides it.
+
 Environment injected into web app processes: `WSH_PORT` (the port the app should listen on), `WSH_SESSION`, `WSH_BASE_URL`.
 
 **Initial focus.** After the iframe fires `load`, the host calls `iframe.focus()` and then re-focuses the first `[autofocus]` element inside the iframe (same-origin only). Web apps that want a specific input focused on load should use the `autofocus` attribute — a JS `.focus()` call from inside the iframe alone is unreliable, because the host's subsequent `iframe.focus()` can reset the active element to the iframe itself.
