@@ -15,6 +15,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
 import YAML from 'yaml';
+import { extract as tarExtract } from 'tar-stream';
+import type { Headers as TarHeaders } from 'tar-stream';
 import { version } from '../package.json';
 import { emit as emitEvent, on as onEvent, readSince, getCursor, setCursor, rotate as rotateEvents, trim as trimEvents, isValidEventType, LOG_FILE as EVENT_LOG_FILE, CURSOR_DIR as EVENT_CURSOR_DIR, WshEvent } from './events';
 import * as metrics from './metrics';
@@ -3342,6 +3344,323 @@ function appProxyHandler(req: express.Request, res: express.Response): void {
 }
 router.all('/_a/:appKey', appProxyHandler as any);
 router.all('/_a/:appKey/*', appProxyHandler as any);
+
+// =================== PUSH (folder sync from abox-cli) ===================
+// Two endpoints for `abox-cli push`:
+//   POST /api/push/plan    JSON in, JSON out — diff client manifest vs target tree
+//   POST /api/push/apply   tar stream in — apply the diff atomically, per file
+// Both gated by makeTokenMiddleware → gatewayAllowed (trust-proxy /api/* rule).
+// Registered before express.json() so apply can stream the body via req.pipe()
+// and plan can specify its own (larger) body-size limit for big manifests.
+
+const PUSH_HOME = os.homedir();
+const PUSH_PLAN_TTL_MS = 5 * 60 * 1000;
+const PUSH_MTIME_TOL_NS = 1_000_000_000; // 1s — generous for cross-fs quirks
+const PUSH_SENTINEL_ENTRY = '.abox-push-sentinel';
+
+type PushType = 'file' | 'dir' | 'symlink';
+
+interface PushEntry {
+  path: string;        // forward-slash, relative to target
+  type: PushType;
+  size?: number;
+  mtime_ns?: number;   // unix ns
+  mode?: number;       // permission bits
+  target?: string;     // symlinks
+  sha256?: string;     // when --checksum
+}
+
+interface PushPlan {
+  target: string;
+  add: string[];
+  update: string[];
+  delete: string[];
+  expiresAt: number;
+}
+
+const pushPlans = new Map<string, PushPlan>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, p] of pushPlans) if (p.expiresAt < now) pushPlans.delete(id);
+}, 60_000).unref();
+
+/** Validate client-supplied target. Must canonicalize strictly under $HOME, equal
+ *  $HOME/<rel>, and rel must be relative with no `..` components. */
+function pushSafeTarget(target: string, rel: string): string | null {
+  if (!target || !target.startsWith('/')) return null;
+  if (!rel || rel.startsWith('/') || rel.split('/').some(s => s === '..' || s === '')) return null;
+  const cleaned = path.resolve(target);
+  if (cleaned === PUSH_HOME) return null;
+  if (!cleaned.startsWith(PUSH_HOME + path.sep)) return null;
+  if (path.resolve(path.join(PUSH_HOME, rel)) !== cleaned) return null;
+  return cleaned;
+}
+
+/** Walk `dir` recursively. Treat missing as empty. Skip any .abox-push-staging-*. */
+async function pushWalk(dir: string): Promise<PushEntry[]> {
+  const out: PushEntry[] = [];
+  async function visit(abs: string, rel: string): Promise<void> {
+    let entries: fs.Dirent[];
+    try { entries = await fs.promises.readdir(abs, { withFileTypes: true }); }
+    catch { return; }
+    for (const ent of entries) {
+      if (ent.name.startsWith('.abox-push-staging-')) continue;
+      const childAbs = path.join(abs, ent.name);
+      const childRel = rel ? rel + '/' + ent.name : ent.name;
+      let st: fs.Stats;
+      try { st = await fs.promises.lstat(childAbs); } catch { continue; }
+      if (st.isSymbolicLink()) {
+        let linkTarget = '';
+        try { linkTarget = await fs.promises.readlink(childAbs); } catch {}
+        out.push({ path: childRel, type: 'symlink', target: linkTarget });
+      } else if (st.isDirectory()) {
+        out.push({ path: childRel, type: 'dir', mode: st.mode & 0o777 });
+        await visit(childAbs, childRel);
+      } else if (st.isFile()) {
+        out.push({
+          path: childRel,
+          type: 'file',
+          size: st.size,
+          mtime_ns: Math.round(st.mtimeMs * 1e6),
+          mode: st.mode & 0o777,
+        });
+      }
+      // other inode types silently skipped.
+    }
+  }
+  await visit(dir, '');
+  return out;
+}
+
+/** Diff client manifest vs server manifest. Returns add/update/delete by relative path. */
+function pushDiff(client: PushEntry[], server: PushEntry[], checksum: boolean): { add: string[]; update: string[]; del: string[] } {
+  const sMap = new Map<string, PushEntry>();
+  for (const s of server) sMap.set(s.path, s);
+  const add: string[] = [];
+  const update: string[] = [];
+  for (const c of client) {
+    const s = sMap.get(c.path);
+    sMap.delete(c.path);
+    if (!s) { add.push(c.path); continue; }
+    if (c.type !== s.type) { update.push(c.path); continue; }
+    if (c.type === 'file') {
+      const sizeDiff = (c.size ?? -1) !== (s.size ?? -2);
+      const mtDiff   = Math.abs((c.mtime_ns ?? 0) - (s.mtime_ns ?? 0)) > PUSH_MTIME_TOL_NS;
+      const shaDiff  = checksum && !!c.sha256 && !!s.sha256 && c.sha256 !== s.sha256;
+      if (sizeDiff || mtDiff || shaDiff) update.push(c.path);
+    } else if (c.type === 'symlink') {
+      if ((c.target ?? '') !== (s.target ?? '')) update.push(c.path);
+    }
+    // dirs: mode-only changes ignored in v1.
+  }
+  const del = Array.from(sMap.keys());
+  return { add, update, del };
+}
+
+router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: express.Request, res: express.Response) => {
+  const body = req.body as { rel?: string; target?: string; checksum?: boolean; entries?: PushEntry[] };
+  if (!body || typeof body.rel !== 'string' || typeof body.target !== 'string' || !Array.isArray(body.entries)) {
+    res.status(400).json({ error: 'rel, target, and entries are required' });
+    return;
+  }
+  const target = pushSafeTarget(body.target, body.rel);
+  if (!target) {
+    res.status(400).json({ error: 'target must be inside $HOME and match rel' });
+    return;
+  }
+  let serverEntries: PushEntry[];
+  try { serverEntries = await pushWalk(target); }
+  catch (err) { res.status(500).json({ error: `walk failed: ${errorMessage(err)}` }); return; }
+  const { add, update, del } = pushDiff(body.entries, serverEntries, !!body.checksum);
+  const wantSet = new Set([...add, ...update]);
+  let bytesToSend = 0;
+  for (const e of body.entries) {
+    if (e.type === 'file' && wantSet.has(e.path)) bytesToSend += e.size ?? 0;
+  }
+  const planId = crypto.randomUUID();
+  const expiresAt = Date.now() + PUSH_PLAN_TTL_MS;
+  pushPlans.set(planId, { target, add, update, delete: del, expiresAt });
+  res.json({
+    plan_id:       planId,
+    target,
+    add,
+    update,
+    delete:        del,
+    bytes_to_send: bytesToSend,
+    expires_at:    Math.floor(expiresAt / 1000),
+  });
+});
+
+router.post('/api/push/apply', async (req: express.Request, res: express.Response) => {
+  const planId = (req.query.plan_id as string) || '';
+  const plan = pushPlans.get(planId);
+  if (!plan || plan.expiresAt < Date.now()) {
+    if (plan) pushPlans.delete(planId);
+    res.status(404).json({ error: 'plan not found or expired' });
+    return;
+  }
+  const sentinelExpected = (req.headers['x-abox-push-sentinel'] as string) || '';
+  if (!sentinelExpected) { res.status(400).json({ error: 'X-Abox-Push-Sentinel header required' }); return; }
+
+  const target = plan.target;
+  const staging = path.join(target, `.abox-push-staging-${crypto.randomUUID()}`);
+  try { await fs.promises.mkdir(staging, { recursive: true }); }
+  catch (err) { res.status(500).json({ error: `mkdir staging: ${errorMessage(err)}` }); return; }
+
+  const cleanup = (): Promise<void> => fs.promises.rm(staging, { recursive: true, force: true }).then(() => {}, () => {});
+
+  const extract = tarExtract();
+  let sawSentinel = false;
+  let bytesWritten = 0;
+  let filesWritten = 0;
+  const t0 = Date.now();
+
+  extract.on('entry', (header: TarHeaders, stream: NodeJS.ReadableStream, next: (err?: Error | null) => void) => {
+    // Always attach an error sink to the per-entry stream — when next(err) is
+    // called and the extract is torn down, the per-entry stream can still emit
+    // 'error', and without a listener Node escalates that to uncaughtException.
+    stream.on('error', () => {});
+    const name = String(header.name ?? '');
+    if (name === PUSH_SENTINEL_ENTRY) {
+      let buf = '';
+      stream.on('data', (chunk: Buffer) => { buf += chunk.toString('utf8'); });
+      stream.on('end', () => { if (buf.trim() === sentinelExpected) sawSentinel = true; next(); });
+      return;
+    }
+    const cleanName = path.posix.normalize(name);
+    if (cleanName.startsWith('/') || cleanName.startsWith('..') || cleanName.split('/').some(seg => seg === '..')) {
+      stream.resume();
+      next(new Error(`unsafe tar entry name: ${name}`));
+      return;
+    }
+    const entryAbs = path.resolve(staging, cleanName);
+    if (entryAbs !== staging && !entryAbs.startsWith(staging + path.sep)) {
+      stream.resume();
+      next(new Error(`tar entry escapes staging: ${name}`));
+      return;
+    }
+
+    if (header.type === 'directory') {
+      fs.promises.mkdir(entryAbs, { recursive: true, mode: (header.mode ?? 0o755) & 0o777 })
+        .then(() => { filesWritten += 1; stream.resume(); stream.on('end', () => next()); stream.on('error', (e) => next(e as Error)); })
+        .catch((err) => next(err as Error));
+      return;
+    }
+    if (header.type === 'symlink') {
+      const linkname = header.linkname ?? '';
+      fs.promises.mkdir(path.dirname(entryAbs), { recursive: true })
+        .then(() => fs.promises.symlink(linkname, entryAbs))
+        .then(() => { filesWritten += 1; stream.resume(); stream.on('end', () => next()); stream.on('error', (e) => next(e as Error)); })
+        .catch((err) => next(err as Error));
+      return;
+    }
+    if (header.type !== 'file') {
+      // Skip unsupported types (block/char/fifo/socket) cleanly.
+      stream.resume();
+      stream.on('end', () => next());
+      stream.on('error', (e) => next(e as Error));
+      return;
+    }
+
+    // Regular file → tmp + rename for per-file atomicity within staging.
+    (async () => {
+      await fs.promises.mkdir(path.dirname(entryAbs), { recursive: true });
+      const tmp = entryAbs + '.tmp-' + crypto.randomBytes(4).toString('hex');
+      let entryBytes = 0;
+      await new Promise<void>((resolve, reject) => {
+        const w = fs.createWriteStream(tmp);
+        stream.on('data', (c: Buffer) => { entryBytes += c.length; });
+        stream.on('error', reject);
+        w.on('error', reject);
+        w.on('finish', () => resolve());
+        stream.pipe(w);
+      });
+      try {
+        if (header.mode != null) await fs.promises.chmod(tmp, header.mode & 0o777);
+        if (header.mtime instanceof Date) await fs.promises.utimes(tmp, header.mtime, header.mtime);
+        await fs.promises.rename(tmp, entryAbs);
+        bytesWritten += entryBytes;
+        filesWritten += 1;
+      } catch (err) {
+        await fs.promises.unlink(tmp).catch(() => {});
+        throw err;
+      }
+    })().then(() => next()).catch((err) => next(err as Error));
+  });
+
+  let extractError: Error | null = null;
+  await new Promise<void>((resolve) => {
+    extract.on('finish', () => resolve());
+    extract.on('error', (err: Error) => { extractError = err; resolve(); });
+    req.on('error', (err: Error) => { extractError = err; resolve(); });
+    req.pipe(extract);
+  });
+
+  if (extractError) {
+    await cleanup();
+    res.status(400).json({ error: `tar extract failed: ${errorMessage(extractError)}` });
+    return;
+  }
+  if (!sawSentinel) {
+    await cleanup();
+    res.status(400).json({ error: 'incomplete stream (sentinel missing)' });
+    return;
+  }
+
+  // Promote: walk staging, rename each entry over target. mkdir parents as needed.
+  // Per-file POSIX rename is atomic, so failures leave individual files either
+  // fully old or fully new — never half-written.
+  try {
+    const promote = async (rel: string): Promise<void> => {
+      const stageAbs = path.join(staging, rel);
+      const ents = await fs.promises.readdir(stageAbs, { withFileTypes: true });
+      for (const ent of ents) {
+        const childRel = rel ? rel + '/' + ent.name : ent.name;
+        const stagePath = path.join(staging, childRel);
+        const dstPath = path.join(target, childRel);
+        if (ent.isDirectory() && !ent.isSymbolicLink()) {
+          await fs.promises.mkdir(dstPath, { recursive: true });
+          await promote(childRel);
+        } else {
+          await fs.promises.mkdir(path.dirname(dstPath), { recursive: true });
+          await fs.promises.rename(stagePath, dstPath);
+        }
+      }
+    };
+    await promote('');
+  } catch (err) {
+    await cleanup();
+    res.status(500).json({ error: `promote failed: ${errorMessage(err)}` });
+    return;
+  }
+
+  // Apply deletes — deepest paths first so files go before their containing
+  // dirs. Pre-compute depth once per entry rather than splitting twice per
+  // pairwise compare in the sort.
+  const deletes = plan.delete
+    .map(rel => ({ rel, segs: rel.split('/') }))
+    .sort((a, b) => b.segs.length - a.segs.length);
+  let deleted = 0;
+  for (const { rel, segs } of deletes) {
+    if (rel.startsWith('/') || segs.some(seg => seg === '..')) continue;
+    const abs = path.join(target, rel);
+    if (!abs.startsWith(target + path.sep) && abs !== target) continue;
+    try { await fs.promises.rm(abs, { recursive: true, force: true }); deleted += 1; }
+    catch (err) { console.error(`[push] delete failed rel=${rel}: ${errorMessage(err)}`); }
+  }
+
+  await cleanup();
+  pushPlans.delete(planId);
+
+  res.json({
+    added:         plan.add.length,
+    updated:       plan.update.length,
+    deleted,
+    bytes_written: bytesWritten,
+    files_written: filesWritten,
+    took_ms:       Date.now() - t0,
+  });
+});
 
 router.use(express.json());
 
