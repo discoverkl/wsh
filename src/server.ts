@@ -6,7 +6,7 @@ import https from 'https';
 import net from 'net';
 import os from 'os';
 import path from 'path';
-import { Duplex } from 'stream';
+import { Duplex, Writable } from 'stream';
 import { EventEmitter } from 'events';
 import { parseArgs } from 'util';
 import express from 'express';
@@ -1448,6 +1448,10 @@ interface SessionFields {
   lastOutput: number;
   appType: 'pty' | 'web' | 'job';
   child: ChildProcess | null;
+  /** type:job — writable to the child's stdin. Null until the job is spawned;
+   *  remains null for pty/web sessions. Closed/ended when the child exits or
+   *  when a client stdin POST finishes. */
+  stdin: Writable | null;
   port?: number;
   ready?: boolean;
   timeoutMs?: number;
@@ -1461,7 +1465,7 @@ interface SessionFields {
   pendingConfig?: AppConfig;
   /** X-WSH-User header value at session creation, or '' if no upstream identity was carried. */
   createdBy: string;
-  /** Cumulative bytes client→PTY / client→proxy since creation. Always 0 for jobs (no stdin). */
+  /** Cumulative bytes client→PTY / client→proxy / client→job-stdin since creation. */
   bytesIn: number;
   /** Cumulative bytes PTY→client / proxy→client / stdout→job-log since creation. */
   bytesOut: number;
@@ -1709,6 +1713,7 @@ function baseSession(appKey: string, appConfig: AppConfig, createdBy = ''): Sess
     lastOutput: now,
     appType: 'pty' as const,
     child: null,
+    stdin: null,
     createdBy,
     bytesIn: 0,
     bytesOut: 0,
@@ -1957,10 +1962,15 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
     detached: true,
     env: env as Record<string, string>,
     cwd: resolveCwd(appConfig),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
 
   session.child = child;
+  session.stdin = child.stdin;
+  // Don't crash the server if a write races a child exit. The stdin route handler
+  // also reports per-write errors back to its client; this catches the case where
+  // no client is actively writing.
+  child.stdin?.on('error', () => {});
 
   if (appConfig.banner) {
     const cwd = resolveCwd(appConfig);
@@ -3233,6 +3243,46 @@ router.delete('/api/sessions/:id', (req: express.Request, res: express.Response)
   if (session.child) killProcessGroup(session.child);
   else if (session.pty) session.pty.kill('SIGHUP');
   res.json({ ok: true });
+});
+
+// Stream the request body into the job child's stdin. Pipes chunked bytes through
+// without buffering, mirroring /api/push/apply's req.pipe pattern. Closing the
+// request body cleanly closes the child's stdin (the child sees EOF). 410 if the
+// session isn't a job or stdin is already closed (child exited / earlier POST
+// already ended the pipe — stdin is one-shot per job).
+router.post('/api/sessions/:id/stdin', (req: express.Request, res: express.Response) => {
+  const session = sessions.get(req.params.id);
+  if (!session) { res.status(404).json({ error: 'session not found' }); return; }
+  if (session.appType !== 'job') {
+    res.status(410).json({ error: 'stdin not supported for this session type' }); return;
+  }
+  const stdin = session.stdin;
+  if (!stdin || stdin.writableEnded || stdin.destroyed) {
+    res.status(410).json({ error: 'stdin closed' }); return;
+  }
+
+  let bytes = 0;
+  let done = false;
+  const finish = (status: number, body: Record<string, unknown>): void => {
+    if (done) return;
+    done = true;
+    req.unpipe(stdin);
+    if (!res.headersSent) res.status(status).json(body);
+    else { try { res.end(); } catch {} }
+  };
+
+  req.on('data', (chunk: Buffer) => {
+    bytes += chunk.length;
+    session.bytesIn += chunk.length;
+    session.lastInput = Date.now();
+  });
+
+  // { end: true } so the child sees EOF when the client finishes writing.
+  req.pipe(stdin, { end: true });
+
+  stdin.once('error', () => finish(410, { error: 'stdin closed', bytes }));
+  req.on('error', (err) => finish(400, { error: errorMessage(err), bytes }));
+  req.on('end',   ()    => finish(200, { bytes }));
 });
 
 // HTTP reverse proxy for web apps — must be before express.json() to preserve request body
