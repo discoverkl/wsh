@@ -75,7 +75,7 @@ The SSE handler always tails the on-disk `.log` rather than subscribing to in-me
 
 When using `wsh new --type job -c "<cmd>"` + `wsh logs -f <id>` + `wsh exitcode <id>` as a drop-in for `bash -c`:
 
-- **No stdin.** Jobs are spawned without a stdin connection to the caller. `echo foo | wsh new --type job -c cat` will not pipe `foo` into `cat`. Use `--type pty` or shell out to `bash -c` directly when stdin must be forwarded.
+- **Stdin is opt-in over HTTP.** Jobs are spawned with a stdin pipe, but no bytes are written until a caller `POST`s to `/api/sessions/<sid>/stdin` (chunked body → child's stdin; close → EOF). `wsh new --type job` itself doesn't read its caller's stdin; clients that want to forward stdin (e.g. `abox-cli exec`) drive the stdin endpoint separately. One-shot: once the body ends or the child exits, the pipe is closed and further POSTs get 410.
 - **No tty.** Job output is captured to a file and replayed; there is no allocated pseudo-terminal. Programs that probe `isatty(1)` (color, paging, progress bars, full-screen apps like `htop`/`vim`) will see a non-tty and either disable interactive features or fail to render. Use `--type pty` for those.
 - **~100ms tail latency.** `wsh logs -f` polls the log file every 100 ms, so a long stream of fast prints arrives in chunks rather than byte-by-byte. The total bytes are correct; only the cadence is coarsened.
 - **Ctrl-C only kills the follower.** SIGINT to `wsh logs -f` exits the follower but leaves the job running in the background — the caller must `wsh kill <id>` to actually cancel. Wrappers that want bash-c-like cancel semantics should `trap INT TERM` and forward to `wsh kill`.
