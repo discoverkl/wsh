@@ -212,6 +212,22 @@ Apps must be proxy-aware and configure their own base URL using `$WSH_BASE_URL`.
 
 Environment injected into web app processes: `WSH_PORT` (the port the app should listen on), `WSH_SESSION`, `WSH_BASE_URL`.
 
+**Fronting a pre-bound port (`wsh goto`).** A normal web app's command binds `$WSH_PORT` and is *proxy-aware* — it reads `WSH_BASE_URL` to prefix its own URLs with `/_a/<appKey>/`. To expose a server that is *already* listening on a fixed local port — one that knows nothing about wsh and can't read `WSH_BASE_URL` — front it with the `wsh goto` forwarder **and set `stripPrefix: true`**:
+
+```yaml
+myserver:
+  type: web
+  command: wsh goto localhost:8080 -p $WSH_PORT
+  stripPrefix: true
+  title: My Server
+```
+
+`wsh goto <host:port> -p <listen-port>` listens on `127.0.0.1:<listen-port>` and pipes raw TCP both ways to `<host:port>` — HTTP and WebSocket pass through unchanged.
+
+`stripPrefix: true` is **required** here precisely because the upstream is not proxy-aware: with it, the proxy strips the `/_a/<appKey>` prefix before forwarding, so the upstream only ever sees clean root paths (`/`, `/foo`) and never needs `WSH_BASE_URL`. The usual `stripPrefix` caveat still applies — wsh does not rewrite proxied app **bodies**, so the upstream's HTML must use **relative** asset URLs; a server that emits root-absolute URLs like `/style.css` won't resolve under the iframe's prefix and must instead be run as a real proxy-aware web app (a command that honors `$WSH_BASE_URL`, e.g. a `--base-path` flag).
+
+The web-app lifecycle is otherwise identical: the health check polls `$WSH_PORT` (→ forwarded to `8080`), so if the upstream isn't up yet the probe simply retries and startup ordering self-heals. `wsh` resolves on the child's PATH via `~/.local/bin`, and `wsh goto` is a self-contained subcommand (no HTTP server) usable standalone as a loopback TCP forwarder.
+
 **Initial focus.** After the iframe fires `load`, the host calls `iframe.focus()` and then re-focuses the first `[autofocus]` element inside the iframe (same-origin only). Web apps that want a specific input focused on load should use the `autofocus` attribute — a JS `.focus()` call from inside the iframe alone is unreliable, because the host's subsequent `iframe.focus()` can reset the active element to the iframe itself.
 
 ## Image Paste
