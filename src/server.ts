@@ -860,12 +860,15 @@ python3:
 } else if (process.argv[2] === 'ls' || process.argv[2] === 'kill' || process.argv[2] === 'port') {
   const subcommand = process.argv[2];
   if (wantsHelp) {
-    if (subcommand === 'ls') subHelp('Usage: wsh ls [-p <port>]', [
+    if (subcommand === 'ls') subHelp('Usage: wsh ls [--all] [-p <port>]', [
       '', 'List active sessions with their ID, type, app, and status.',
+      'Idle daemon web apps are hidden by default — use --all to include them.',
       '', 'Options:',
+      '  --all              Include idle daemon sessions (normally hidden)',
       '  -p, --port <port>  Server port (default: auto from ~/.wsh/port)',
       '', 'Examples:',
-      '  wsh ls                     # list all sessions',
+      '  wsh ls                     # list active sessions',
+      '  wsh ls --all               # include idle daemons',
       '  wsh ls | grep web          # filter web app sessions',
     ]);
     else if (subcommand === 'port') subHelp('Usage: wsh port <app>', [
@@ -951,7 +954,8 @@ python3:
   if (subcommand === 'ls') {
     const extended = subArgs.includes('-l');
     const json = subArgs.includes('--json');
-    const { body } = curlRequest('GET', basePath + 'api/sessions');
+    const all = subArgs.includes('--all');
+    const { body } = curlRequest('GET', basePath + 'api/sessions' + (all ? '?all=1' : ''));
     const data = JSON.parse(body) as { sessions: any[] };
     if (json) { console.log(JSON.stringify(data, null, 2)); process.exit(0); }
     if (data.sessions.length === 0) { console.log('No active sessions.'); process.exit(0); }
@@ -974,7 +978,8 @@ python3:
   } else if (subcommand === 'port') {
     const appName = subArgs.find(a => !a.startsWith('-'));
     if (!appName) { console.error('Usage: wsh port <app>'); process.exit(1); }
-    const { body } = curlRequest('GET', basePath + 'api/sessions');
+    // ?all=1 so a targeted port lookup also finds idle daemons (hidden by default).
+    const { body } = curlRequest('GET', basePath + 'api/sessions?all=1');
     const data = JSON.parse(body) as { sessions: any[] };
     const session = data.sessions.find((s: any) => s.app === appName && s.appType === 'web' && s.port);
     if (!session) { console.error(`No running web app "${appName}" found.`); process.exit(1); }
@@ -1516,6 +1521,9 @@ interface SessionFields {
   stripPrefix?: boolean;
   /** type:web — configured initial inner path for the iframe (AppConfig.path). */
   webPath?: string;
+  /** type:web — autostart-on-boot daemon: persistent (no idle reap) and
+   *  hidden from /api/sessions while it has no viewers (so it doesn't mark the box busy). */
+  daemon?: boolean;
   icon?: string;
   exitCode?: number | null;
   /** When set, PTY spawn is deferred until the first resize message. */
@@ -1920,6 +1928,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
     access: appConfig.access,
     stripPrefix: appConfig.stripPrefix,
     webPath: appConfig.path,
+    daemon: appConfig.daemon,
   });
 
   registerSession(id, session);
@@ -2084,7 +2093,8 @@ function scheduleCleanup(id: string, session: Session): void {
     clearTimeout(session.cleanupTimer);
   }
   session.cleanupTimer = null;
-  if (session.pinned) return;
+  // Pinned sessions and daemons live until the process exits or a manual close.
+  if (session.pinned || session.daemon) return;
   const ttl = session.timeoutMs ?? (session.appType === 'web' ? WEB_SESSION_TTL : SESSION_TTL);
   session.cleanupTimer = setTimeout(() => {
     console.log(`[session ${id}] TTL expired`);
@@ -2232,6 +2242,10 @@ interface AppConfig {
   healthCheck?: string;
   /** type:web only — initial inner path the iframe opens at (e.g. "/files/"). Must start with "/". */
   path?: string;
+  /** type:web only — autostart on server boot and keep running (never idle-reaped).
+   *  An idle daemon (0 viewers) is hidden from /api/sessions so it doesn't mark the
+   *  box busy; it reappears while actively viewed. See spawnWebSession / scheduleCleanup. */
+  daemon?: boolean;
   startupTimeout?: string;
   banner?: boolean;
   prefixCommand?: string;
@@ -2448,6 +2462,25 @@ function getOrSpawnWebSession(
   const clear = () => { if (webSpawnsInFlight.get(appKey) === pending) webSpawnsInFlight.delete(appKey); };
   pending.then(clear, clear);
   return pending;
+}
+
+/**
+ * Autostart all `type:web, daemon:true` apps on server boot. Each becomes a
+ * persistent, hidden-when-idle web session (see scheduleCleanup / /api/sessions).
+ * Fire-and-forget — the health check runs in the background and a failure to
+ * start one daemon never blocks the others or server startup.
+ */
+function startDaemonApps(): void {
+  let apps: Record<string, AppConfig>;
+  try { apps = loadApps(); } catch (err) { console.error(`[daemon] loadApps failed: ${errorMessage(err)}`); return; }
+  for (const [appKey, cfg] of Object.entries(apps)) {
+    if (cfg.type !== 'web' || !cfg.daemon) continue;
+    if (findWebSession(appKey)) continue; // already running (e.g. manual restart)
+    const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
+    getOrSpawnWebSession(id, appKey, cfg)
+      .then(({ id: sid }) => console.log(`[daemon ${sid}] autostarted web app "${appKey}"`))
+      .catch((err) => console.error(`[daemon] failed to autostart "${appKey}": ${errorMessage(err)}`));
+  }
 }
 
 // --- Network helpers ---
@@ -2992,12 +3025,19 @@ router.post('/api/workspace/delete', express.json(), (req: express.Request, res:
   }
 });
 
-router.get('/api/sessions', (_req: express.Request, res: express.Response) => {
-  const list = [...sessions.entries()].map(([id, s]) => ({
+router.get('/api/sessions', (req: express.Request, res: express.Response) => {
+  // An idle daemon (no viewers) is hidden so it doesn't mark the box busy —
+  // every busy/idle consumer reads this list. It reappears while actively
+  // viewed (peers > 0), or with ?all=1 (the management view, e.g. `wsh ls --all`).
+  const includeAll = req.query.all === '1';
+  const list = [...sessions.entries()]
+    .filter(([, s]) => includeAll || !s.daemon || s.peers.size > 0)
+    .map(([id, s]) => ({
     id,
     title: s.title,
     app: s.app,
     appType: s.appType,
+    daemon: s.daemon ?? false,
     pinned: s.pinned,
     peers: s.peers.size,
     hasWriter: s.writer !== null,
@@ -4586,6 +4626,9 @@ function onListening(): void {
   if (tls && !NO_TLS) console.log(`  Fingerprint: ${new crypto.X509Certificate(tls.cert).fingerprint256}`);
   console.log(`  Version:     v${version}`);
   console.log('');
+
+  // Launch daemon web apps now that the proxy and health checks are live.
+  startDaemonApps();
 
   if (!values['no-open']) openBrowser(localURL);
 }

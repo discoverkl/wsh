@@ -212,6 +212,23 @@ Apps must be proxy-aware and configure their own base URL using `$WSH_BASE_URL`.
 
 Environment injected into web app processes: `WSH_PORT` (the port the app should listen on), `WSH_SESSION`, `WSH_BASE_URL`.
 
+**Daemon web apps (`daemon: true`).** A `type:web` app with `daemon: true` is the way to run a persistent web server whose existence does **not** mark the box busy:
+
+```yaml
+mydaemon:
+  type: web
+  daemon: true
+  command: my-server --port=$WSH_PORT --base-url=$WSH_BASE_URL
+  title: My Daemon
+```
+
+Because wsh launches it like any web app, `WSH_PORT`/`WSH_BASE_URL` are injected normally — no `wsh goto`, no manual base-url passing. Three behaviors set it apart:
+- **Autostart**: launched once the server is listening (`onListening` → `startDaemonApps`), so it's warm before first access and survives box reboots.
+- **Persistent**: `scheduleCleanup` short-circuits for daemons (like pinned sessions), so it's never idle-reaped.
+- **Hidden when idle**: a daemon with **0 peers** is omitted from `/api/sessions` — and therefore from `wsh ls`, the gateway busy probe, and every idle check, since they all read that list. The moment it has a viewer (`peers > 0`) it reappears and counts as busy, so the box won't idle-shut-down a daemon you're actively using. `?all=1` / `wsh ls --all` always shows them.
+
+Lifecycle is otherwise a normal web app: closing it (catalog ✕ or `wsh kill <id>`) stops it with no auto-respawn; re-opening (`/_a/<app>`) or the next boot relaunches it as a daemon. Use a daemon for a web server that's fine to be reaped with the box when nobody's viewing it; if a process must keep the box alive doing background work, it should *not* be a daemon (it should count as busy).
+
 **Fronting a pre-bound port (`wsh goto`).** A normal web app's command binds `$WSH_PORT` and is *proxy-aware* — it reads `WSH_BASE_URL` to prefix its own URLs with `/_a/<appKey>/`. To expose a server that is *already* listening on a fixed local port — one that knows nothing about wsh and can't read `WSH_BASE_URL` — front it with the `wsh goto` forwarder **and set `stripPrefix: true`**:
 
 ```yaml
