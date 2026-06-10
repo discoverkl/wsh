@@ -2419,6 +2419,37 @@ function findWebSession(appKey: string): { id: string; session: Session } | null
   return null;
 }
 
+// Web apps are singletons, but `spawnWebSession` awaits `findFreePort()` before
+// it registers the session — so two concurrent first-hits for the same app both
+// pass `findWebSession()` (null) and each spawn a child, leaking one. This map
+// holds the in-flight spawn per appKey so the second caller joins the first's
+// promise instead of starting a rival child. Cleared once the spawn settles.
+const webSpawnsInFlight = new Map<string, Promise<{ id: string; session: Session }>>();
+
+/**
+ * Resolve the singleton web session for `appKey`, spawning it atomically if
+ * absent. `newId` is only used if this call is the one that actually spawns;
+ * callers must use the returned `id` (a concurrent winner's id may differ).
+ */
+function getOrSpawnWebSession(
+  newId: string,
+  appKey: string,
+  appConfig: AppConfig,
+  createdBy = '',
+  options?: { notify?: boolean },
+): Promise<{ id: string; session: Session }> {
+  const existing = findWebSession(appKey);
+  if (existing) return Promise.resolve(existing);
+  const inFlight = webSpawnsInFlight.get(appKey);
+  if (inFlight) return inFlight;
+  const pending = spawnWebSession(newId, appKey, appConfig, createdBy, options)
+    .then(session => ({ id: newId, session }));
+  webSpawnsInFlight.set(appKey, pending);
+  const clear = () => { if (webSpawnsInFlight.get(appKey) === pending) webSpawnsInFlight.delete(appKey); };
+  pending.then(clear, clear);
+  return pending;
+}
+
 // --- Network helpers ---
 
 function isLoopback(ip: string | undefined): boolean {
@@ -3432,18 +3463,11 @@ function appProxyHandler(req: express.Request, res: express.Response): void {
     }
   }
 
-  const existing = findWebSession(appKey);
-  if (existing) {
-    // Reuse proxyHandler by injecting the resolved session ID
-    req.params.sessionId = existing.id;
-    proxyHandler(req, res);
-    return;
-  }
-
-  // Auto-start the app
+  // Resolve the singleton session, auto-starting it if absent. The guard
+  // collapses concurrent first-hits onto one child (e.g. iframe + favicon).
   const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
-  spawnWebSession(id, appKey, appConfig).then(() => {
-    req.params.sessionId = id;
+  getOrSpawnWebSession(id, appKey, appConfig).then(({ id: sid }) => {
+    req.params.sessionId = sid;
     proxyHandler(req, res);
   }).catch(() => {
     res.status(500).json({ error: 'Failed to start app' });
@@ -3976,7 +4000,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   if (requestedSession && !isSessionId(requestedSession)) {
     res.status(400).json({ error: 'Session ID must be exactly 6 lowercase alphanumeric characters' }); return;
   }
-  const id = requestedSession || crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
+  let id = requestedSession || crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
 
   // Write snapshot to file so the skill agent can read it directly (faster than env var round-trip).
   // The file path is appended to INPUT so it appears in the command — no env vars for the LLM to read.
@@ -3998,7 +4022,12 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     }
   } else if (effectiveConfig.type === 'web') {
     try {
-      await spawnWebSession(id, sessionLabel, effectiveConfig, createdBy, { notify });
+      if (requestedSession) {
+        // -s forces a specific id (replacing any prior session above) — bypass the singleton.
+        await spawnWebSession(id, sessionLabel, effectiveConfig, createdBy, { notify });
+      } else {
+        ({ id } = await getOrSpawnWebSession(id, sessionLabel, effectiveConfig, createdBy, { notify }));
+      }
     } catch (err) {
       console.error('Failed to spawn web app:', errorMessage(err));
       res.status(500).json({ error: 'Failed to spawn session' }); return;
@@ -4337,7 +4366,9 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     } else if (effectiveConfig.type === 'web') {
       try {
         ws.send(JSON.stringify({ type: 'status', status: 'starting' }));
-        session = await spawnWebSession(id, sessionLabel, effectiveConfig, createdBy);
+        // Guard collapses a concurrent first-hit onto the same child; a rival
+        // connection may have won, so adopt the returned id/session.
+        ({ id, session } = await getOrSpawnWebSession(id, sessionLabel, effectiveConfig, createdBy));
       } catch (err) {
         console.error('Failed to spawn web app:', errorMessage(err));
         ws.close(WS_CLOSE.INTERNAL_ERROR, 'Failed to spawn web app');
@@ -4362,6 +4393,9 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
         session.cleanupTimer = null;
       }
       sendRoleMessage(ws, id, session, credential, credential);
+      // A guard-resolved web singleton may already be ready (its ready broadcast
+      // fired before this peer attached) — replay it so the iframe loads.
+      if (session.appType === 'web' && session.ready) ws.send(JSON.stringify({ type: 'ready', path: session.webPath }));
       const replay = scrollbackReplay(session);
       if (replay) ws.send(replay, { binary: true });
     }
