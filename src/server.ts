@@ -1391,10 +1391,66 @@ python3:
     console.log(`events: removed ${removed.toLocaleString()} entries`);
   }
   process.exit(0);
+} else if (process.argv[2] === 'goto') {
+  if (wantsHelp) subHelp('Usage: wsh goto <host:port> -p <listen-port>', [
+    '', 'Transparently forward all TCP traffic from a local port to another address.',
+    'Raw byte forwarding — HTTP and WebSocket pass through unchanged.',
+    '', 'Intended for static-port web apps: front a server that is already listening',
+    'on a fixed local port with the port wsh assigns ($WSH_PORT), e.g. in apps.yaml:',
+    '  command: wsh goto localhost:8080 -p $WSH_PORT',
+    '', 'Options:',
+    '  -p, --port <port>  Local port to listen on (required)',
+    '', 'Examples:',
+    '  wsh goto localhost:8080 -p 12345   # forward 127.0.0.1:12345 -> localhost:8080',
+    '  wsh goto 3000 -p 12345             # bare port -> 127.0.0.1:3000',
+  ]);
+  const subArgs = process.argv.slice(3);
+
+  // Listen port from -p/--port (required).
+  let listenPort = NaN;
+  const pIdx = subArgs.findIndex(a => a === '-p' || a === '--port');
+  if (pIdx !== -1 && subArgs[pIdx + 1]) {
+    listenPort = parseInt(subArgs[pIdx + 1], 10);
+    subArgs.splice(pIdx, 2);
+  }
+  // Target host:port — first remaining positional. Split on the last ':' so
+  // IPv6-less host:port works; a bare number means 127.0.0.1.
+  const target = subArgs.find(a => !a.startsWith('-')) || '';
+  if (!target || isNaN(listenPort) || listenPort <= 0) {
+    console.error('Usage: wsh goto <host:port> -p <listen-port>');
+    process.exit(1);
+  }
+  const colon = target.lastIndexOf(':');
+  const targetHost = colon > 0 ? target.slice(0, colon) : '127.0.0.1';
+  const targetPort = parseInt(colon > 0 ? target.slice(colon + 1) : target, 10);
+  if (isNaN(targetPort) || targetPort <= 0) {
+    console.error(`wsh goto: invalid target "${target}"`);
+    process.exit(1);
+  }
+
+  const proxy = net.createServer((client) => {
+    const upstream = net.connect(targetPort, targetHost);
+    // Tear down the peer on any error or close so neither socket lingers.
+    client.on('error', () => upstream.destroy());
+    upstream.on('error', () => client.destroy());
+    client.on('close', () => upstream.destroy());
+    upstream.on('close', () => client.destroy());
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+  proxy.on('error', (err: any) => {
+    console.error(`wsh goto: ${err?.message ?? err}`);
+    process.exit(1);
+  });
+  proxy.listen(listenPort, '127.0.0.1', () => {
+    console.log(`wsh goto: forwarding 127.0.0.1:${listenPort} -> ${targetHost}:${targetPort}`);
+  });
+  // Stay alive as a pure forwarder — skip server startup (see guard below).
+  (globalThis as any).__wshNoServer = true;
 }
 
 // Reject unknown subcommands before server startup.
-const knownCommands = new Set(['version', 'update', 'token', 'rpc', 'apps', 'new', 'logs', 'exitcode', 'ls', 'kill', 'port', 'emit', 'events', 'gc']);
+const knownCommands = new Set(['version', 'update', 'token', 'rpc', 'apps', 'new', 'logs', 'exitcode', 'ls', 'kill', 'port', 'emit', 'events', 'gc', 'goto']);
 const firstArg = process.argv[2];
 if (firstArg && !firstArg.startsWith('-') && !knownCommands.has(firstArg)) {
   console.error(`Unknown command: ${firstArg}`);
@@ -1402,8 +1458,9 @@ if (firstArg && !firstArg.startsWith('-') && !knownCommands.has(firstArg)) {
   process.exit(1);
 }
 
-// `wsh logs -f` keeps the process alive via SSE — skip server startup.
-if ((globalThis as any).__wshFollowMode) { /* event loop stays alive */ } else {
+// Long-running subcommands keep the process alive without the HTTP server:
+// `wsh logs -f` (SSE follow) and `wsh goto` (TCP forwarder). Skip server startup.
+if ((globalThis as any).__wshFollowMode || (globalThis as any).__wshNoServer) { /* event loop stays alive */ } else {
 
 rotateEvents();
 
@@ -4530,4 +4587,4 @@ if (httpsOnly) {
   localServer.listen(PORT, '127.0.0.1', onListening);
   if (networkServer && networkBind) networkServer.listen(PORT, networkBind, onListening);
 }
-} // end __wshFollowMode guard
+} // end no-server guard (__wshFollowMode / __wshNoServer)
