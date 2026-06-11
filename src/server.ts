@@ -1478,6 +1478,7 @@ const PONG_TIMEOUT  = 10_000;           // 10 seconds
 const RATE_WINDOW   = 60_000;           // 1 minute
 const RATE_MAX_MISS = 10;               // max invalid session attempts per IP per window
 const MISS_SWEEP_INTERVAL = 5 * 60_000; // prune missAttempts every 5 minutes
+const PUBLIC_PTY_MAX_PER_IP = 8;        // max concurrent public-pty sessions per source IP
 
 const WS_CLOSE = {
   OK:               1000,
@@ -1530,6 +1531,9 @@ interface SessionFields {
   pendingConfig?: AppConfig;
   /** X-WSH-User header value at session creation, or '' if no upstream identity was carried. */
   createdBy: string;
+  /** Normalized source IP of the connection that spawned this session.
+   *  Used to cap concurrent public-PTY spawns per IP. */
+  creatorIp?: string;
   /** Cumulative bytes client→PTY / client→proxy / client→job-stdin since creation. */
   bytesIn: number;
   /** Cumulative bytes PTY→client / proxy→client / stdout→job-log since creation. */
@@ -1777,6 +1781,7 @@ function baseSession(appKey: string, appConfig: AppConfig, createdBy = ''): Sess
     lastInput: now,
     lastOutput: now,
     appType: 'pty' as const,
+    access: appConfig.access,
     child: null,
     stdin: null,
     createdBy,
@@ -2380,6 +2385,16 @@ function loadApps(warnings?: string[]): Record<string, AppConfig> {
       }
     }
   }
+  // Warn about public PTY apps — anyone the gateway forwards can run their
+  // command with full keyboard input. Checked on the merged result (access and
+  // command may arrive from different layers), so it can't be done in mergeApps.
+  if (warnings) {
+    for (const [key, app] of Object.entries(apps)) {
+      if (isPublicPtyConfig(app)) {
+        warnings.push(`App "${key}" is public + PTY — anyone the gateway forwards can run its command with full keyboard input. Make sure it's sandboxed; never expose a shell.`);
+      }
+    }
+  }
   // Sort: topped (by value asc), normal, hidden
   const sorted = Object.entries(apps).sort(([, a], [, b]) => {
     const tierOf = (app: AppConfig) => {
@@ -2668,11 +2683,21 @@ function gatewayAllowed(req: http.IncomingMessage): boolean {
   return isLoopback(req.socket.remoteAddress) && verifyProxySecret(req);
 }
 
-/** True iff the named app is a public web app (per apps.yaml). */
-function isPublicWebApp(appKey: string): boolean {
-  if (!appKey) return false;
-  const app = loadApps()[appKey];
-  return !!app && app.type === 'web' && app.access === 'public';
+/** A public app a forwarded stranger may open without box auth — a web or pty
+ *  app marked `access: public` (not a job or skill). Public web apps are joined
+ *  as viewers; public pty apps spawn a per-visitor session driven as writer. */
+function isPublicJoinable(app: AppConfig | undefined): boolean {
+  return !!app && app.access === 'public' && app.type !== 'job' && !app.skill;
+}
+
+/** A public pty app config — the dangerous, per-visitor writable variant. */
+function isPublicPtyConfig(app: AppConfig | undefined): boolean {
+  return isPublicJoinable(app) && app?.type !== 'web';
+}
+
+/** A live public pty session (per-visitor, writer-joinable). */
+function isPublicPtySession(s: Session): boolean {
+  return s.appType === 'pty' && s.access === 'public';
 }
 
 function makeTokenMiddleware(tok: string): express.RequestHandler {
@@ -2797,7 +2822,7 @@ router.get('/api/apps', (req: express.Request, res: express.Response) => {
   const allowed = TRUST_PROXY ? gatewayAllowed(req) : true;
   const entries = Object.entries(apps).filter(([_, app]) => {
     if (allowed) return true;
-    return app.type === 'web' && app.access === 'public';
+    return isPublicJoinable(app);
   });
   const list = entries.map(([key, app]) => ({
     key,
@@ -4261,26 +4286,37 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     return;
   }
 
-  // Public web apps may be joined or auto-spawned by anyone the gateway
+  // Public apps (web or pty) may be joined or auto-spawned by anyone the gateway
   // forwarded — that's the whole point of marking them public. Track this so
   // both the new-session and missing-session branches below can permit it.
   const requestedAppForPublic = url.searchParams.get('app') ?? '';
-  const publicWebApp = isPublicWebApp(requestedAppForPublic);
+  const apps = loadApps();
+  const publicApp = isPublicJoinable(apps[requestedAppForPublic]);
 
   if (!id) {
     const cred = getRoleForSession(req, '') ?? 'viewer';
-    if (cred !== 'owner' && !publicWebApp) { ws.close(WS_CLOSE.SESSION_REQUIRED, 'session ID required'); return; }
+    if (cred !== 'owner' && !publicApp) { ws.close(WS_CLOSE.SESSION_REQUIRED, 'session ID required'); return; }
     id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
   }
 
   console.log(`[ws] connect session=${id} url=${req.url}`);
 
-  const credential = getRoleForSession(req, id) ?? 'viewer';
+  let session = sessions.get(id);
+  let credential = getRoleForSession(req, id) ?? 'viewer';
+  // Public PTY apps: a forwarded stranger drives their OWN per-visitor session,
+  // so grant 'writer' (type/resize/clear) — never 'owner', which would disclose
+  // other sessions via pinnedOther and allow pin/keep-alive. For an existing
+  // session, derive public-pty from the session itself (not the requested
+  // ?app=) so ?app=<public-pty>&session=<private-id> can't elevate a stranger
+  // on someone else's private session. Public WEB apps stay viewers (they drive
+  // the app through the iframe, not the role-gated WS channel).
+  if (credential === 'viewer') {
+    const publicPty = session ? isPublicPtySession(session) : isPublicPtyConfig(apps[requestedAppForPublic]);
+    if (publicPty) credential = 'writer';
+  }
   // ?yield=1 lets a writer/owner rejoin as viewer without displacing the current writer.
   const yields = (credential === 'owner' || credential === 'writer') && url.searchParams.get('yield') === '1';
   const isWriter = !yields && (credential === 'owner' || credential === 'writer');
-
-  let session = sessions.get(id);
 
   // Job sessions are non-interactive — they have no WS surface. Use SSE
   // (`/api/sessions/:id/stream`) or HTTP (`/api/sessions/:id/logs`) instead.
@@ -4321,14 +4357,14 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       ws.close(WS_CLOSE.FORBIDDEN, 'session not found');
       return;
     }
-    if (credential !== 'owner' && !publicWebApp) {
+    const remoteIp = normalizeIp(req.socket.remoteAddress);
+    if (credential !== 'owner' && !publicApp) {
       // Rate-limit invalid session attempts per IP to prevent brute-force scanning.
-      const ip = normalizeIp(req.socket.remoteAddress);
-      if (ip && !isLoopback(ip)) {
+      if (remoteIp && !isLoopback(remoteIp)) {
         const now = Date.now();
-        const attempts = missAttempts.get(ip)?.filter(t => t > now - RATE_WINDOW) ?? [];
+        const attempts = missAttempts.get(remoteIp)?.filter(t => t > now - RATE_WINDOW) ?? [];
         attempts.push(now);
-        missAttempts.set(ip, attempts);
+        missAttempts.set(remoteIp, attempts);
         if (attempts.length > RATE_MAX_MISS) {
           ws.close(WS_CLOSE.RATE_LIMIT, 'too many attempts');
           return;
@@ -4338,7 +4374,6 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       return;
     }
     const wsSkillName = url.searchParams.get('skill') || '';
-    const apps = loadApps();
     const requestedApp = url.searchParams.get('app') || (wsSkillName ? '' : 'bash');
 
     // Reserved paths (e.g. "skill") are not real apps — if the session is gone,
@@ -4418,8 +4453,22 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
         return;
       }
     } else {
+      // Public PTY apps spawn a fresh per-visitor process (no multiplexing), so
+      // bound concurrent spawns per source IP — otherwise a stranger could
+      // fork-bomb the box. Count live public-pty sessions straight from the map
+      // (self-correcting: a session that exits drops out, no counter to drift).
+      // Owners and loopback are exempt; this branch is pty-only (job/web above).
+      if (credential !== 'owner' && effectiveConfig.access === 'public' && remoteIp && !isLoopback(remoteIp)) {
+        let live = 0;
+        for (const s of sessions.values()) if (s.creatorIp === remoteIp && isPublicPtySession(s)) live++;
+        if (live >= PUBLIC_PTY_MAX_PER_IP) {
+          ws.close(WS_CLOSE.RATE_LIMIT, 'too many sessions');
+          return;
+        }
+      }
       try {
         session = spawnSession(id, sessionLabel, effectiveConfig, createdBy);
+        session.creatorIp = remoteIp ?? undefined;
       } catch (err) {
         console.error('Failed to spawn PTY:', errorMessage(err));
         ws.close(WS_CLOSE.INTERNAL_ERROR, 'Failed to spawn PTY');
@@ -4629,6 +4678,13 @@ function onListening(): void {
   if (tls && !NO_TLS) console.log(`  Fingerprint: ${new crypto.X509Certificate(tls.cert).fingerprint256}`);
   console.log(`  Version:     v${version}`);
   console.log('');
+
+  // Surface config warnings (e.g. dangerous public-PTY apps) to the box owner
+  // in the server log — they may never open the catalog where the toast shows.
+  const startupWarnings: string[] = [];
+  loadApps(startupWarnings);
+  for (const w of startupWarnings) console.warn(`  ⚠ ${w}`);
+  if (startupWarnings.length) console.log('');
 
   // Launch daemon web apps now that the proxy and health checks are live.
   startDaemonApps();

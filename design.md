@@ -166,11 +166,15 @@ Requires `WSH_PROXY_SECRET` env var. Every request must include a matching `X-WS
 
 The proxy decides who's allowed; wsh just honors the decision. From wsh's view, "owner" means "the proxy authorized this human for this box" — not "this human happens to share a name with the box."
 
-**Public-app exception.** Apps marked `access: public` in `apps.yaml` (e.g. `tetris`) are reachable by anyone the proxy forwarded, regardless of `X-Abox-Allowed`:
-- `/_a/<key>` HTTP and WebSocket: forwarded; auto-spawn allowed.
-- Parent chrome `/<box>/<appName>`: WebSocket admits non-allowed callers as viewers; the role message tells the client to load the iframe.
-- `/api/apps`: non-allowed callers see only public web apps (Skills and private apps hidden).
-- All other `/api/*` endpoints (rpc, share, sessions, paste-image, events): require `Allowed=1`.
+**Public-app exception.** Apps marked `access: public` in `apps.yaml` (e.g. web `tetris`) are reachable by anyone the proxy forwarded, regardless of `X-Abox-Allowed`. Both web and pty apps may be public:
+- `/_a/<key>` HTTP and WebSocket (web only): forwarded; auto-spawn allowed.
+- Parent chrome `/<box>/<appName>`: the `/terminal` WebSocket admits non-allowed callers. For a public **web** app they join as viewers and the role message tells the client to load the iframe. For a public **pty** app there is no iframe — each visitor spawns their **own** per-visitor PTY and is granted **writer** (type/resize/clear) over it, so the app is actually usable. Never owner: that would disclose other sessions via `pinnedOther` and allow pin/keep-alive. `close`/`pin` stay owner-only.
+- `/api/apps`: non-allowed callers see only public apps — web *and* pty (Skills and private apps hidden).
+- All other `/api/*` endpoints (rpc, share, sessions, paste-image, events): require `Allowed=1`. The pty writer role is per-session WS state only; it grants no HTTP-API authority.
+
+A public pty app has a single surface — the `/terminal` WebSocket (no `/_a` proxy, since a PTY has no port). Because each visitor spawns a fresh process, concurrent public-pty spawns are capped per source IP (`PUBLIC_PTY_MAX_PER_IP`, counted from the live session map so it self-corrects as sessions exit).
+
+> ⚠ **A public pty app runs a real process fed stranger keystrokes.** Marking `bash` (or anything with shell access) `access: public` is remote code execution for anyone the gateway forwards. The command must be sandboxed. wsh logs a warning at startup and toasts one in the catalog for every public-pty app; the catalog card carries an amber ⚠ PUBLIC badge.
 
 ### Writer Management
 
