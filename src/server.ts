@@ -3615,7 +3615,10 @@ function pushDiff(client: PushEntry[], server: PushEntry[], checksum: boolean): 
     if (!s) { add.push(c.path); continue; }
     if (c.type !== s.type) { update.push(c.path); continue; }
     if (c.type === 'file') {
-      const sizeDiff = (c.size ?? -1) !== (s.size ?? -2);
+      // Treat a missing size as 0 on both sides — the client omits size for
+      // 0-byte files (json:"size,omitempty"), so mismatched sentinels would
+      // flag every empty file as a perpetual update.
+      const sizeDiff = (c.size ?? 0) !== (s.size ?? 0);
       const mtDiff   = Math.abs((c.mtime_ns ?? 0) - (s.mtime_ns ?? 0)) > PUSH_MTIME_TOL_NS;
       const shaDiff  = checksum && !!c.sha256 && !!s.sha256 && c.sha256 !== s.sha256;
       if (sizeDiff || mtDiff || shaDiff) update.push(c.path);
