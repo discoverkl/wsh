@@ -194,6 +194,10 @@ Keys starting with `_` are reserved (e.g. `_skills`).
 
 **Ordering**: `top: N` (positive integer) promotes an app to the top of its section (skills/apps independently), sorted by value ascending. `hidden: true` pushes to the bottom. `top: 0` explicitly overrides a system-level `top`. Catalog display order: topped → normal → hidden.
 
+**Default app**: `default: true` on one app makes it the box's landing page — the catalog root (`/`) issues a `302` to `${BASE}${appKey}` instead of rendering the catalog. Works for any **pty or web** app (not skills or jobs — jobs have no UI to land on); the redirect just serves the app shell (`index.html`), which spawns a PTY into xterm.js or a web app into the iframe as usual. Reach the catalog itself with `/?catalog` (any value; presence is all that matters). The app shell carries a grid-icon "Back to Catalog" link (`#catalog-btn`) in its titlebar pointing at `${BASE}?catalog`, so it never bounces straight back to the default app. Resolution (`defaultAppKey()` in `server.ts`) walks apps in catalog order and returns the first `default: true` app the requester can actually reach — under `--trust-proxy`, a non-allowed viewer is only redirected to a public-joinable default, otherwise they get the (filtered) catalog. Exposed as `default` in `/api/apps`; cards flagged default show a green **Default** badge.
+
+Set it from the catalog UI (no hand-editing): each app card's config-gear popover has a **Set Default** / **Unset Default** button. `POST /api/apps/:key/default` flags the app and clears the flag from any current default (a box has at most one, so this doubles as "reset the previous one"); `POST /api/apps/:key/undefault` clears it. Both persist to the user `apps.yaml` and are system-aware — a `default: true` coming from the read-only system config is overridden with `default: false` in the user layer rather than deleted. Skills and jobs don't get the button.
+
 ## `wsh new` Positional Args
 
 The positional arg meaning depends on mode:

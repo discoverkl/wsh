@@ -2247,6 +2247,10 @@ interface AppConfig {
   healthCheck?: string;
   /** type:web only — initial inner path the iframe opens at (e.g. "/files/"). Must start with "/". */
   path?: string;
+  /** Mark this app as the box's default: the catalog root ("/") auto-redirects to it.
+   *  Visit "/?catalog" to see the catalog instead. If several apps set it, the first
+   *  in catalog order wins. See defaultAppKey() / router.get('/'). */
+  default?: boolean;
   /** type:web only — autostart on server boot and keep running (never idle-reaped).
    *  An idle daemon (0 viewers) is hidden from /api/sessions so it doesn't mark the
    *  box busy; it reappears while actively viewed. See spawnWebSession / scheduleCleanup. */
@@ -2794,12 +2798,36 @@ function broadcastRpc(action: string, ...args: string[]): void {
   }
 }
 
+// Resolve the box's default app for a given requester: the first app (in catalog
+// order) flagged `default: true` that this requester may actually reach. Returns
+// null when none is configured or the configured one isn't visible to them.
+function defaultAppKey(req: http.IncomingMessage): string | null {
+  const allowed = TRUST_PROXY ? gatewayAllowed(req) : true;
+  for (const [key, app] of Object.entries(loadApps())) {
+    if (!app.default) continue;
+    if (!allowed && !isPublicJoinable(app)) continue;
+    return key;
+  }
+  return null;
+}
+
 // Serve the catalog page at /.
 // When BASE != '/', also redirect /base -> /base/ to fix relative URL resolution.
 router.get('/', (req: express.Request, res: express.Response) => {
-  if (BASE !== '/' && !req.originalUrl.endsWith('/')) {
-    res.redirect(301, BASE);
+  const reqUrl = new URL(req.originalUrl, `http://${req.headers.host}`);
+  // Normalize /base -> /base/ (fixes relative URL resolution). Check the
+  // pathname, not the whole URL — a query string like ?catalog must not be
+  // mistaken for a missing trailing slash. Preserve the query across the hop.
+  if (BASE !== '/' && !reqUrl.pathname.endsWith('/')) {
+    res.redirect(301, BASE + reqUrl.search);
     return;
+  }
+  // Auto-open the default app unless the caller explicitly asked for the catalog
+  // (?catalog). The back-to-catalog link in the app shell carries this param.
+  const query = reqUrl.searchParams;
+  if (!query.has('catalog')) {
+    const def = defaultAppKey(req);
+    if (def) { res.redirect(302, BASE + def); return; }
   }
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'catalog.html'), 'utf8');
   const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -2836,6 +2864,7 @@ router.get('/api/apps', (req: express.Request, res: express.Response) => {
     access: app.access ?? null,
     hidden: app.hidden ? true : undefined,
     top: typeof app.top === 'number' && app.top > 0 ? app.top : undefined,
+    default: app.default ? true : undefined,
     tips: Array.isArray(app.tips) && app.tips.length ? app.tips : undefined,
     _raw: app,
   }));
@@ -2933,6 +2962,70 @@ router.post('/api/apps/:key/untop', (req: express.Request, res: express.Response
       delete (userConfig[appKey] as any).top;
     }
   }
+  fs.mkdirSync(userDir, { recursive: true });
+  fs.writeFileSync(userFile, YAML.stringify(userConfig), 'utf8');
+  res.json({ ok: true });
+});
+
+// Set an app as the box's default (catalog auto-opens it). Clears the flag from
+// any app that currently resolves to default — a box has at most one — so this
+// doubles as "reset the previous default". A default flagged in the read-only
+// system config is overridden with `default: false` in the user layer.
+router.post('/api/apps/:key/default', (req: express.Request, res: express.Response) => {
+  const appKey = req.params.key;
+  const apps = loadApps();
+  if (!apps[appKey]) { res.status(404).json({ error: 'App not found' }); return; }
+  if (apps[appKey].skill || (apps[appKey].type ?? 'pty') === 'job') {
+    res.status(400).json({ error: 'Only pty or web apps can be the default app' }); return;
+  }
+
+  const systemConfig = (loadConfigFile(SYSTEM_CONFIG_DIR) ?? {}) as Record<string, any>;
+  const userDir = path.join(os.homedir(), '.wsh');
+  const userFile = path.join(userDir, 'apps.yaml');
+  let userConfig: Record<string, any> = {};
+  try { userConfig = YAML.parse(fs.readFileSync(userFile, 'utf8')) ?? {}; } catch {}
+
+  const ensure = (k: string) => {
+    if (!userConfig[k] || typeof userConfig[k] !== 'object') userConfig[k] = {};
+    return userConfig[k] as Record<string, any>;
+  };
+  const clearDefault = (k: string) => {
+    const sysDefault = systemConfig[k] && typeof systemConfig[k] === 'object' && systemConfig[k].default === true;
+    if (sysDefault) ensure(k).default = false;                       // override the system default off
+    else if (userConfig[k] && typeof userConfig[k] === 'object') delete userConfig[k].default;
+  };
+
+  // Reset any previous default, then flag the chosen app.
+  for (const [k, app] of Object.entries(apps)) {
+    if (k !== appKey && app.default) clearDefault(k);
+  }
+  ensure(appKey).default = true;
+
+  fs.mkdirSync(userDir, { recursive: true });
+  fs.writeFileSync(userFile, YAML.stringify(userConfig), 'utf8');
+  res.json({ ok: true });
+});
+
+router.post('/api/apps/:key/undefault', (req: express.Request, res: express.Response) => {
+  const appKey = req.params.key;
+  const apps = loadApps();
+  if (!apps[appKey]) { res.status(404).json({ error: 'App not found' }); return; }
+  if (!apps[appKey].default) { res.json({ ok: true }); return; }
+
+  const systemConfig = (loadConfigFile(SYSTEM_CONFIG_DIR) ?? {}) as Record<string, any>;
+  const userDir = path.join(os.homedir(), '.wsh');
+  const userFile = path.join(userDir, 'apps.yaml');
+  let userConfig: Record<string, any> = {};
+  try { userConfig = YAML.parse(fs.readFileSync(userFile, 'utf8')) ?? {}; } catch {}
+
+  const sysDefault = systemConfig[appKey] && typeof systemConfig[appKey] === 'object' && systemConfig[appKey].default === true;
+  if (sysDefault) {
+    if (!userConfig[appKey] || typeof userConfig[appKey] !== 'object') userConfig[appKey] = {};
+    (userConfig[appKey] as any).default = false;
+  } else if (userConfig[appKey] && typeof userConfig[appKey] === 'object') {
+    delete (userConfig[appKey] as any).default;
+  }
+
   fs.mkdirSync(userDir, { recursive: true });
   fs.writeFileSync(userFile, YAML.stringify(userConfig), 'utf8');
   res.json({ ok: true });
