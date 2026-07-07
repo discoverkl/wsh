@@ -21,6 +21,7 @@ import { version } from '../package.json';
 import { emit as emitEvent, on as onEvent, readSince, getCursor, setCursor, rotate as rotateEvents, trim as trimEvents, isValidEventType, LOG_FILE as EVENT_LOG_FILE, CURSOR_DIR as EVENT_CURSOR_DIR, WshEvent } from './events';
 import * as metrics from './metrics';
 import { agentOf, captureTokens, dropSession } from './agentTokens';
+import { commandBinary } from './commandBinary';
 
 // --- Error handling ---
 
@@ -1753,11 +1754,6 @@ function deriveTitleFromCommand(cmd: string): string {
   const collapsed = cmd.replace(/\s+/g, ' ').trim();
   const MAX = 24;
   return collapsed.length > MAX ? collapsed.slice(0, MAX - 1) + '…' : collapsed;
-}
-
-/** Program name spawned for a session: basename of the command's first token. */
-function commandBinary(command: string): string {
-  return path.basename(command.trim().split(/\s+/)[0] || '');
 }
 
 function baseSession(appKey: string, appConfig: AppConfig, createdBy = ''): Session {
