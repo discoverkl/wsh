@@ -1190,7 +1190,8 @@
 
   <div id="share-popover">
     <div class="share-title">Share Session</div>
-    <div class="share-row">
+    <!-- View-only sharing is disabled for TUI sessions (see ALLOW_PTY_VIEWERS). -->
+    <div class="share-row" hidden>
       <div class="share-label">Viewer <span>(read-only)</span></div>
       <div class="share-url-wrap">
         <input class="share-url" id="viewer-url" readonly />

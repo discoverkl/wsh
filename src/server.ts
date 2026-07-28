@@ -1481,6 +1481,13 @@ const RATE_MAX_MISS = 10;               // max invalid session attempts per IP p
 const MISS_SWEEP_INTERVAL = 5 * 60_000; // prune missAttempts every 5 minutes
 const PUBLIC_PTY_MAX_PER_IP = 8;        // max concurrent public-pty sessions per source IP
 
+// View-only sharing for TUI sessions is disabled: a pure viewer, whose only
+// secret is the 6-char session ID, is too weak a capability for a live terminal
+// (full-scrollback disclosure, no rotation/revocation). Flip to true to restore.
+// Owners/writers (incl. yielding) and public-pty visitors are unaffected; web
+// apps keep view-only sharing.
+const ALLOW_PTY_VIEWERS = false;
+
 const WS_CLOSE = {
   OK:               1000,
   INTERNAL_ERROR:   1011,
@@ -4402,6 +4409,14 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
   if (credential === 'viewer') {
     const publicPty = session ? isPublicPtySession(session) : isPublicPtyConfig(apps[requestedAppForPublic]);
     if (publicPty) credential = 'writer';
+  }
+  // View-only sharing is disabled for TUI sessions: reject a pure viewer joining
+  // an existing pty session. Public-pty visitors were upgraded to 'writer' just
+  // above, and yielding owners/writers keep their owner/writer credential, so
+  // only session-ID-secret viewers are blocked here. Web apps are unaffected.
+  if (!ALLOW_PTY_VIEWERS && credential === 'viewer' && session?.appType === 'pty') {
+    ws.close(WS_CLOSE.FORBIDDEN, 'view-only sharing is disabled for terminal sessions');
+    return;
   }
   // ?yield=1 lets a writer/owner rejoin as viewer without displacing the current writer.
   const yields = (credential === 'owner' || credential === 'writer') && url.searchParams.get('yield') === '1';
