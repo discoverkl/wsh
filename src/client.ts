@@ -596,7 +596,7 @@ function connect(): void {
       }
       term.write('\r\n[Process exited. Refresh to start a new session.]\r\n');
     } else if (event.code === 4003) {
-      term.write('\r\n[Session not found.]\r\n');
+      term.write(`\r\n[${event.reason || 'Session not found.'}]\r\n`);
     } else if (event.code === 4029) {
       term.write('\r\n[Too many attempts. Please wait and try again.]\r\n');
     } else {
@@ -1267,7 +1267,7 @@ shareBtn.addEventListener('click', async (e: MouseEvent) => {
       shareError.setAttribute('hidden', '');
       const base = `${location.origin}${location.pathname}`;
       (document.getElementById('writer-url') as HTMLInputElement).value = `${base}#${sessionId}?wt=${data.wtoken}`;
-      (document.getElementById('viewer-url') as HTMLInputElement).value = `${base}#${sessionId}`;
+      // Viewer (view-only) sharing is disabled for TUI sessions — row is hidden.
     }
   } catch {
     shareError.textContent = 'Failed to fetch share URLs';
