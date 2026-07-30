@@ -6,6 +6,8 @@ import https from 'https';
 import net from 'net';
 import os from 'os';
 import path from 'path';
+import readline from 'readline';
+import zlib from 'zlib';
 import { Duplex, Writable } from 'stream';
 import { EventEmitter } from 'events';
 import { parseArgs } from 'util';
@@ -3640,19 +3642,65 @@ router.all('/_a/:appKey', appProxyHandler as any);
 router.all('/_a/:appKey/*', appProxyHandler as any);
 
 // =================== PUSH (folder sync from abox-cli) ===================
-// Two endpoints for `abox-cli push`:
-//   POST /api/push/plan    JSON in, JSON out — diff client manifest vs target tree
-//   POST /api/push/apply   tar stream in — apply the diff atomically, per file
-// Both gated by makeTokenMiddleware → gatewayAllowed (trust-proxy /api/* rule).
-// Registered before express.json() so apply can stream the body via req.pipe()
-// and plan can specify its own (larger) body-size limit for big manifests.
+// Three endpoints for `abox-cli push`:
+//   POST /api/push/plan    v1. JSON in, JSON out — diff client manifest vs target tree
+//   POST /api/push/plan2   v2. gzipped NDJSON in, JSON out — same diff, streamed
+//   POST /api/push/apply   tar stream in — apply the diff, per file
+// All gated by makeTokenMiddleware → gatewayAllowed (trust-proxy /api/* rule).
+// Registered before express.json() so apply and plan2 can stream the body via
+// req.pipe() and v1 plan can specify its own (larger) body-size limit.
+//
+// v1 buffers the whole manifest as one JSON body, which express caps at 50mb —
+// about 400k entries, or a mid-sized box. Past that a push fails outright with
+// a 413, which is why v2 exists: the manifest arrives as one gzipped NDJSON
+// line per entry and is consumed against an already-built map of the target, so
+// no array of client entries is ever materialized. v1 stays for older clients;
+// a v2 client falls back to it on 404.
 
 const PUSH_HOME = os.homedir();
 const PUSH_PLAN_TTL_MS = 5 * 60 * 1000;
 const PUSH_MTIME_TOL_NS = 1_000_000_000; // 1s — generous for cross-fs quirks
 const PUSH_SENTINEL_ENTRY = '.abox-push-sentinel';
 const PUSH_PRESERVED_SAMPLE = 50; // cap on the preserved-path list in a plan response
+const PUSH_DELETE_SAMPLE = 200;  // cap on the leftover-path list in a v2 plan response
+const PUSH_ROLLUP_GROUPS = 10;   // cap on the per-directory rollup of it
 const PUSH_MAX_SKIP_PATTERNS = 1000; // cap on the client-supplied skip list
+// Ceiling on a v2 manifest, in entries. Not a memory bound — v2 holds no client
+// array — but a runaway client shouldn't be able to spin the box forever.
+const PUSH_MAX_MANIFEST_ENTRIES = 20_000_000;
+// zstd landed in Node 22.15 / 23.8, and @types/node here predates it. Probed
+// rather than assumed for a better reason than the types, though: a released
+// wsh bundles its own Node runtime, so what this file was compiled against says
+// nothing about what will actually be there.
+const zstdCapable = zlib as unknown as { createZstdDecompress?: () => NodeJS.ReadWriteStream };
+
+// Compressions this box will accept on an apply body, best first. Advertised in
+// the plan reply rather than negotiated by trial, because the alternative is
+// discovering a box cannot decompress only after streaming gigabytes at it —
+// and only ever advertising what this runtime can really do.
+const PUSH_ACCEPT_ENCODING = [
+  ...(typeof zstdCapable.createZstdDecompress === 'function' ? ['zstd'] : []),
+  'gzip',
+];
+
+/** Wrap a request body in the decompressor its Content-Encoding calls for. */
+function pushDecodeBody(req: express.Request): NodeJS.ReadableStream {
+  const encoding = String(req.headers['content-encoding'] ?? '').toLowerCase();
+  if (!encoding || encoding === 'identity') return req;
+  let decoder: NodeJS.ReadWriteStream | null = null;
+  if (encoding === 'gzip') decoder = zlib.createGunzip();
+  else if (encoding === 'zstd' && zstdCapable.createZstdDecompress) decoder = zstdCapable.createZstdDecompress();
+  if (!decoder) throw new Error(`unsupported Content-Encoding: ${encoding}`);
+  req.pipe(decoder);
+  return decoder;
+}
+// A plan outlives its own diff by long enough to upload everything it named.
+// The 5-minute floor covers a small push; past that the allowance scales with
+// the payload, because a chunked apply keeps coming back to the same plan and
+// chunk 40 must not find it swept. Deliberately generous: the cost of a stale
+// plan is a map entry, the cost of an expired one is re-sending gigabytes.
+const PUSH_PLAN_TTL_BYTES_PER_MS = 1024; // ≈1 MB/s floor on assumed throughput
+const PUSH_PLAN_TTL_MAX_MS = 12 * 60 * 60 * 1000;
 // `rel` for a whole-box push, where the pushed directory *is* $HOME.
 const PUSH_HOME_REL = '.';
 // Where the box's deny rules live. Overridable only from the environment wsh
@@ -3682,8 +3730,12 @@ interface PushPlan {
   // Target's path relative to $HOME. Deny rules are written against $HOME, so
   // apply needs this to reconstruct the same path form plan matched on.
   rel: string;
-  add: string[];
-  update: string[];
+  // Counts, not paths. apply never reads the add/update path lists — only their
+  // lengths, for its response — so keeping the arrays would hold hundreds of
+  // megabytes of strings alive for the plan's whole lifetime to report two
+  // integers. The client addresses what it sends by manifest position instead.
+  addCount: number;
+  updateCount: number;
   delete: string[];
   expiresAt: number;
   // The deny rules this plan was computed with. Captured at plan time rather
@@ -3692,11 +3744,137 @@ interface PushPlan {
   deny: PushIgnoreRule[];
 }
 
+/**
+ * Growable bitmap over manifest positions, base64 on the wire.
+ *
+ * The plan answers "which of the entries you just sent should you upload?", and
+ * the client still holds that manifest in order, so positions say it in a byte
+ * per eight entries instead of a JSON array of paths — ~375 KB rather than
+ * ~200 MB on a 3M-file first push. Sparse pushes stay small too: a bitmap of
+ * mostly zeroes is what transport gzip is best at.
+ */
+class PushBitmap {
+  private buf = Buffer.alloc(4096);
+  private max = -1;
+  set(i: number): void {
+    const byte = i >> 3;
+    if (byte >= this.buf.length) {
+      const grown = Buffer.alloc(Math.max(this.buf.length * 2, byte + 1));
+      this.buf.copy(grown);
+      this.buf = grown;
+    }
+    this.buf[byte] |= 1 << (i & 7);
+    if (i > this.max) this.max = i;
+  }
+  /** Trailing zero bytes are dropped; a bitmap with nothing set is ''. */
+  toBase64(): string {
+    return this.buf.subarray(0, (this.max >> 3) + 1).toString('base64');
+  }
+}
+
 const pushPlans = new Map<string, PushPlan>();
 setInterval(() => {
   const now = Date.now();
   for (const [id, p] of pushPlans) if (p.expiresAt < now) pushPlans.delete(id);
+  // A push that died between chunks holds its tree until something says
+  // otherwise, and its plan's TTL scales with the payload — hours, for the
+  // large pushes that chunk in the first place.
+  for (const [id, r] of pushActiveApplies) {
+    if (r.inFlight === 0 && now - r.lastAt > PUSH_APPLY_IDLE_MS) pushActiveApplies.delete(id);
+  }
 }, 60_000).unref();
+
+// Trees being written to right now, by plan.
+//
+// A conflict is only declared while a request is actually in flight, and that
+// is a deliberate limit rather than an oversight. The tighter rule — hold from
+// a plan's first apply to its last, covering the gaps between chunks — was
+// tried and is worse: an interrupted push leaves a plan mid-sequence, and the
+// next thing the user does is re-run to continue, which is how resume works
+// here. Any reservation that outlives a request answers that re-run with 409,
+// and no timeout separates the two cases, because a re-run and the next chunk
+// arrive equally fast.
+//
+// What the gap actually exposes is narrower than it looks: a plan's delete list
+// is computed at plan time, so a file another push creates in a gap is not in
+// it and cannot be deleted by it. What remains is last-writer-wins on a file
+// both pushes carry, which is inherent to any concurrent sync.
+//
+// The map is keyed by plan so a push's own later chunks never conflict with it,
+// and `lastAt` lets the sweeper drop the record for a client that died.
+interface PushReservation { target: string; inFlight: number; lastAt: number }
+const pushActiveApplies = new Map<string, PushReservation>();
+const PUSH_APPLY_IDLE_MS = 2 * 60 * 1000;
+
+/**
+ * Report an in-flight apply whose tree overlaps `target`, if any.
+ *
+ * Scoped to applies in flight, deliberately, and not to live plans. Holding a
+ * tree from plan time would look more careful and would be worse: a push that
+ * dies mid-upload leaves its plan behind, and the very next thing the user does
+ * is re-run the command to continue — which is how resume works here, since the
+ * files that landed already match and simply are not listed again. A plan-time
+ * lock would answer that re-run with 409 and make the headline recovery path
+ * the one thing you cannot do.
+ *
+ * What is left unguarded is a stale delete list: A plans, B writes a file A
+ * never saw, A's final apply removes it. That needs two people pushing
+ * overlapping trees at once, and the dangerous half of it — a whole-box push
+ * deleting — is already off by default. Worth accepting to keep re-runs free.
+ *
+ * Overlap means one tree contains the other; disjoint subdirectories may run
+ * together. $HOME contains everything, so a whole-box push conflicts with all.
+ *
+ * This is also what makes the staging sweep safe. Between chunks there are no
+ * staging directories — each apply cleans up its own — so anything found while
+ * no overlapping apply is running was orphaned by a handler that died.
+ */
+function pushOverlapping(target: string, selfPlanId?: string): string | null {
+  for (const [planId, r] of pushActiveApplies) {
+    if (planId === selfPlanId) continue; // our own chunks are not a conflict
+    if (r.inFlight === 0) continue;     // between chunks — see the note above
+    if (r.target === target ||
+        target.startsWith(r.target + path.sep) ||
+        r.target.startsWith(target + path.sep)) {
+      return r.target;
+    }
+  }
+  return null;
+}
+
+/** Recursive size of a directory, for reporting what a sweep reclaimed. */
+async function pushDirBytes(dir: string): Promise<number> {
+  let total = 0;
+  let ents: fs.Dirent[];
+  try { ents = await fs.promises.readdir(dir, { withFileTypes: true }); }
+  catch { return 0; }
+  for (const ent of ents) {
+    const abs = path.join(dir, ent.name);
+    if (ent.isDirectory()) { total += await pushDirBytes(abs); continue; }
+    try { total += (await fs.promises.lstat(abs)).size; } catch {}
+  }
+  return total;
+}
+
+/**
+ * Delete orphaned staging directories, returning the bytes reclaimed.
+ *
+ * `cleanup()` in apply only runs if the handler survives to run it. A wsh crash
+ * or a container restart mid-push leaves .abox-push-staging-<uuid>/ behind
+ * holding up to a chunk's worth of data — and because both walks skip that name
+ * prefix, push itself can never see it, never diffs it, and never deletes it.
+ * Nothing else would ever reclaim it, and the space it holds is exactly the
+ * headroom the next push needs.
+ */
+async function pushSweepStaging(dirs: string[]): Promise<number> {
+  let reclaimed = 0;
+  for (const dir of dirs) {
+    reclaimed += await pushDirBytes(dir);
+    try { await fs.promises.rm(dir, { recursive: true, force: true }); }
+    catch (err) { console.error(`[push] sweep failed dir=${dir}: ${errorMessage(err)}`); }
+  }
+  return reclaimed;
+}
 
 /** Validate client-supplied target. Must canonicalize strictly under $HOME, equal
  *  $HOME/<rel>, and rel must be relative with no `..` components. */
@@ -3760,178 +3938,533 @@ function pushRuleHit(
   return rule ? { home, rule } : null;
 }
 
-/** Walk `dir` recursively. Treat missing as empty. Skip any .abox-push-staging-*. */
-async function pushWalk(dir: string): Promise<PushEntry[]> {
+// How many lstats the target walk keeps in flight. The walk is one `await` per
+// entry otherwise, which on a box-sized tree spends most of its wall clock
+// waiting on libuv's threadpool one syscall at a time.
+const PUSH_WALK_CONCURRENCY = 32;
+
+/** Run `fn` over `items` with at most `limit` in flight. Rejects on first error. */
+async function pushMapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) await fn(items[next++]);
+    }),
+  );
+}
+
+/**
+ * Walk `dir` recursively. Treat missing as empty. Returns the manifest plus the
+ * absolute paths of any `.abox-push-staging-*` directories found on the way.
+ *
+ * `hide` is the ignore filter, applied *during* traversal rather than to the
+ * finished list: a hidden directory is neither emitted nor descended. That is
+ * only sound because the grammar has no negation to re-include something
+ * underneath it, and it is the difference between reading an excluded
+ * node_modules and stepping over it.
+ *
+ * Directories are never lstat'd — the dirent already says it is one, and
+ * pushCompare ignores directory mode, so the stat would buy nothing.
+ */
+async function pushWalk(
+  dir: string,
+  hide: (rel: string, isDir: boolean) => boolean,
+): Promise<{ entries: PushEntry[]; staging: string[] }> {
   const out: PushEntry[] = [];
+  const staging: string[] = [];
+
   async function visit(abs: string, rel: string): Promise<void> {
-    let entries: fs.Dirent[];
-    try { entries = await fs.promises.readdir(abs, { withFileTypes: true }); }
+    let ents: fs.Dirent[];
+    try { ents = await fs.promises.readdir(abs, { withFileTypes: true }); }
     catch { return; }
-    for (const ent of entries) {
-      if (ent.name.startsWith('.abox-push-staging-')) continue;
-      const childAbs = path.join(abs, ent.name);
+
+    // Results land in fixed slots so the manifest stays in readdir order
+    // regardless of which lstat finishes first.
+    const slots: (PushEntry | null)[] = new Array(ents.length).fill(null);
+    const jobs: [number, string][] = [];
+    const subdirs: [string, string][] = [];
+
+    for (let i = 0; i < ents.length; i++) {
+      const ent = ents[i];
+      if (ent.name.startsWith('.abox-push-staging-')) { staging.push(path.join(abs, ent.name)); continue; }
       const childRel = rel ? rel + '/' + ent.name : ent.name;
+      if (ent.isDirectory()) {
+        if (hide(childRel, true)) continue;
+        slots[i] = { path: childRel, type: 'dir' };
+        subdirs.push([path.join(abs, ent.name), childRel]);
+        continue;
+      }
+      // Files, symlinks, and DT_UNKNOWN alike: resolved in the concurrent pass.
+      // The path is carried along rather than rebuilt there — one wasted concat
+      // per file is a million wasted strings on a box-sized tree.
+      jobs.push([i, childRel]);
+    }
+
+    await pushMapLimit(jobs, PUSH_WALK_CONCURRENCY, async ([i, childRel]) => {
+      const ent = ents[i];
+      const childAbs = path.join(abs, ent.name);
       let st: fs.Stats;
-      try { st = await fs.promises.lstat(childAbs); } catch { continue; }
+      try { st = await fs.promises.lstat(childAbs); } catch { return; }
+
       if (st.isSymbolicLink()) {
+        // A dir-only rule (`build/`) has to fire on a symlink that leads to a
+        // directory, because the pushing client's walk resolves it the same way
+        // — and a path one walk hides while the other reports is precisely the
+        // disagreement the diff resolves by deleting it.
+        let pointsAtDir = false;
+        try { pointsAtDir = (await fs.promises.stat(childAbs)).isDirectory(); } catch {}
+        if (hide(childRel, pointsAtDir)) return;
         let linkTarget = '';
         try { linkTarget = await fs.promises.readlink(childAbs); } catch {}
-        out.push({ path: childRel, type: 'symlink', target: linkTarget });
-      } else if (st.isDirectory()) {
-        out.push({ path: childRel, type: 'dir', mode: st.mode & 0o777 });
-        await visit(childAbs, childRel);
-      } else if (st.isFile()) {
-        out.push({
-          path: childRel,
-          type: 'file',
-          size: st.size,
-          mtime_ns: Math.round(st.mtimeMs * 1e6),
-          mode: st.mode & 0o777,
-        });
+        slots[i] = { path: childRel, type: 'symlink', target: linkTarget };
+        return;
       }
-      // other inode types silently skipped.
-    }
+      if (st.isDirectory()) { // DT_UNKNOWN that turned out to be a directory
+        if (hide(childRel, true)) return;
+        slots[i] = { path: childRel, type: 'dir' };
+        subdirs.push([childAbs, childRel]);
+        return;
+      }
+      if (!st.isFile()) return; // sockets / devices / FIFOs
+      if (hide(childRel, false)) return;
+      slots[i] = {
+        path:     childRel,
+        type:     'file',
+        size:     st.size,
+        mtime_ns: Math.round(st.mtimeMs * 1e6),
+        mode:     st.mode & 0o777,
+      };
+    });
+
+    for (const s of slots) if (s) out.push(s);
+    for (const [a, r] of subdirs) await visit(a, r);
   }
+
   await visit(dir, '');
-  return out;
+  return { entries: out, staging };
 }
 
-/** Diff client manifest vs server manifest. Returns add/update/delete by relative path. */
-function pushDiff(client: PushEntry[], server: PushEntry[], checksum: boolean): { add: string[]; update: string[]; del: string[] } {
-  const sMap = new Map<string, PushEntry>();
-  for (const s of server) sMap.set(s.path, s);
-  const add: string[] = [];
-  const update: string[] = [];
-  for (const c of client) {
-    const s = sMap.get(c.path);
-    sMap.delete(c.path);
-    if (!s) { add.push(c.path); continue; }
-    if (c.type !== s.type) { update.push(c.path); continue; }
-    if (c.type === 'file') {
-      // Treat a missing size as 0 on both sides — the client omits size for
-      // 0-byte files (json:"size,omitempty"), so mismatched sentinels would
-      // flag every empty file as a perpetual update.
-      const sizeDiff = (c.size ?? 0) !== (s.size ?? 0);
-      const mtDiff   = Math.abs((c.mtime_ns ?? 0) - (s.mtime_ns ?? 0)) > PUSH_MTIME_TOL_NS;
-      const shaDiff  = checksum && !!c.sha256 && !!s.sha256 && c.sha256 !== s.sha256;
-      if (sizeDiff || mtDiff || shaDiff) update.push(c.path);
-    } else if (c.type === 'symlink') {
-      if ((c.target ?? '') !== (s.target ?? '')) update.push(c.path);
-    }
-    // dirs: mode-only changes ignored in v1.
+/** One client entry against the target's copy. null means "already identical". */
+function pushCompare(c: PushEntry, s: PushEntry | undefined, checksum: boolean): 'add' | 'update' | null {
+  if (!s) return 'add';
+  if (c.type !== s.type) return 'update';
+  if (c.type === 'file') {
+    // Treat a missing size as 0 on both sides — the client omits size for
+    // 0-byte files (json:"size,omitempty"), so mismatched sentinels would
+    // flag every empty file as a perpetual update.
+    const sizeDiff = (c.size ?? 0) !== (s.size ?? 0);
+    const mtDiff   = Math.abs((c.mtime_ns ?? 0) - (s.mtime_ns ?? 0)) > PUSH_MTIME_TOL_NS;
+    const shaDiff  = checksum && !!c.sha256 && !!s.sha256 && c.sha256 !== s.sha256;
+    return sizeDiff || mtDiff || shaDiff ? 'update' : null;
   }
-  const del = Array.from(sMap.keys());
-  return { add, update, del };
+  if (c.type === 'symlink') return (c.target ?? '') !== (s.target ?? '') ? 'update' : null;
+  return null; // dirs: mode-only changes ignored
 }
 
-router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: express.Request, res: express.Response) => {
-  const body = req.body as { rel?: string; target?: string; checksum?: boolean; entries?: PushEntry[]; skip?: string[]; home?: boolean };
-  if (!body || typeof body.rel !== 'string' || typeof body.target !== 'string' || !Array.isArray(body.entries)) {
-    res.status(400).json({ error: 'rel, target, and entries are required' });
-    return;
+/**
+ * Validate one decoded NDJSON manifest value as a PushEntry, or throw.
+ *
+ * Takes the already-parsed value rather than the line: pushReadNdjson has
+ * parsed it once, and on the 3M-entry push this endpoint exists for, a
+ * re-stringify and re-parse per entry is the dominant cost of the loop.
+ *
+ * Paths are checked for `..` and absolute forms here even though nothing in the
+ * plan phase dereferences them — a path like that can only be a broken client
+ * or a probe, and letting it through would mean apply is the only thing
+ * standing between it and the filesystem.
+ */
+function pushParseEntry(value: unknown): PushEntry {
+  const e = value as PushEntry;
+  if (!e || typeof e !== 'object' || typeof e.path !== 'string' || !e.path) {
+    throw new Error('manifest entry needs a non-empty string path');
   }
-  const skipPatterns = body.skip ?? [];
-  if (!Array.isArray(skipPatterns) || skipPatterns.some(s => typeof s !== 'string')) {
-    res.status(400).json({ error: 'skip must be an array of strings' });
-    return;
+  if (e.type !== 'file' && e.type !== 'dir' && e.type !== 'symlink') {
+    throw new Error(`manifest entry ${e.path} has unknown type ${String(e.type)}`);
   }
-  // Each pattern becomes a regex, and a long list of `**`-heavy ones is a way
-  // to make the box do pointless work. The client is authenticated and it is
-  // the box owner's own foot, but a bound costs nothing.
-  if (skipPatterns.length > PUSH_MAX_SKIP_PATTERNS) {
-    res.status(400).json({ error: `too many skip patterns (${skipPatterns.length} > ${PUSH_MAX_SKIP_PATTERNS})` });
-    return;
+  if (e.path.startsWith('/') || e.path.split('/').some(s => s === '..' || s === '')) {
+    throw new Error(`unsafe manifest path: ${e.path}`);
   }
-  const target = pushSafeTarget(body.target, body.rel, body.home === true);
-  if (!target) {
-    res.status(400).json({ error: 'target must be inside $HOME and match rel' });
-    return;
-  }
-  let serverEntries: PushEntry[];
-  try { serverEntries = await pushWalk(target); }
-  catch (err) { res.status(500).json({ error: `walk failed: ${errorMessage(err)}` }); return; }
+  return e;
+}
 
-  // Deny filter, applied symmetrically to BOTH sides of the diff before it
-  // runs. Filtering only the client side would still leave the target's copy
-  // absent from the incoming manifest, and pushDiff's leftover pass would put
-  // it in `delete` — wiping the very file the rule protects. Filtering both
-  // makes the path simply not exist as far as the diff is concerned, so
-  // pushDiff itself needs no knowledge of any of this.
-  // Rules are written against $HOME (`/.trae/traecli.yaml` means ~/.trae/…),
-  // but manifest paths are relative to the pushed directory. Match on the
-  // $HOME-relative form or the rules are trivially bypassed by pushing from
-  // further down: `cd ~/.trae && abox-cli push` sends a manifest whose only
-  // entry is `traecli.yaml`, which no anchored rule can match.
-  const deny = loadPushIgnoreDir(PUSH_IGNORE_DIR);
-  const homePrefix = pushHomePrefix(body.rel);
-  const preserved = new Set<string>();      // $HOME-relative, deny only, reported back
-  const heldLocal = new Set<string>();      // push-root-relative, deny ∪ skip, guards deletes
+/**
+ * Read a request body as NDJSON, one parsed value per line, honouring
+ * Content-Encoding: gzip. Errors on the decompression stream surface as a throw
+ * from the iteration rather than an unhandled 'error' event.
+ */
+async function* pushReadNdjson(req: express.Request): AsyncGenerator<unknown> {
+  const src = pushDecodeBody(req);
+  let streamErr: Error | null = null;
+  const rl = readline.createInterface({ input: src, crlfDelay: Infinity });
+  src.on('error', (e: Error) => { streamErr = e; rl.close(); });
+  for await (const line of rl) {
+    if (streamErr) break;
+    if (line) yield JSON.parse(line);
+  }
+  if (streamErr) throw streamErr;
+}
 
-  const denied = (e: PushEntry): boolean => {
-    const hit = pushRuleHit(deny, homePrefix, e.path, e.type === 'dir');
+interface PushPlanBuild {
+  planId: string;
+  manifestCount: number;
+  addBits: string;
+  updateBits: string;
+  addCount: number;
+  updateCount: number;
+  addPaths: string[];
+  updatePaths: string[];
+  // Everything the target holds that the client did not send. One set: whether
+  // it gets deleted or merely reported is the caller's policy, not a second
+  // kind of thing. Splitting it produced two names for one list and left the
+  // whole-box push — the case with tens of thousands of paths and the default
+  // most in need of explaining — with no rollup at all.
+  leftover: string[];
+  bytesToSend: number;
+  expiresAt: number;
+  preserved: string[];
+  reclaimedBytes: number;
+}
+
+/**
+ * The diff, shared by both plan endpoints.
+ *
+ * The target tree is walked into a map first and the client's manifest is then
+ * consumed *against* it, so no array of client entries is ever built: v2 reads
+ * them straight off the socket. What survives the loop is two bitmaps, two
+ * counts, and whatever of the target the client never mentioned — the deletes.
+ *
+ * The deny list is applied to both sides. Filtering only the client's would
+ * still leave the target's copy absent from the manifest, and the leftover pass
+ * would put it in `delete` — wiping the very file the rule protects. Rules are
+ * written against $HOME (`/.trae/traecli.yaml` means ~/.trae/…) while manifest
+ * paths are relative to the pushed directory, so both are converted before
+ * matching; otherwise `cd ~/.trae && abox-cli push` sends a manifest whose only
+ * entry is `traecli.yaml`, which no anchored rule can match.
+ */
+async function pushBuildPlan(opts: {
+  target: string;
+  rel: string;
+  checksum: boolean;
+  skipPatterns: string[];
+  // Either shape: v2 streams off the socket, v1 hands over the array
+  // express already parsed. `for await` accepts both.
+  entries: AsyncIterable<PushEntry> | Iterable<PushEntry>;
+  collectPaths: boolean; // v1 answers in paths and has to keep them
+  deletes: boolean;      // false → report the leftovers instead of removing them
+  sweep: boolean;        // false for a dry run, which must change nothing
+  deny: PushIgnoreRule[];
+}): Promise<PushPlanBuild> {
+  const homePrefix = pushHomePrefix(opts.rel);
+  const preserved = new Set<string>();  // $HOME-relative, deny only, reported back
+  const heldLocal = new Set<string>();  // push-root-relative, deny ∪ skip, guards deletes
+
+  const denied = (p: string, isDir: boolean): boolean => {
+    const hit = pushRuleHit(opts.deny, homePrefix, p, isDir);
     if (!hit) return false;
     preserved.add(hit.home);
-    heldLocal.add(e.path);
+    heldLocal.add(p);
     return true;
   };
-
   // The client's own skip list (~/.aboxignore, --exclude), shipped with the
-  // manifest. It only ever filters the TARGET's walk, never the manifest — the
-  // client already left those paths out. Without this the diff sees them
-  // present on the box and missing upstream and schedules them for deletion,
-  // so "ignore node_modules" would mean "delete node_modules on the box" —
-  // the opposite of what anyone writing that line intends.
-  //
-  // Unlike deny, these patterns are anchored to the pushed directory, which is
-  // the same frame the target walk reports in. No `rel` prefix here.
-  const skip = compilePushIgnore(skipPatterns.join('\n'), 'client skip list');
-  const skipped = (e: PushEntry): boolean => {
-    if (!pushRuleHit(skip, homePrefix, e.path, e.type === 'dir')) return false;
-    heldLocal.add(e.path);
+  // manifest. It only ever filters the TARGET's walk — the client already left
+  // those paths out. Without this the diff sees them present on the box and
+  // missing upstream and schedules them for deletion, so "ignore node_modules"
+  // would mean "delete node_modules on the box".
+  const skip = compilePushIgnore(opts.skipPatterns.join('\n'), 'client skip list');
+  const skipped = (p: string, isDir: boolean): boolean => {
+    if (!pushRuleHit(skip, homePrefix, p, isDir)) return false;
+    heldLocal.add(p);
     return true;
   };
 
-  const clientEntries = body.entries.filter(e => !denied(e));
-  const targetEntries = serverEntries.filter(e => !denied(e) && !skipped(e));
+  const { entries: serverEntries, staging } = await pushWalk(
+    opts.target,
+    (p, isDir) => denied(p, isDir) || skipped(p, isDir),
+  );
+  const reclaimedBytes = opts.sweep ? await pushSweepStaging(staging) : 0;
+  const sMap = new Map<string, PushEntry>();
+  for (const e of serverEntries) sMap.set(e.path, e);
 
-  const { add, update, del } = pushDiff(clientEntries, targetEntries, !!body.checksum);
+  const addBits = new PushBitmap();
+  const updateBits = new PushBitmap();
+  const addPaths: string[] = [];
+  const updatePaths: string[] = [];
+  let addCount = 0;
+  let updateCount = 0;
+  let bytesToSend = 0;
+  let manifestCount = 0;
+
+  for await (const c of opts.entries) {
+    // Position in the manifest as *received*, counted before the deny filter.
+    // The client addresses what it sends by this index against the slice it
+    // streamed from, and it has no idea which entries the box refused — so
+    // renumbering here would shift every bit after the first denied path and
+    // silently upload the wrong files.
+    const i = manifestCount++;
+    if (manifestCount > PUSH_MAX_MANIFEST_ENTRIES) {
+      throw new Error(`manifest exceeds ${PUSH_MAX_MANIFEST_ENTRIES} entries`);
+    }
+    if (denied(c.path, c.type === 'dir')) continue;
+    const s = sMap.get(c.path);
+    if (s) sMap.delete(c.path);
+    const verdict = pushCompare(c, s, opts.checksum);
+    if (verdict === null) continue;
+    if (verdict === 'add') {
+      addBits.set(i);
+      addCount += 1;
+      if (opts.collectPaths) addPaths.push(c.path);
+    } else {
+      updateBits.set(i);
+      updateCount += 1;
+      if (opts.collectPaths) updatePaths.push(c.path);
+    }
+    if (c.type === 'file') bytesToSend += c.size ?? 0;
+  }
 
   // Deleting a directory is recursive (`fs.rm({recursive:true})` in apply), so
   // a directory still holding a held-back path has to stay even though the
-  // client doesn't have it. Without this the rules hold for overwrites and
-  // fail silently for deletes: a target with only ~/.trae/traecli.yaml left in
-  // it would lose the file along with its parent. Covers skip as well as deny —
-  // an excluded node_modules is no use if its project directory is removed.
+  // client doesn't have it. Without this the rules hold for overwrites and fail
+  // silently for deletes: a target with only ~/.trae/traecli.yaml left in it
+  // would lose the file along with its parent. Covers skip as well as deny — an
+  // excluded node_modules is no use if its project directory is removed.
   const heldAncestors = new Set<string>();
   for (const p of heldLocal) {
     const segs = p.split('/');
     for (let i = 1; i < segs.length; i++) heldAncestors.add(segs.slice(0, i).join('/'));
   }
-  const deletes = del.filter(p => !heldAncestors.has(p));
+  const leftover = Array.from(sMap.keys()).filter(p => !heldAncestors.has(p));
 
-  const wantSet = new Set([...add, ...update]);
-  let bytesToSend = 0;
-  for (const e of clientEntries) {
-    if (e.type === 'file' && wantSet.has(e.path)) bytesToSend += e.size ?? 0;
+  // A plan has to outlive the upload it describes, and a chunked apply keeps
+  // coming back to it, so the allowance follows the payload rather than a flat
+  // five minutes.
+  const ttl = Math.min(
+    PUSH_PLAN_TTL_MAX_MS,
+    Math.max(PUSH_PLAN_TTL_MS, Math.ceil(bytesToSend / PUSH_PLAN_TTL_BYTES_PER_MS)),
+  );
+
+  return {
+    planId:        crypto.randomUUID(),
+    manifestCount,
+    addBits:       addBits.toBase64(),
+    updateBits:    updateBits.toBase64(),
+    addCount,
+    updateCount,
+    addPaths,
+    updatePaths,
+    leftover,
+    bytesToSend,
+    expiresAt:     Date.now() + ttl,
+    preserved:     Array.from(preserved).sort(),
+    reclaimedBytes,
+  };
+}
+
+/**
+ * Group deleted paths by their containing directory, biggest group first.
+ *
+ * Tens of thousands of individual delete lines is not a confirmation prompt —
+ * nobody reads it, and "yes" stops meaning anything. What a person actually
+ * needs to know before agreeing is *where* the removals land, which is one line
+ * per directory.
+ */
+function pushDeleteRollup(paths: string[], limit: number): { dir: string; count: number }[] {
+  const byDir = new Map<string, number>();
+  for (const p of paths) {
+    const cut = p.lastIndexOf('/');
+    const dir = cut < 0 ? '.' : p.slice(0, cut);
+    byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
   }
-  const planId = crypto.randomUUID();
-  const expiresAt = Date.now() + PUSH_PLAN_TTL_MS;
-  pushPlans.set(planId, { target, rel: body.rel, add, update, delete: deletes, expiresAt, deny });
-  const preservedList = Array.from(preserved).sort();
-  res.json({
-    plan_id:         planId,
+  return Array.from(byDir, ([dir, count]) => ({ dir, count }))
+    .sort((a, b) => b.count - a.count || a.dir.localeCompare(b.dir))
+    .slice(0, limit);
+}
+
+/** Record a freshly-built plan so apply can find it. */
+function pushRegisterPlan(built: PushPlanBuild, target: string, rel: string, deletes: boolean, deny: PushIgnoreRule[]): void {
+  pushPlans.set(built.planId, {
     target,
-    add,
-    update,
-    delete:          deletes,
-    bytes_to_send:   bytesToSend,
-    expires_at:      Math.floor(expiresAt / 1000),
+    rel,
+    addCount:    built.addCount,
+    updateCount: built.updateCount,
+    // Only a push that asked to delete carries the list into apply; otherwise
+    // the leftovers are reported and forgotten.
+    delete:      deletes ? built.leftover : [],
+    expiresAt:   built.expiresAt,
+    deny,
+  });
+}
+
+/**
+ * Resolve the target and check nothing else is writing there.
+ * Returns the validated target, or the status and message to answer with.
+ */
+function pushResolveTarget(
+  hdr: { rel: string; target: string; home: boolean },
+  reserved: boolean,
+): { target: string } | { code: number; error: string } {
+  const target = pushSafeTarget(hdr.target, hdr.rel, hdr.home);
+  if (!target) return { code: 400, error: 'target must be inside $HOME and match rel' };
+  const busy = reserved ? pushOverlapping(target) : null;
+  if (busy) return { code: 409, error: `another push is writing to ${busy} — wait for it to finish` };
+  return { target };
+}
+
+/** Shared validation of the small header both plan versions carry. */
+function pushCheckHeader(
+  hdr: { rel?: unknown; target?: unknown; skip?: unknown; home?: unknown },
+): { error: string } | { rel: string; target: string; skip: string[]; home: boolean } {
+  if (!hdr || typeof hdr.rel !== 'string' || typeof hdr.target !== 'string') {
+    return { error: 'rel and target are required' };
+  }
+  const skip = hdr.skip ?? [];
+  if (!Array.isArray(skip) || skip.some(s => typeof s !== 'string')) {
+    return { error: 'skip must be an array of strings' };
+  }
+  // Each pattern becomes a regex, and a long list of `**`-heavy ones is a way
+  // to make the box do pointless work. The client is authenticated and it is
+  // the box owner's own foot, but a bound costs nothing.
+  if (skip.length > PUSH_MAX_SKIP_PATTERNS) {
+    return { error: `too many skip patterns (${skip.length} > ${PUSH_MAX_SKIP_PATTERNS})` };
+  }
+  return { rel: hdr.rel, target: hdr.target, skip: skip as string[], home: hdr.home === true };
+}
+
+// v1: the whole manifest as one JSON body. Kept for clients older than the
+// streaming endpoint; express caps the body at 50mb, which is where a big push
+// falls over and why v2 exists.
+router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: express.Request, res: express.Response) => {
+  const body = req.body as { rel?: string; target?: string; checksum?: boolean; entries?: PushEntry[]; skip?: string[]; home?: boolean };
+  if (!body || !Array.isArray(body.entries)) {
+    res.status(400).json({ error: 'rel, target, and entries are required' });
+    return;
+  }
+  const hdr = pushCheckHeader(body);
+  if ('error' in hdr) { res.status(400).json(hdr); return; }
+  const resolved = pushResolveTarget(hdr, true);
+  if ('error' in resolved) { res.status(resolved.code).json({ error: resolved.error }); return; }
+  const target = resolved.target;
+  const deny = loadPushIgnoreDir(PUSH_IGNORE_DIR);
+  let built: PushPlanBuild;
+  try {
+    built = await pushBuildPlan({
+      target,
+      rel:          hdr.rel,
+      checksum:     !!body.checksum,
+      skipPatterns: hdr.skip,
+      entries:      body.entries,
+      collectPaths: true,
+      deletes:      true,
+      sweep:        true,
+      deny,
+    });
+  } catch (err) { res.status(500).json({ error: `plan failed: ${errorMessage(err)}` }); return; }
+
+  pushRegisterPlan(built, target, hdr.rel, true, deny);
+  res.json({
+    plan_id:       built.planId,
+    target,
+    add:           built.addPaths,
+    update:        built.updatePaths,
+    delete:        built.leftover,
+    bytes_to_send: built.bytesToSend,
+    expires_at:    Math.floor(built.expiresAt / 1000),
     // What the target refused to let this push touch, in either direction.
     // Reported rather than predicted client-side: the client may be older than
     // the rule files, and this way the preview shows what actually happened.
-    preserved:       preservedList.slice(0, PUSH_PRESERVED_SAMPLE),
-    preserved_count: preservedList.length,
+    preserved:       built.preserved.slice(0, PUSH_PRESERVED_SAMPLE),
+    preserved_count: built.preserved.length,
+    reclaimed_bytes: built.reclaimedBytes,
   });
+});
+
+// v2: gzipped NDJSON in — one header line, then one entry per line. Answers in
+// manifest positions rather than paths, so the response stays small even when
+// every file is new.
+router.post('/api/push/plan2', async (req: express.Request, res: express.Response) => {
+  let sent = false;
+  const fail = (code: number, error: string): void => {
+    if (!sent) { sent = true; res.status(code).json({ error }); }
+  };
+  try {
+    const lines = pushReadNdjson(req);
+    const first = await lines.next();
+    if (first.done) { fail(400, 'empty body: expected a header line'); return; }
+    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; deletes?: unknown; dry_run?: unknown };
+    const hdr = pushCheckHeader(raw);
+    if ('error' in hdr) { fail(400, hdr.error); return; }
+    // A dry run neither writes nor deletes, so it has nothing to conflict with.
+    const dryRun = raw.dry_run === true;
+    const resolved = pushResolveTarget(hdr, !dryRun);
+    if ('error' in resolved) { fail(resolved.code, resolved.error); return; }
+    const target = resolved.target;
+
+    const deny = loadPushIgnoreDir(PUSH_IGNORE_DIR);
+    const entries = (async function* () {
+      for await (const v of lines) yield pushParseEntry(v);
+    })();
+    const built = await pushBuildPlan({
+      target,
+      rel:          hdr.rel,
+      checksum:     raw.checksum === true,
+      skipPatterns: hdr.skip,
+      entries,
+      collectPaths: false,
+      deletes:      raw.deletes !== false,
+      // A dry run reports what a push would do and touches nothing, which has
+      // to include not quietly reclaiming disk on the way past.
+      sweep:        !dryRun,
+      deny,
+    });
+
+    // A dry run reserves nothing. Registering it would hold the tree against
+    // other pushes for the idle timeout, so `push -n ~` followed by `push ~` —
+    // the most natural sequence there is — would answer 409.
+    if (!dryRun) pushRegisterPlan(built, target, hdr.rel, raw.deletes !== false, deny);
+    sent = true;
+    res.json({
+      plan_id:       dryRun ? '' : built.planId,
+      target,
+      // Echoed so the client can prove the bitmaps line up with the manifest it
+      // streamed. A mismatch means the two sides disagree about what entry 0
+      // was, which would upload the wrong files silently.
+      manifest_count: built.manifestCount,
+      add_bits:       built.addBits,
+      update_bits:    built.updateBits,
+      add_count:      built.addCount,
+      update_count:   built.updateCount,
+      // What the box holds and this push did not send. Reported the same way
+      // whether or not it will be acted on, so the no-delete default shows up
+      // as a fact about this box rather than a line in --help nobody read;
+      // `deletes` says which it is.
+      deletes:          raw.deletes !== false,
+      leftover:         built.leftover.slice(0, PUSH_DELETE_SAMPLE),
+      leftover_count:   built.leftover.length,
+      // Computed from the full list, not the sample, so the summary is a fact
+      // about the push rather than about the first 200 paths of it.
+      leftover_rollup:  pushDeleteRollup(built.leftover, PUSH_ROLLUP_GROUPS),
+      bytes_to_send:  built.bytesToSend,
+      expires_at:     Math.floor(built.expiresAt / 1000),
+      preserved:       built.preserved.slice(0, PUSH_PRESERVED_SAMPLE),
+      preserved_count: built.preserved.length,
+      // Orphaned staging directories this plan cleaned up on its way past.
+      // Invisible to every walk, so nothing else would ever have reclaimed
+      // them; worth saying out loud when it is gigabytes.
+      reclaimed_bytes: built.reclaimedBytes,
+      accept_encoding: PUSH_ACCEPT_ENCODING,
+    });
+  } catch (err) {
+    fail(400, `plan failed: ${errorMessage(err)}`);
+  }
+});
+
+// Hand a plan back unused. The client calls this when it knows it will not
+// apply — a declined confirmation, a refusal, an aborted run — so the tree is
+// free again immediately rather than after the idle timeout. Best-effort by
+// design: losing the call costs a wait, never correctness.
+router.delete('/api/push/plan/:id', (req: express.Request, res: express.Response) => {
+  const existed = pushPlans.delete(req.params.id);
+  pushActiveApplies.delete(req.params.id);
+  res.json({ released: existed });
 });
 
 router.post('/api/push/apply', async (req: express.Request, res: express.Response) => {
@@ -3944,8 +4477,37 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   }
   const sentinelExpected = (req.headers['x-abox-push-sentinel'] as string) || '';
   if (!sentinelExpected) { res.status(400).json({ error: 'X-Abox-Push-Sentinel header required' }); return; }
+  // final=0 marks a chunk with more to come. Defaults to final, so a client
+  // that knows nothing about chunking — every client before this — sends one
+  // apply and gets the deletes and the hook exactly as it always did.
+  const isFinal = req.query.final !== '0';
 
   const target = plan.target;
+  // Serialize applies over overlapping trees: two of them promoting into one
+  // directory, one of them deleting, is the window where a concurrent push can
+  // actually destroy work. Released when the response ends, however it ends —
+  // no timeout to tune and nothing stale to clean up.
+  const busy = pushOverlapping(target, planId);
+  if (busy) {
+    res.status(409).json({ error: `another push is writing to ${busy} — wait for it to finish` });
+    return;
+  }
+  const reservation = pushActiveApplies.get(planId) ?? { target, inFlight: 0, lastAt: Date.now() };
+  reservation.inFlight += 1;
+  pushActiveApplies.set(planId, reservation);
+  // Both 'finish' and 'close' fire on a normal response, so this has to be
+  // idempotent — double-decrementing drives inFlight negative and the tree
+  // then reads as permanently busy.
+  let ended = false;
+  const endRequest = (): void => {
+    if (ended) return;
+    ended = true;
+    reservation.inFlight -= 1;
+    reservation.lastAt = Date.now();
+  };
+  res.on('finish', endRequest);
+  res.on('close', endRequest);
+
   // Same frame conversion the plan used, recomputed from the plan's own `rel`
   // so the two phases cannot disagree about what a rule applies to.
   const homePrefix = pushHomePrefix(plan.rel);
@@ -4046,11 +4608,17 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   });
 
   let extractError: Error | null = null;
+  let source: NodeJS.ReadableStream;
+  try { source = pushDecodeBody(req); }
+  catch (err) { await cleanup(); res.status(400).json({ error: errorMessage(err) }); return; }
   await new Promise<void>((resolve) => {
     extract.on('finish', () => resolve());
     extract.on('error', (err: Error) => { extractError = err; resolve(); });
+    // Both ends: a truncated upload surfaces on the request, a corrupt one on
+    // the decompressor, and either way there is no sentinel so nothing lands.
     req.on('error', (err: Error) => { extractError = err; resolve(); });
-    req.pipe(extract);
+    if (source !== req) source.on('error', (err: Error) => { extractError = err; resolve(); });
+    source.pipe(extract);
   });
 
   if (extractError) {
@@ -4091,23 +4659,35 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
     return;
   }
 
-  // Apply deletes — deepest paths first so files go before their containing
-  // dirs. Pre-compute depth once per entry rather than splitting twice per
-  // pairwise compare in the sort.
-  const deletes = plan.delete
-    .map(rel => ({ rel, segs: rel.split('/') }))
-    .sort((a, b) => b.segs.length - a.segs.length);
+  // Deletes, the repair hook and the plan itself belong to the LAST chunk.
+  //
+  // A large push arrives as several applies against one plan, each promoting
+  // what it carried. Deleting on any but the last would run the removals
+  // against a tree that is still half old — and if the client then died, the
+  // box would be left missing files that no longer exist anywhere. Same for the
+  // hook: it repairs a finished tree, not a partial one. So a non-final chunk
+  // promotes and reports, and nothing else.
   let deleted = 0;
-  for (const { rel, segs } of deletes) {
-    if (rel.startsWith('/') || segs.some(seg => seg === '..')) continue;
-    const abs = path.join(target, rel);
-    if (!abs.startsWith(target + path.sep) && abs !== target) continue;
-    try { await fs.promises.rm(abs, { recursive: true, force: true }); deleted += 1; }
-    catch (err) { console.error(`[push] delete failed rel=${rel}: ${errorMessage(err)}`); }
+  let postfix: Awaited<ReturnType<typeof runPushPostfix>> = null;
+  if (isFinal) {
+    // Deepest paths first so files go before their containing dirs.
+    // Pre-compute depth once per entry rather than splitting twice per
+    // pairwise compare in the sort.
+    const deletes = plan.delete
+      .map(rel => ({ rel, segs: rel.split('/') }))
+      .sort((a, b) => b.segs.length - a.segs.length);
+    for (const { rel, segs } of deletes) {
+      if (rel.startsWith('/') || segs.some(seg => seg === '..')) continue;
+      const abs = path.join(target, rel);
+      if (!abs.startsWith(target + path.sep) && abs !== target) continue;
+      try { await fs.promises.rm(abs, { recursive: true, force: true }); deleted += 1; }
+      catch (err) { console.error(`[push] delete failed rel=${rel}: ${errorMessage(err)}`); }
+    }
   }
 
   await cleanup();
-  pushPlans.delete(planId);
+  // The push is over: drop the plan and the tree it was holding.
+  if (isFinal) { pushPlans.delete(planId); pushActiveApplies.delete(planId); }
 
   // Hand the finished tree to the image's repair script — whole-box pushes
   // only. Replicating a box is what lands one box's env-bound config on
@@ -4117,23 +4697,23 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   // Runs after the deletes so the hook sees the final state, and its failure is
   // reported rather than propagated: the files have landed and there is nothing
   // to roll back.
-  const postfix = plan.rel === PUSH_HOME_REL
-    ? await runPushPostfix({
-        hook:    PUSH_POSTFIX_HOOK,
-        rel:     plan.rel,
-        target,
-        added:   plan.add.length,
-        updated: plan.update.length,
-        deleted,
-      })
-    : null;
+  if (isFinal && plan.rel === PUSH_HOME_REL) {
+    postfix = await runPushPostfix({
+      hook:    PUSH_POSTFIX_HOOK,
+      rel:     plan.rel,
+      target,
+      added:   plan.addCount,
+      updated: plan.updateCount,
+      deleted,
+    });
+  }
   if (postfix && postfix.code !== 0) {
     console.error(`[push] postfix hook exited ${postfix.code}: ${postfix.output}`);
   }
 
   res.json({
-    added:         plan.add.length,
-    updated:       plan.update.length,
+    added:         plan.addCount,
+    updated:       plan.updateCount,
     deleted,
     bytes_written: bytesWritten,
     files_written: filesWritten,
