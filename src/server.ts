@@ -22,6 +22,8 @@ import { emit as emitEvent, on as onEvent, readSince, getCursor, setCursor, rota
 import * as metrics from './metrics';
 import { agentOf, captureTokens, dropSession } from './agentTokens';
 import { commandBinary } from './commandBinary';
+import { loadPushIgnoreDir, compilePushIgnore, pushIgnored, PushIgnoreRule, PUSH_IGNORE_DIR as PUSH_IGNORE_DEFAULT_DIR } from './pushIgnore';
+import { runPushPostfix, PUSH_POSTFIX_HOOK as PUSH_POSTFIX_DEFAULT_HOOK } from './pushPostfix';
 
 // --- Error handling ---
 
@@ -3649,6 +3651,19 @@ const PUSH_HOME = os.homedir();
 const PUSH_PLAN_TTL_MS = 5 * 60 * 1000;
 const PUSH_MTIME_TOL_NS = 1_000_000_000; // 1s — generous for cross-fs quirks
 const PUSH_SENTINEL_ENTRY = '.abox-push-sentinel';
+const PUSH_PRESERVED_SAMPLE = 50; // cap on the preserved-path list in a plan response
+const PUSH_MAX_SKIP_PATTERNS = 1000; // cap on the client-supplied skip list
+// `rel` for a whole-box push, where the pushed directory *is* $HOME.
+const PUSH_HOME_REL = '.';
+// Where the box's deny rules live. Overridable only from the environment wsh
+// was launched with — i.e. by the image or the box owner, the same trust level
+// as the rule files themselves. Deliberately not reachable from a request: the
+// point of the rules is that a pushing client cannot opt out of them.
+const PUSH_IGNORE_DIR = process.env.ABOX_PUSH_IGNORE_DIR || PUSH_IGNORE_DEFAULT_DIR;
+// Image-owned repair script, run once a push has finished writing. Same
+// environment-only override as the rule directory, and for the same reason:
+// the box owner may relocate it, a pushing client may not.
+const PUSH_POSTFIX_HOOK = process.env.ABOX_PUSH_POSTFIX_HOOK || PUSH_POSTFIX_DEFAULT_HOOK;
 
 type PushType = 'file' | 'dir' | 'symlink';
 
@@ -3664,10 +3679,17 @@ interface PushEntry {
 
 interface PushPlan {
   target: string;
+  // Target's path relative to $HOME. Deny rules are written against $HOME, so
+  // apply needs this to reconstruct the same path form plan matched on.
+  rel: string;
   add: string[];
   update: string[];
   delete: string[];
   expiresAt: number;
+  // The deny rules this plan was computed with. Captured at plan time rather
+  // than re-read at apply time so the two phases can't disagree if the image's
+  // rule files change underneath a push in flight.
+  deny: PushIgnoreRule[];
 }
 
 const pushPlans = new Map<string, PushPlan>();
@@ -3678,14 +3700,64 @@ setInterval(() => {
 
 /** Validate client-supplied target. Must canonicalize strictly under $HOME, equal
  *  $HOME/<rel>, and rel must be relative with no `..` components. */
-function pushSafeTarget(target: string, rel: string): string | null {
+function pushSafeTarget(target: string, rel: string, home: boolean): string | null {
   if (!target || !target.startsWith('/')) return null;
+  if (home) {
+    // Whole-box push. Reachable only when the client asks for it by name, so a
+    // client that miscomputes `rel` still cannot slide into syncing over $HOME
+    // by accident — which is what the blanket rejection below existed to stop.
+    return rel === PUSH_HOME_REL && path.resolve(target) === PUSH_HOME ? PUSH_HOME : null;
+  }
   if (!rel || rel.startsWith('/') || rel.split('/').some(s => s === '..' || s === '')) return null;
   const cleaned = path.resolve(target);
   if (cleaned === PUSH_HOME) return null;
   if (!cleaned.startsWith(PUSH_HOME + path.sep)) return null;
   if (path.resolve(path.join(PUSH_HOME, rel)) !== cleaned) return null;
   return cleaned;
+}
+
+// --- Path frames ---
+//
+// A push carries paths in two frames and they are easy to confuse. Manifest
+// entries, add/update/delete and tar entry names are relative to the *pushed
+// directory*; deny rules, `preserved` and the post-push hook are relative to
+// *$HOME*, because a rule like `/.trae/traecli.yaml` names a location in a box
+// rather than a location in whatever the user happened to push.
+//
+// Getting that wrong fails OPEN — the rule simply doesn't fire and nothing
+// errors — which it did twice: once matching deny against the push-root form
+// (so `cd ~/.trae && push` walked straight past every rule) and once joining
+// `${rel}/${p}` on a whole-box push (yielding './x', matching no anchored rule,
+// disarming deny on the one shape it exists for).
+//
+// So no call site chooses a frame. Every rule set — the box's and the client's
+// alike — is written against $HOME and matched through pushRuleHit below;
+// callers hand over the path exactly as the manifest or the tar names it, and
+// the whole-box special case lives in one expression.
+
+/**
+ * Prefix turning a push-root-relative path into its $HOME-relative form. Empty
+ * for a whole-box push, where the two frames coincide. Computed once per push.
+ */
+function pushHomePrefix(rel: string): string {
+  return rel === PUSH_HOME_REL ? '' : rel + '/';
+}
+
+/**
+ * The one place a path is converted for matching. Both rule sets — the box's
+ * deny rules and the client's skip list — are written against $HOME, so both
+ * come through here and no call site ever picks a frame. Returns the matched
+ * path together with the rule that matched it, or null.
+ */
+function pushRuleHit(
+  rules: PushIgnoreRule[],
+  homePrefix: string,
+  local: string,
+  isDir: boolean,
+): { home: string; rule: PushIgnoreRule } | null {
+  const home = homePrefix + local;
+  const rule = pushIgnored(rules, home, isDir);
+  return rule ? { home, rule } : null;
 }
 
 /** Walk `dir` recursively. Treat missing as empty. Skip any .abox-push-staging-*. */
@@ -3753,12 +3825,24 @@ function pushDiff(client: PushEntry[], server: PushEntry[], checksum: boolean): 
 }
 
 router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: express.Request, res: express.Response) => {
-  const body = req.body as { rel?: string; target?: string; checksum?: boolean; entries?: PushEntry[] };
+  const body = req.body as { rel?: string; target?: string; checksum?: boolean; entries?: PushEntry[]; skip?: string[]; home?: boolean };
   if (!body || typeof body.rel !== 'string' || typeof body.target !== 'string' || !Array.isArray(body.entries)) {
     res.status(400).json({ error: 'rel, target, and entries are required' });
     return;
   }
-  const target = pushSafeTarget(body.target, body.rel);
+  const skipPatterns = body.skip ?? [];
+  if (!Array.isArray(skipPatterns) || skipPatterns.some(s => typeof s !== 'string')) {
+    res.status(400).json({ error: 'skip must be an array of strings' });
+    return;
+  }
+  // Each pattern becomes a regex, and a long list of `**`-heavy ones is a way
+  // to make the box do pointless work. The client is authenticated and it is
+  // the box owner's own foot, but a bound costs nothing.
+  if (skipPatterns.length > PUSH_MAX_SKIP_PATTERNS) {
+    res.status(400).json({ error: `too many skip patterns (${skipPatterns.length} > ${PUSH_MAX_SKIP_PATTERNS})` });
+    return;
+  }
+  const target = pushSafeTarget(body.target, body.rel, body.home === true);
   if (!target) {
     res.status(400).json({ error: 'target must be inside $HOME and match rel' });
     return;
@@ -3766,23 +3850,87 @@ router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: expre
   let serverEntries: PushEntry[];
   try { serverEntries = await pushWalk(target); }
   catch (err) { res.status(500).json({ error: `walk failed: ${errorMessage(err)}` }); return; }
-  const { add, update, del } = pushDiff(body.entries, serverEntries, !!body.checksum);
+
+  // Deny filter, applied symmetrically to BOTH sides of the diff before it
+  // runs. Filtering only the client side would still leave the target's copy
+  // absent from the incoming manifest, and pushDiff's leftover pass would put
+  // it in `delete` — wiping the very file the rule protects. Filtering both
+  // makes the path simply not exist as far as the diff is concerned, so
+  // pushDiff itself needs no knowledge of any of this.
+  // Rules are written against $HOME (`/.trae/traecli.yaml` means ~/.trae/…),
+  // but manifest paths are relative to the pushed directory. Match on the
+  // $HOME-relative form or the rules are trivially bypassed by pushing from
+  // further down: `cd ~/.trae && abox-cli push` sends a manifest whose only
+  // entry is `traecli.yaml`, which no anchored rule can match.
+  const deny = loadPushIgnoreDir(PUSH_IGNORE_DIR);
+  const homePrefix = pushHomePrefix(body.rel);
+  const preserved = new Set<string>();      // $HOME-relative, deny only, reported back
+  const heldLocal = new Set<string>();      // push-root-relative, deny ∪ skip, guards deletes
+
+  const denied = (e: PushEntry): boolean => {
+    const hit = pushRuleHit(deny, homePrefix, e.path, e.type === 'dir');
+    if (!hit) return false;
+    preserved.add(hit.home);
+    heldLocal.add(e.path);
+    return true;
+  };
+
+  // The client's own skip list (~/.aboxignore, --exclude), shipped with the
+  // manifest. It only ever filters the TARGET's walk, never the manifest — the
+  // client already left those paths out. Without this the diff sees them
+  // present on the box and missing upstream and schedules them for deletion,
+  // so "ignore node_modules" would mean "delete node_modules on the box" —
+  // the opposite of what anyone writing that line intends.
+  //
+  // Unlike deny, these patterns are anchored to the pushed directory, which is
+  // the same frame the target walk reports in. No `rel` prefix here.
+  const skip = compilePushIgnore(skipPatterns.join('\n'), 'client skip list');
+  const skipped = (e: PushEntry): boolean => {
+    if (!pushRuleHit(skip, homePrefix, e.path, e.type === 'dir')) return false;
+    heldLocal.add(e.path);
+    return true;
+  };
+
+  const clientEntries = body.entries.filter(e => !denied(e));
+  const targetEntries = serverEntries.filter(e => !denied(e) && !skipped(e));
+
+  const { add, update, del } = pushDiff(clientEntries, targetEntries, !!body.checksum);
+
+  // Deleting a directory is recursive (`fs.rm({recursive:true})` in apply), so
+  // a directory still holding a held-back path has to stay even though the
+  // client doesn't have it. Without this the rules hold for overwrites and
+  // fail silently for deletes: a target with only ~/.trae/traecli.yaml left in
+  // it would lose the file along with its parent. Covers skip as well as deny —
+  // an excluded node_modules is no use if its project directory is removed.
+  const heldAncestors = new Set<string>();
+  for (const p of heldLocal) {
+    const segs = p.split('/');
+    for (let i = 1; i < segs.length; i++) heldAncestors.add(segs.slice(0, i).join('/'));
+  }
+  const deletes = del.filter(p => !heldAncestors.has(p));
+
   const wantSet = new Set([...add, ...update]);
   let bytesToSend = 0;
-  for (const e of body.entries) {
+  for (const e of clientEntries) {
     if (e.type === 'file' && wantSet.has(e.path)) bytesToSend += e.size ?? 0;
   }
   const planId = crypto.randomUUID();
   const expiresAt = Date.now() + PUSH_PLAN_TTL_MS;
-  pushPlans.set(planId, { target, add, update, delete: del, expiresAt });
+  pushPlans.set(planId, { target, rel: body.rel, add, update, delete: deletes, expiresAt, deny });
+  const preservedList = Array.from(preserved).sort();
   res.json({
-    plan_id:       planId,
+    plan_id:         planId,
     target,
     add,
     update,
-    delete:        del,
-    bytes_to_send: bytesToSend,
-    expires_at:    Math.floor(expiresAt / 1000),
+    delete:          deletes,
+    bytes_to_send:   bytesToSend,
+    expires_at:      Math.floor(expiresAt / 1000),
+    // What the target refused to let this push touch, in either direction.
+    // Reported rather than predicted client-side: the client may be older than
+    // the rule files, and this way the preview shows what actually happened.
+    preserved:       preservedList.slice(0, PUSH_PRESERVED_SAMPLE),
+    preserved_count: preservedList.length,
   });
 });
 
@@ -3798,6 +3946,9 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   if (!sentinelExpected) { res.status(400).json({ error: 'X-Abox-Push-Sentinel header required' }); return; }
 
   const target = plan.target;
+  // Same frame conversion the plan used, recomputed from the plan's own `rel`
+  // so the two phases cannot disagree about what a rule applies to.
+  const homePrefix = pushHomePrefix(plan.rel);
   const staging = path.join(target, `.abox-push-staging-${crypto.randomUUID()}`);
   try { await fs.promises.mkdir(staging, { recursive: true }); }
   catch (err) { res.status(500).json({ error: `mkdir staging: ${errorMessage(err)}` }); return; }
@@ -3832,6 +3983,17 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
     if (entryAbs !== staging && !entryAbs.startsWith(staging + path.sep)) {
       stream.resume();
       next(new Error(`tar entry escapes staging: ${name}`));
+      return;
+    }
+    // apply does not otherwise check entry names against plan.add ∪ plan.update,
+    // so the plan-time deny filter alone would not stop a client that tars a
+    // denied path anyway. A correct client never can — the plan it was handed
+    // cannot name one — which makes this fail-closed rather than merely
+    // defensive: reaching it means a bug or a deliberate bypass.
+    const denied = pushRuleHit(plan.deny, homePrefix, cleanName, header.type === 'directory');
+    if (denied) {
+      stream.resume();
+      next(new Error(`tar entry is denied by ${denied.rule.source} (${denied.rule.pattern}): ${name}`));
       return;
     }
 
@@ -3947,6 +4109,28 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   await cleanup();
   pushPlans.delete(planId);
 
+  // Hand the finished tree to the image's repair script — whole-box pushes
+  // only. Replicating a box is what lands one box's env-bound config on
+  // another; a push of ~/workspace/foo does not, and shouldn't pay for a
+  // network probe on every sync.
+  //
+  // Runs after the deletes so the hook sees the final state, and its failure is
+  // reported rather than propagated: the files have landed and there is nothing
+  // to roll back.
+  const postfix = plan.rel === PUSH_HOME_REL
+    ? await runPushPostfix({
+        hook:    PUSH_POSTFIX_HOOK,
+        rel:     plan.rel,
+        target,
+        added:   plan.add.length,
+        updated: plan.update.length,
+        deleted,
+      })
+    : null;
+  if (postfix && postfix.code !== 0) {
+    console.error(`[push] postfix hook exited ${postfix.code}: ${postfix.output}`);
+  }
+
   res.json({
     added:         plan.add.length,
     updated:       plan.update.length,
@@ -3954,6 +4138,10 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
     bytes_written: bytesWritten,
     files_written: filesWritten,
     took_ms:       Date.now() - t0,
+    // Present only when a hook ran. `output` is one line per repair by
+    // convention; abox-cli echoes it so the hook owns its own reporting and
+    // wsh never has to know what a repair means.
+    ...(postfix ? { postfix } : {}),
   });
 });
 
