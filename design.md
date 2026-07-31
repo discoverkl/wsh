@@ -36,7 +36,7 @@ owner connects   --> PTY spawned, added to sessions map
 writer disconnects --> promote next owner/writer peer
                       if none: scheduleCleanup()
   pinned=true    --> no timer, lives until PTY exits or manual close
-  pinned=false   --> SESSION_TTL (10 min), then SIGTERM -> SIGKILL
+  pinned=false   --> SESSION_TTL (1h), then SIGTERM -> SIGKILL
 any peer reconnects --> cancel cleanup timer
 PTY exits        --> all peers closed, session deleted immediately
 ```

@@ -43,7 +43,7 @@ Only one writer is active at a time. A new writer displaces the current one, who
 
 ## Session lifetime
 
-Sessions are cleaned up 10 minutes after the last writer disconnects. Click the **pin button** (owner only) to keep a session alive indefinitely — useful for long-running processes you want to check back on. Unpinning restarts the 10-minute timer. Pinned state is in-memory only and does not survive a server restart.
+Sessions are cleaned up an hour after the last writer disconnects — long enough that a coding agent left running in a tab finishes its task even if you close the browser. Click the **pin button** (owner only) to keep a session alive indefinitely — useful for long-running processes you want to check back on. Unpinning restarts the timer. Pinned state is in-memory only and does not survive a server restart.
 
 ## Security
 
