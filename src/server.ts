@@ -2263,6 +2263,11 @@ interface AppConfig {
   skill?: string;
   slashPrefix?: boolean;
   type?: 'pty' | 'web' | 'job';
+  /** type:web only — idle TTL after the last viewer leaves (e.g. "30m", "2h").
+   *  Deliberately not honored for pty: a TUI session holds a live terminal and
+   *  marks the box busy, so config shouldn't be able to keep one alive for days
+   *  — it always uses SESSION_TTL and has to be pinned to outlive that. Jobs
+   *  never idle-reap at all. loadApps() warns when a non-web app sets it. */
   timeout?: string;
   access?: 'public' | 'private';
   stripPrefix?: boolean;
@@ -2414,10 +2419,18 @@ function loadApps(warnings?: string[]): Record<string, AppConfig> {
   // Warn about public PTY apps — anyone the gateway forwards can run their
   // command with full keyboard input. Checked on the merged result (access and
   // command may arrive from different layers), so it can't be done in mergeApps.
+  // Same for `timeout` on a non-web app: `type` and `timeout` can land from
+  // different layers, so the resolved config is the only place to judge it.
   if (warnings) {
     for (const [key, app] of Object.entries(apps)) {
       if (isPublicPtyConfig(app)) {
         warnings.push(`App "${key}" is public + PTY — anyone the gateway forwards can run its command with full keyboard input. Make sure it's sandboxed; never expose a shell.`);
+      }
+      const type = app.type ?? 'pty';
+      if (app.timeout && type !== 'web') {
+        warnings.push(type === 'job'
+          ? `App "${key}" sets "timeout: ${app.timeout}", which applies to type: web only — it is ignored here. A job runs until its command exits and is never idle-reaped.`
+          : `App "${key}" sets "timeout: ${app.timeout}", which applies to type: web only — it is ignored here. A TUI session always idle-reaps ${SESSION_TTL / 60000} minutes after the last viewer leaves; pin the session to keep it alive longer.`);
       }
     }
   }

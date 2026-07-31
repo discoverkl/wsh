@@ -41,6 +41,8 @@ any peer reconnects --> cancel cleanup timer
 PTY exits        --> all peers closed, session deleted immediately
 ```
 
+The per-app `timeout` field is **not** honored here — a TUI session holds a live terminal and marks the box busy, so config isn't allowed to keep one open indefinitely. Pinning is the deliberate escape hatch, and it's an owner action rather than a config setting. A non-web app that sets `timeout` draws a config warning at startup and in `GET /api/apps` (see `loadApps`), so the field fails loudly rather than being dropped on the floor.
+
 ### Web Sessions
 
 ```
