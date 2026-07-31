@@ -1476,7 +1476,15 @@ rotateEvents();
 
 const MAX_SCROLLBACK     = 5 * 1024 * 1024; // 5 MB
 const MAX_SCROLLBACK_WEB = 512 * 1024;      // 512 KB (web app logs)
-const SESSION_TTL     = 10 * 60 * 1000;     // 10 minutes
+// Idle TTL after the last peer disconnects. TUI sessions used to reap at 10
+// minutes, which predates agent CLIs: a `claude`/`codex`/`traecli` tab that is
+// mid-task keeps working with nobody attached, and closing the browser killed
+// it well before it finished. 90 minutes clears a long unattended agent run
+// with room to spare — deliberately more than the hour web apps get, since a
+// web app is a server you can restart at no cost and an interrupted agent run
+// is lost work. Note the per-app `timeout` field only reaches web sessions
+// (see spawnWebSession) — a TUI session that must outlive this has to be pinned.
+const SESSION_TTL     = 90 * 60 * 1000;     // 90 minutes
 const WEB_SESSION_TTL = 60 * 60 * 1000;     // 1 hour
 const PING_INTERVAL = 30_000;           // 30 seconds
 const PONG_TIMEOUT  = 10_000;           // 10 seconds
@@ -2100,6 +2108,13 @@ function parseTimeout(str: string): number {
   }
 }
 
+/** Idle TTL a session would be reaped after — the per-app `timeout` if one was
+ *  configured, else the per-type default. Also what the ws-close logs quote, so
+ *  the countdown they print is the one scheduleCleanup actually arms. */
+function effectiveTTL(session: Session): number {
+  return session.timeoutMs ?? (session.appType === 'web' ? WEB_SESSION_TTL : SESSION_TTL);
+}
+
 function scheduleCleanup(id: string, session: Session): void {
   if (session.cleanupTimer !== null) {
     clearTimeout(session.cleanupTimer);
@@ -2107,7 +2122,7 @@ function scheduleCleanup(id: string, session: Session): void {
   session.cleanupTimer = null;
   // Pinned sessions and daemons live until the process exits or a manual close.
   if (session.pinned || session.daemon) return;
-  const ttl = session.timeoutMs ?? (session.appType === 'web' ? WEB_SESSION_TTL : SESSION_TTL);
+  const ttl = effectiveTTL(session);
   session.cleanupTimer = setTimeout(() => {
     console.log(`[session ${id}] TTL expired`);
     // No process to kill (e.g. pending session that never received a resize)
@@ -5463,12 +5478,12 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
         console.log(`[session ${id}] idle writer promoted to active writer`);
       } else {
         scheduleCleanup(id, currentSession);
-        console.log(`[session ${id}] writer detached, ${currentSession.pinned ? 'session pinned (no timeout)' : `cleanup in ${SESSION_TTL / 1000}s`}`);
+        console.log(`[session ${id}] writer detached, ${currentSession.pinned ? 'session pinned (no timeout)' : `cleanup in ${effectiveTTL(currentSession) / 1000}s`}`);
       }
     } else if (currentSession.peers.size === 0 && currentSession.writer === null) {
       // Last viewer left and no writer — ensure cleanup is scheduled.
       scheduleCleanup(id, currentSession);
-      console.log(`[session ${id}] last peer left, ${currentSession.pinned ? 'session pinned (no timeout)' : `cleanup in ${SESSION_TTL / 1000}s`}`);
+      console.log(`[session ${id}] last peer left, ${currentSession.pinned ? 'session pinned (no timeout)' : `cleanup in ${effectiveTTL(currentSession) / 1000}s`}`);
     }
   });
 
