@@ -3693,6 +3693,7 @@ const PUSH_PRESERVED_SAMPLE = 50; // cap on the preserved-path list in a plan re
 const PUSH_DELETE_SAMPLE = 200;  // cap on the leftover-path list in a v2 plan response
 const PUSH_ROLLUP_GROUPS = 10;   // cap on the per-directory rollup of it
 const PUSH_MAX_SKIP_PATTERNS = 1000; // cap on the client-supplied skip list
+const PUSH_MAX_FILE_NAME = 255;      // one name component, the usual filesystem bound
 // Ceiling on a v2 manifest, in entries. Not a memory bound — v2 holds no client
 // array — but a runaway client shouldn't be able to spin the box forever.
 const PUSH_MAX_MANIFEST_ENTRIES = 20_000_000;
@@ -3758,6 +3759,9 @@ interface PushPlan {
   // Target's path relative to $HOME. Deny rules are written against $HOME, so
   // apply needs this to reconstruct the same path form plan matched on.
   rel: string;
+  // Single-file push: the one name under `target` this plan may write, or ''
+  // for an ordinary tree push. See pushFileName for what the mode changes.
+  file: string;
   // Counts, not paths. apply never reads the add/update path lists — only their
   // lengths, for its response — so keeping the arrays would hold hundreds of
   // megabytes of strings alive for the plan's whole lifetime to report two
@@ -3922,6 +3926,34 @@ function pushSafeTarget(target: string, rel: string, home: boolean): string | nu
   return cleaned;
 }
 
+/**
+ * Validate the header's `file`: a single-file push, where `target` is still the
+ * containing directory and this is the one name in it the push may touch.
+ *
+ * The mode exists because `abox-cli push ~/.zshrc` is otherwise indistinguishable
+ * from replicating a home directory. Its target is `$HOME`, so it needs
+ * `home: true` to pass pushSafeTarget, and `rel` is then `.` — which is exactly
+ * what the postfix hook keys on. Copying one file would run the box's repair
+ * script and rewrite config the push never mentioned. So the client says which
+ * kind of push it is, and the box acts on it: no hook, no deletes, and no walk
+ * of the containing directory (one lstat is the whole diff — a file in a
+ * 200k-file tree costs what a file should).
+ *
+ * A single segment, so the name cannot climb out of the directory the target
+ * check already validated. That bound is what makes relaxing anything else
+ * safe: with apply pinned to this one entry (see the extract loop), a file-mode
+ * push into `$HOME` can write `$HOME/<file>` and nothing else at all.
+ *
+ * Returns the name, '' when absent, or null when malformed.
+ */
+function pushFileName(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return '';
+  if (typeof value !== 'string') return null;
+  if (value.includes('/') || value === '.' || value === '..') return null;
+  if (value.length > PUSH_MAX_FILE_NAME) return null;
+  return value;
+}
+
 // --- Path frames ---
 //
 // A push carries paths in two frames and they are easy to confuse. Manifest
@@ -4072,6 +4104,36 @@ async function pushWalk(
   return { entries: out, staging };
 }
 
+/**
+ * The box's copy of one named entry, for a single-file push — pushWalk's
+ * per-entry shape without the directory it walks.
+ *
+ * Nothing hides a path here. The tree walk applies deny and skip so the diff
+ * doesn't read a hidden file as "deleted upstream", but a one-file push deletes
+ * nothing, and the client's entry is filtered by deny in pushBuildPlan either
+ * way — so the only thing hiding this one could change is whether the push
+ * needlessly re-uploads a file the box already has.
+ */
+async function pushStatOne(dir: string, name: string): Promise<PushEntry | undefined> {
+  const abs = path.join(dir, name);
+  let st: fs.Stats;
+  try { st = await fs.promises.lstat(abs); } catch { return undefined; }
+  if (st.isSymbolicLink()) {
+    let linkTarget = '';
+    try { linkTarget = await fs.promises.readlink(abs); } catch {}
+    return { path: name, type: 'symlink', target: linkTarget };
+  }
+  if (st.isDirectory()) return { path: name, type: 'dir' };
+  if (!st.isFile()) return undefined; // sockets / devices / FIFOs
+  return {
+    path:     name,
+    type:     'file',
+    size:     st.size,
+    mtime_ns: Math.round(st.mtimeMs * 1e6),
+    mode:     st.mode & 0o777,
+  };
+}
+
 /** One client entry against the target's copy. null means "already identical". */
 function pushCompare(c: PushEntry, s: PushEntry | undefined, checksum: boolean): 'add' | 'update' | null {
   if (!s) return 'add';
@@ -4181,6 +4243,7 @@ async function pushBuildPlan(opts: {
   deletes: boolean;      // false → report the leftovers instead of removing them
   sweep: boolean;        // false for a dry run, which must change nothing
   deny: PushIgnoreRule[];
+  file: string;          // single-file push: the one name under target, else ''
 }): Promise<PushPlanBuild> {
   const homePrefix = pushHomePrefix(opts.rel);
   const preserved = new Set<string>();  // $HOME-relative, deny only, reported back
@@ -4205,11 +4268,31 @@ async function pushBuildPlan(opts: {
     return true;
   };
 
-  const { entries: serverEntries, staging } = await pushWalk(
-    opts.target,
-    (p, isDir) => denied(p, isDir) || skipped(p, isDir),
-  );
-  const reclaimedBytes = opts.sweep ? await pushSweepStaging(staging) : 0;
+  // A single-file push diffs one path, so it neither walks the containing
+  // directory nor sweeps the staging directories such a walk would have found.
+  // Both are the tree push's business: the sweep is a side effect of having
+  // read every entry anyway, and paying for a 200k-entry readdir to answer a
+  // question about one file is the cost this mode exists to avoid.
+  let serverEntries: PushEntry[];
+  let reclaimedBytes = 0;
+  if (opts.file) {
+    const one = await pushStatOne(opts.target, opts.file);
+    // Promote renames the staged file over the target, which fails on a
+    // directory — and a mode that never deletes has nothing that could clear
+    // the way. Refused here so it reads as a fact about the box rather than as
+    // an ENOTEMPTY from the far end of an upload.
+    if (one?.type === 'dir') {
+      throw new Error(`${opts.file} is a directory on the box — a single-file push cannot replace it`);
+    }
+    serverEntries = one ? [one] : [];
+  } else {
+    const walked = await pushWalk(
+      opts.target,
+      (p, isDir) => denied(p, isDir) || skipped(p, isDir),
+    );
+    serverEntries = walked.entries;
+    reclaimedBytes = opts.sweep ? await pushSweepStaging(walked.staging) : 0;
+  }
   const sMap = new Map<string, PushEntry>();
   for (const e of serverEntries) sMap.set(e.path, e);
 
@@ -4232,6 +4315,12 @@ async function pushBuildPlan(opts: {
     if (manifestCount > PUSH_MAX_MANIFEST_ENTRIES) {
       throw new Error(`manifest exceeds ${PUSH_MAX_MANIFEST_ENTRIES} entries`);
     }
+    // File mode's whole safety argument is that the plan can name exactly one
+    // path, so the manifest has to say so too — a header claiming one file and
+    // a manifest carrying a tree is a client to disbelieve, not to reconcile.
+    if (opts.file && (i > 0 || c.path !== opts.file)) {
+      throw new Error(`single-file push must carry exactly one entry named ${opts.file}`);
+    }
     if (denied(c.path, c.type === 'dir')) continue;
     const s = sMap.get(c.path);
     if (s) sMap.delete(c.path);
@@ -4248,6 +4337,11 @@ async function pushBuildPlan(opts: {
     }
     if (c.type === 'file') bytesToSend += c.size ?? 0;
   }
+  // The in-loop check above can only fire on an entry that arrived; a manifest
+  // with none at all would otherwise plan a file push carrying no file.
+  if (opts.file && manifestCount !== 1) {
+    throw new Error(`single-file push must carry exactly one entry named ${opts.file}`);
+  }
 
   // Deleting a directory is recursive (`fs.rm({recursive:true})` in apply), so
   // a directory still holding a held-back path has to stay even though the
@@ -4260,7 +4354,11 @@ async function pushBuildPlan(opts: {
     const segs = p.split('/');
     for (let i = 1; i < segs.length; i++) heldAncestors.add(segs.slice(0, i).join('/'));
   }
-  const leftover = Array.from(sMap.keys()).filter(p => !heldAncestors.has(p));
+  // "What the box holds that this push did not send" is every sibling of the
+  // one file, which is not a thing anyone asked about — and is the list a
+  // delete would work from. Empty in file mode, so the answer cannot depend on
+  // the caller having remembered to turn deletes off.
+  const leftover = opts.file ? [] : Array.from(sMap.keys()).filter(p => !heldAncestors.has(p));
 
   // A plan has to outlive the upload it describes, and a chunked apply keeps
   // coming back to it, so the allowance follows the payload rather than a flat
@@ -4308,10 +4406,11 @@ function pushDeleteRollup(paths: string[], limit: number): { dir: string; count:
 }
 
 /** Record a freshly-built plan so apply can find it. */
-function pushRegisterPlan(built: PushPlanBuild, target: string, rel: string, deletes: boolean, deny: PushIgnoreRule[]): void {
+function pushRegisterPlan(built: PushPlanBuild, target: string, rel: string, deletes: boolean, deny: PushIgnoreRule[], file: string): void {
   pushPlans.set(built.planId, {
     target,
     rel,
+    file,
     addCount:    built.addCount,
     updateCount: built.updateCount,
     // Only a push that asked to delete carries the list into apply; otherwise
@@ -4339,11 +4438,13 @@ function pushResolveTarget(
 
 /** Shared validation of the small header both plan versions carry. */
 function pushCheckHeader(
-  hdr: { rel?: unknown; target?: unknown; skip?: unknown; home?: unknown },
-): { error: string } | { rel: string; target: string; skip: string[]; home: boolean } {
+  hdr: { rel?: unknown; target?: unknown; skip?: unknown; home?: unknown; file?: unknown },
+): { error: string } | { rel: string; target: string; skip: string[]; home: boolean; file: string } {
   if (!hdr || typeof hdr.rel !== 'string' || typeof hdr.target !== 'string') {
     return { error: 'rel and target are required' };
   }
+  const file = pushFileName(hdr.file);
+  if (file === null) return { error: 'file must be a single path segment' };
   const skip = hdr.skip ?? [];
   if (!Array.isArray(skip) || skip.some(s => typeof s !== 'string')) {
     return { error: 'skip must be an array of strings' };
@@ -4354,7 +4455,7 @@ function pushCheckHeader(
   if (skip.length > PUSH_MAX_SKIP_PATTERNS) {
     return { error: `too many skip patterns (${skip.length} > ${PUSH_MAX_SKIP_PATTERNS})` };
   }
-  return { rel: hdr.rel, target: hdr.target, skip: skip as string[], home: hdr.home === true };
+  return { rel: hdr.rel, target: hdr.target, skip: skip as string[], home: hdr.home === true, file };
 }
 
 // v1: the whole manifest as one JSON body. Kept for clients older than the
@@ -4368,6 +4469,14 @@ router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: expre
   }
   const hdr = pushCheckHeader(body);
   if ('error' in hdr) { res.status(400).json(hdr); return; }
+  // v1 deletes unconditionally — the `deletes` header is v2's, and this handler
+  // has no way to express "keep what you have". A single-file push is a
+  // manifest of one entry, so honouring it here would take a request to copy
+  // one file and remove every sibling on the box.
+  if (hdr.file) {
+    res.status(400).json({ error: 'single-file push requires /api/push/plan2' });
+    return;
+  }
   const resolved = pushResolveTarget(hdr, true);
   if ('error' in resolved) { res.status(resolved.code).json({ error: resolved.error }); return; }
   const target = resolved.target;
@@ -4384,10 +4493,11 @@ router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: expre
       deletes:      true,
       sweep:        true,
       deny,
+      file:         '',
     });
   } catch (err) { res.status(500).json({ error: `plan failed: ${errorMessage(err)}` }); return; }
 
-  pushRegisterPlan(built, target, hdr.rel, true, deny);
+  pushRegisterPlan(built, target, hdr.rel, true, deny, '');
   res.json({
     plan_id:       built.planId,
     target,
@@ -4417,7 +4527,7 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     const lines = pushReadNdjson(req);
     const first = await lines.next();
     if (first.done) { fail(400, 'empty body: expected a header line'); return; }
-    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; deletes?: unknown; dry_run?: unknown };
+    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; deletes?: unknown; dry_run?: unknown; file?: unknown };
     const hdr = pushCheckHeader(raw);
     if ('error' in hdr) { fail(400, hdr.error); return; }
     // A dry run neither writes nor deletes, so it has nothing to conflict with.
@@ -4430,6 +4540,12 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     const entries = (async function* () {
       for await (const v of lines) yield pushParseEntry(v);
     })();
+    // A single-file push never deletes, whatever the header says. The mode's
+    // safety rests on the box writing one named path and touching nothing else,
+    // and that must not be one `deletes: true` away from removing every sibling
+    // of the file — least of all in `$HOME`, the one directory this mode is
+    // allowed into that a subdirectory push is not.
+    const deletes = raw.deletes !== false && !hdr.file;
     const built = await pushBuildPlan({
       target,
       rel:          hdr.rel,
@@ -4437,17 +4553,18 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
       skipPatterns: hdr.skip,
       entries,
       collectPaths: false,
-      deletes:      raw.deletes !== false,
+      deletes,
       // A dry run reports what a push would do and touches nothing, which has
       // to include not quietly reclaiming disk on the way past.
       sweep:        !dryRun,
       deny,
+      file:         hdr.file,
     });
 
     // A dry run reserves nothing. Registering it would hold the tree against
     // other pushes for the idle timeout, so `push -n ~` followed by `push ~` —
     // the most natural sequence there is — would answer 409.
-    if (!dryRun) pushRegisterPlan(built, target, hdr.rel, raw.deletes !== false, deny);
+    if (!dryRun) pushRegisterPlan(built, target, hdr.rel, deletes, deny, hdr.file);
     sent = true;
     res.json({
       plan_id:       dryRun ? '' : built.planId,
@@ -4464,7 +4581,12 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
       // whether or not it will be acted on, so the no-delete default shows up
       // as a fact about this box rather than a line in --help nobody read;
       // `deletes` says which it is.
-      deletes:          raw.deletes !== false,
+      deletes,
+      // Echoed so the client can tell a box that understood the mode from one
+      // that ignored an unknown header field. The difference matters: an older
+      // box would have taken `push ~/.zshrc` for a whole-box push and run the
+      // repair hook, so the client refuses rather than guessing.
+      ...(hdr.file ? { file: hdr.file } : {}),
       leftover:         built.leftover.slice(0, PUSH_DELETE_SAMPLE),
       leftover_count:   built.leftover.length,
       // Computed from the full list, not the sample, so the summary is a fact
@@ -4584,6 +4706,15 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
     if (denied) {
       stream.resume();
       next(new Error(`tar entry is denied by ${denied.rule.source} (${denied.rule.pattern}): ${name}`));
+      return;
+    }
+    // The one place apply *does* check a name against its plan. A file-mode
+    // plan may be targeted at $HOME, where the ordinary guard is that a client
+    // has to ask for a whole-box push by name — so what makes that safe is this
+    // pin: the body can carry the declared file and nothing else.
+    if (plan.file && cleanName !== plan.file) {
+      stream.resume();
+      next(new Error(`single-file push may only carry ${plan.file}, got: ${name}`));
       return;
     }
 
@@ -4725,7 +4856,13 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   // Runs after the deletes so the hook sees the final state, and its failure is
   // reported rather than propagated: the files have landed and there is nothing
   // to roll back.
-  if (isFinal && plan.rel === PUSH_HOME_REL) {
+  //
+  // Not for a single file, even though `push ~/.zshrc` reaches here with the
+  // same rel and target a whole-box push has. The hook repairs env-bound config
+  // across a box replication; copying one file is not that, and rewriting
+  // ~/.trae/traecli.yaml because someone sent a dotfile is a side effect on
+  // something they never mentioned.
+  if (isFinal && plan.rel === PUSH_HOME_REL && !plan.file) {
     postfix = await runPushPostfix({
       hook:    PUSH_POSTFIX_HOOK,
       rel:     plan.rel,
