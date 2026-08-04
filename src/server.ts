@@ -3697,6 +3697,53 @@ const PUSH_MAX_FILE_NAME = 255;      // one name component, the usual filesystem
 // Ceiling on a v2 manifest, in entries. Not a memory bound — v2 holds no client
 // array — but a runaway client shouldn't be able to spin the box forever.
 const PUSH_MAX_MANIFEST_ENTRIES = 20_000_000;
+// A file bigger than this is the one a client may cut into ranges, and so the
+// only one worth stat-ing for a leftover partial when planning. It does not
+// have to match the client's chunk size; a smaller value here only means
+// offering resume information nobody asked for.
+const PUSH_RANGE_MIN_BYTES = 256 * 1024 * 1024;
+// PAX keys carrying a slice's place in its file. Extended headers rather than a
+// mangled entry name, so the name stays the destination path and every existing
+// check on it keeps applying unchanged.
+const PUSH_RANGE_OFF_KEY = 'ABOX.range.off';
+const PUSH_RANGE_TOTAL_KEY = 'ABOX.range.total';
+// Suffix of the file a ranged upload accumulates into before it is renamed over
+// the destination. The total rides in the name so a source that changed size
+// between runs cannot resume onto a prefix of the old one: a different total is
+// simply a different accumulator, and the stale one is swept when planning.
+const PUSH_PARTIAL_SUFFIX = '.abox-partial-';
+
+/** Name of the accumulator a ranged upload of `total` bytes appends into. */
+function pushPartialName(base: string, total: number): string {
+  return `${base}${PUSH_PARTIAL_SUFFIX}${total}`;
+}
+
+/** True for those accumulators, which belong to no tree but this one. */
+function pushIsPartial(name: string): boolean {
+  const i = name.lastIndexOf(PUSH_PARTIAL_SUFFIX);
+  return i > 0 && /^\d+$/.test(name.slice(i + PUSH_PARTIAL_SUFFIX.length));
+}
+
+/**
+ * The range a tar entry declares, or null for the ordinary whole-file entry
+ * that every push carried before ranges existed.
+ *
+ * Both keys or neither: a half-declared range is a client bug, and guessing the
+ * missing half would write bytes at an offset nobody chose.
+ */
+function pushEntryRange(header: TarHeaders): { off: number; total: number } | null {
+  const pax = (header as { pax?: Record<string, string> }).pax;
+  if (!pax) return null;
+  const rawOff = pax[PUSH_RANGE_OFF_KEY];
+  const rawTotal = pax[PUSH_RANGE_TOTAL_KEY];
+  if (rawOff == null && rawTotal == null) return null;
+  const off = Number(rawOff);
+  const total = Number(rawTotal);
+  if (!Number.isSafeInteger(off) || !Number.isSafeInteger(total) || off < 0 || total < 0 || off > total) {
+    throw new Error(`bad range header on ${header.name}: off=${rawOff} total=${rawTotal}`);
+  }
+  return { off, total };
+}
 // zstd landed in Node 22.15 / 23.8, and @types/node here predates it. Probed
 // rather than assumed for a better reason than the types, though: a released
 // wsh bundles its own Node runtime, so what this file was compiled against says
@@ -4047,6 +4094,11 @@ async function pushWalk(
     for (let i = 0; i < ents.length; i++) {
       const ent = ents[i];
       if (ent.name.startsWith('.abox-push-staging-')) { staging.push(path.join(abs, ent.name)); continue; }
+      // A ranged upload's accumulator. Hidden from the manifest for the same
+      // reason staging is: it is this protocol's scratch, not the user's tree.
+      // Reporting it would make the next plan want to delete it — and a
+      // resumable upload that the resume deletes is worse than none.
+      if (ent.isFile() && pushIsPartial(ent.name)) continue;
       const childRel = rel ? rel + '/' + ent.name : ent.name;
       if (ent.isDirectory()) {
         if (hide(childRel, true)) continue;
@@ -4213,6 +4265,10 @@ interface PushPlanBuild {
   expiresAt: number;
   preserved: string[];
   reclaimedBytes: number;
+  // Verified prefixes this target already holds for files the plan wants, by
+  // rel path. Only files big enough to be ranged are looked for, so the common
+  // push pays one map allocation and no stats at all.
+  partials: Record<string, number>;
 }
 
 /**
@@ -4304,6 +4360,7 @@ async function pushBuildPlan(opts: {
   let updateCount = 0;
   let bytesToSend = 0;
   let manifestCount = 0;
+  const rangeCandidates: [string, number][] = [];
 
   for await (const c of opts.entries) {
     // Position in the manifest as *received*, counted before the deny filter.
@@ -4336,6 +4393,12 @@ async function pushBuildPlan(opts: {
       if (opts.collectPaths) updatePaths.push(c.path);
     }
     if (c.type === 'file') bytesToSend += c.size ?? 0;
+    // Only a file the client could choose to range is worth asking about, and
+    // the answer is only useful while its size still matches the accumulator
+    // the last run left — which is exactly what the name encodes.
+    if (c.type === 'file' && (c.size ?? 0) > PUSH_RANGE_MIN_BYTES) {
+      rangeCandidates.push([c.path, c.size ?? 0]);
+    }
   }
   // The in-loop check above can only fire on an entry that arrived; a manifest
   // with none at all would otherwise plan a file push carrying no file.
@@ -4368,6 +4431,13 @@ async function pushBuildPlan(opts: {
     Math.max(PUSH_PLAN_TTL_MS, Math.ceil(bytesToSend / PUSH_PLAN_TTL_BYTES_PER_MS)),
   );
 
+  const partials: Record<string, number> = {};
+  for (const [rel, size] of rangeCandidates) {
+    const p = pushPartialName(path.join(opts.target, rel), size);
+    const have = await fs.promises.stat(p).then(s => s.size, () => 0);
+    if (have > 0) partials[rel] = have;
+  }
+
   return {
     planId:        crypto.randomUUID(),
     manifestCount,
@@ -4382,6 +4452,7 @@ async function pushBuildPlan(opts: {
     expiresAt:     Date.now() + ttl,
     preserved:     Array.from(preserved).sort(),
     reclaimedBytes,
+    partials,
   };
 }
 
@@ -4601,6 +4672,14 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
       // them; worth saying out loud when it is gigabytes.
       reclaimed_bytes: built.reclaimedBytes,
       accept_encoding: PUSH_ACCEPT_ENCODING,
+      // This box folds ranged slices back into whole files. A client that sees
+      // no such field must send each file in one request, because that is what
+      // every box did before this and what an old one would do with a slice:
+      // write it as the entire file.
+      accept_ranges: true,
+      // Verified prefixes left by a run that died partway, so the next one
+      // resumes instead of re-sending gigabytes it already sent.
+      ...(Object.keys(built.partials).length ? { partials: built.partials } : {}),
     });
   } catch (err) {
     fail(400, `plan failed: ${errorMessage(err)}`);
@@ -4672,6 +4751,11 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   let bytesWritten = 0;
   let filesWritten = 0;
   const t0 = Date.now();
+  // Slices staged by this apply, in arrival order. They are pulled out of
+  // staging and appended to their accumulator *after* the sentinel proves the
+  // stream was whole — so a truncated upload leaves the accumulator exactly as
+  // it found it, and the byte count the next plan reports stays honest.
+  const ranged: { rel: string; off: number; total: number; mode: number; mtime: Date | null }[] = [];
 
   extract.on('entry', (header: TarHeaders, stream: NodeJS.ReadableStream, next: (err?: Error | null) => void) => {
     // Always attach an error sink to the per-entry stream — when next(err) is
@@ -4740,6 +4824,30 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
       return;
     }
 
+    // A slice of a file too big to ride in one request. It stages exactly like
+    // any other file — same name, same checks — and is folded into its
+    // accumulator after the sentinel. What makes that safe is that the client
+    // never puts two slices of one path in a single apply, so the staged name
+    // is unambiguous.
+    let range: { off: number; total: number } | null;
+    try { range = pushEntryRange(header); }
+    catch (err) { stream.resume(); next(err as Error); return; }
+    if (range) {
+      const declared = header.size ?? 0;
+      if (range.off + declared > range.total) {
+        stream.resume();
+        next(new Error(`range past end of ${name}: ${range.off}+${declared} > ${range.total}`));
+        return;
+      }
+      ranged.push({
+        rel: cleanName,
+        off: range.off,
+        total: range.total,
+        mode: (header.mode ?? 0o644) & 0o777,
+        mtime: header.mtime instanceof Date ? header.mtime : null,
+      });
+    }
+
     // Regular file → tmp + rename for per-file atomicity within staging.
     (async () => {
       await fs.promises.mkdir(path.dirname(entryAbs), { recursive: true });
@@ -4758,7 +4866,9 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
         if (header.mtime instanceof Date) await fs.promises.utimes(tmp, header.mtime, header.mtime);
         await fs.promises.rename(tmp, entryAbs);
         bytesWritten += entryBytes;
-        filesWritten += 1;
+        // A slice is not a file. Counting one per slice would report more files
+        // written than the tree gained; the slice that completes it counts.
+        if (!range || range.off + entryBytes >= range.total) filesWritten += 1;
       } catch (err) {
         await fs.promises.unlink(tmp).catch(() => {});
         throw err;
@@ -4788,6 +4898,61 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   if (!sawSentinel) {
     await cleanup();
     res.status(400).json({ error: 'incomplete stream (sentinel missing)' });
+    return;
+  }
+
+  // Fold each staged slice into its accumulator, then take it out of staging so
+  // the promote below never sees it — a slice renamed over the destination is a
+  // truncated file, which is the one outcome this whole path exists to avoid.
+  //
+  // Ordered after the sentinel so only verified bytes are ever appended: the
+  // accumulator's length is what the next plan reports as landed, and a resume
+  // that trusts unverified bytes splices garbage into the middle of a file.
+  try {
+    for (const r of ranged) {
+      const stagePath = path.join(staging, r.rel);
+      const dstPath = path.join(target, r.rel);
+      const partPath = pushPartialName(dstPath, r.total);
+      await fs.promises.mkdir(path.dirname(dstPath), { recursive: true });
+      const have = await fs.promises.stat(partPath).then(s => s.size, () => 0);
+      if (r.off > have) {
+        throw new Error(`range for ${r.rel} starts at ${r.off} but only ${have} bytes have landed`);
+      }
+      const slice = await fs.promises.open(stagePath, 'r');
+      let part: fs.promises.FileHandle | null = await fs.promises.open(partPath, have === 0 ? 'w' : 'r+');
+      let complete = false;
+      try {
+        // Positional writes: a re-sent slice overwrites its own bytes rather
+        // than appending a second copy, so a retry after a half-believed
+        // failure converges instead of corrupting.
+        let pos = r.off;
+        const buf = Buffer.allocUnsafe(1 << 20);
+        for (;;) {
+          const { bytesRead } = await slice.read(buf, 0, buf.length, null);
+          if (bytesRead === 0) break;
+          await part.write(buf, 0, bytesRead, pos);
+          pos += bytesRead;
+        }
+        complete = pos >= r.total;
+      } finally {
+        await slice.close().catch(() => {});
+        const p = part;
+        part = null;
+        await p?.close().catch(() => {});
+      }
+      if (complete) {
+        // Last slice: the accumulator is the file. chmod/utimes before the
+        // rename so the destination is never briefly present with the wrong
+        // metadata, which is what the next plan would diff against.
+        await fs.promises.chmod(partPath, r.mode);
+        if (r.mtime) await fs.promises.utimes(partPath, r.mtime, r.mtime);
+        await fs.promises.rename(partPath, dstPath);
+      }
+      await fs.promises.unlink(stagePath).catch(() => {});
+    }
+  } catch (err) {
+    await cleanup();
+    res.status(500).json({ error: `range apply failed: ${errorMessage(err)}` });
     return;
   }
 

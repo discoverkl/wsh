@@ -54,6 +54,10 @@ type tarFile struct {
 	typ   byte // tar.TypeReg / tar.TypeDir / tar.TypeSymlink
 	link  string
 	mtime time.Time
+	// Extended header records. Set on a ranged slice, which declares where in
+	// its file the body belongs; nil on every ordinary entry, which is what
+	// keeps the tars these tests wrote before ranges byte-identical.
+	pax map[string]string
 }
 
 func writeTar(t *testing.T, files []tarFile, sentinel string) *bytes.Buffer {
@@ -64,6 +68,10 @@ func writeTar(t *testing.T, files []tarFile, sentinel string) *bytes.Buffer {
 		hdr := &tar.Header{Name: f.name, Mode: f.mode, Typeflag: f.typ, ModTime: f.mtime, Linkname: f.link}
 		if f.typ == tar.TypeReg {
 			hdr.Size = int64(len(f.body))
+		}
+		if f.pax != nil {
+			hdr.Format = tar.FormatPAX
+			hdr.PAXRecords = f.pax
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			t.Fatalf("write header %s: %v", f.name, err)
