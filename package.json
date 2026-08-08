@@ -1,6 +1,6 @@
 {
   "name": "xterm-web-terminal",
-  "version": "1.50.0",
+  "version": "1.51.0",
   "main": "dist/server.js",
   "scripts": {
     "clean": "rm -rf dist",
