@@ -1140,6 +1140,15 @@ html.touch .ws-new-card:active { transform: scale(0.98); background: rgba(99, 10
   padding: 80px 24px;
   color: var(--text-secondary);
   font-size: 15px;
+  /* Messages that explain how to recover need paragraphs; without this their
+     line breaks collapse and the instructions run together. */
+  white-space: pre-line;
+  /* The containers these land in are grids, so without spanning the row a
+     message is placed in one 280px column and reads as a narrow ragged
+     stripe on the left rather than centred text. */
+  grid-column: 1 / -1;
+  max-width: 52ch;
+  margin: 0 auto;
 }
 
 .message.error { color: #ef4444; }
@@ -1843,12 +1852,16 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
            '<div class="config-popover">' + html + '</div>';
   }
 
-  function showError(msg) {
+  // notice=true renders in the normal text colour instead of red. "You need a
+  // token" is an instruction, not a fault, and alarming someone whose only
+  // mistake was opening the bare URL is the wrong first impression.
+  function showError(msg, notice) {
     document.getElementById('loading-content').hidden = true;
     var appsSection = document.getElementById('apps-section');
     appsSection.hidden = false;
     appsSection.querySelector('.section-label').style.display = 'none';
-    document.getElementById('apps-content').innerHTML = '<div class="message error">' + escapeHtml(msg) + '</div>';
+    var cls = notice ? 'message' : 'message error';
+    document.getElementById('apps-content').innerHTML = '<div class="' + cls + '">' + escapeHtml(msg) + '</div>';
   }
 
   // Reconnect inline terminals from localStorage on page reload
@@ -1967,7 +1980,20 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
   window.refreshCatalog = function refreshCatalog() {
     return fetch('./api/apps')
       .then(function(res) {
-        if (res.status === 401) throw new Error('Authentication required');
+        // A 401 here means no access token, not a broken server. Only standalone
+        // mode can reach this: behind --trust-proxy, GET api/apps is exempt and
+        // serves a filtered catalog. So say how to get in rather than what went
+        // wrong — "Authentication required" left people with nowhere to go.
+        if (res.status === 401) {
+          var e = new Error(
+            'This box needs its access token.\n\n' +
+            'Run  wsh token  on the machine running this server, then open this ' +
+            'page with  ?token=<token>  appended. The token is remembered ' +
+            'afterwards, so you only do this once.'
+          );
+          e.notice = true;
+          throw e;
+        }
         if (!res.ok) throw new Error('Failed to load apps (HTTP ' + res.status + ')');
         return res.json();
       })
@@ -2055,7 +2081,7 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
         fetchSessions();
       })
       .catch(function(err) {
-        showError(err.message);
+        showError(err.message, err.notice);
       });
   };
   window.refreshCatalog();
