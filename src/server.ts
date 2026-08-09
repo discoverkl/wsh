@@ -1515,6 +1515,9 @@ interface SessionFields {
   pty: IPty | null;
   scrollbackChunks: Buffer[];
   scrollbackBytes: number;
+  /** Bytes ever written to this session's output stream. Monotonic — the resume
+   *  coordinate clients pass back as `since`. */
+  scrollbackTotal: number;
   /** Cached result of stripEphemeralSequences(scrollback). Null until first read or after mutation. */
   strippedScrollback: Buffer | null;
   writer: WebSocket | null;
@@ -1738,6 +1741,10 @@ function appendScrollback(session: Session, data: Buffer): void {
   if (data.length === 0) return;
   session.scrollbackChunks.push(data);
   session.scrollbackBytes += data.length;
+  // Monotonic position in the output stream, never trimmed and never reset (not
+  // even by `clear`) — it's the coordinate a reattaching client resumes from.
+  // The retained buffer covers [scrollbackTotal - scrollbackBytes, scrollbackTotal).
+  session.scrollbackTotal += data.length;
   session.strippedScrollback = null;
   const limit = scrollbackLimit(session);
   while (session.scrollbackBytes > limit && session.scrollbackChunks.length > 0) {
@@ -1763,6 +1770,47 @@ function scrollbackReplay(session: Session): Buffer | null {
   return session.strippedScrollback;
 }
 
+type ReplayMode = 'none' | 'tail' | 'full';
+
+/** What a client attaching at stream position `since` needs.
+ *
+ *  `tail` is the common reconnect: the gap is still in the buffer, so the client
+ *  gets exactly the bytes it missed and keeps its screen. `full` means the gap
+ *  fell out of the ring (or the client claims a position we can't honor) — it
+ *  resets first, or the session would render twice. A client that has seen
+ *  everything gets `none`.
+ *
+ *  `since` always lands on a chunk boundary: it's a value this counter held at
+ *  some earlier moment, and chunks are appended atomically. So a tail can never
+ *  begin mid-escape-sequence. */
+function replayFrom(session: Session, since: number): { mode: ReplayMode; buf: Buffer | null } {
+  const total = session.scrollbackTotal;
+  if (since > 0 && since === total) return { mode: 'none', buf: null };
+  if (since > 0 && since < total && since >= total - session.scrollbackBytes) {
+    return { mode: 'tail', buf: scrollbackTail(session, total - since) };
+  }
+  // Falls through for since=0, a gap older than the ring, and a client claiming
+  // to be ahead of the stream (out of sync with this session — a `clear`, or a
+  // different session behind the same ID): start it over from scratch.
+  return { mode: 'full', buf: scrollbackReplay(session) };
+}
+
+/** The last `n` bytes of scrollback, stripped like a full replay — stale query
+ *  sequences are just as poisonous in a tail as in a full replay. */
+function scrollbackTail(session: Session, n: number): Buffer | null {
+  if (n <= 0 || session.scrollbackBytes === 0) return null;
+  if (n >= session.scrollbackBytes) return scrollbackReplay(session);
+  const picked: Buffer[] = [];
+  let have = 0;
+  for (let i = session.scrollbackChunks.length - 1; i >= 0 && have < n; i--) {
+    const chunk = session.scrollbackChunks[i];
+    picked.unshift(chunk);
+    have += chunk.length;
+  }
+  const joined = picked.length === 1 ? picked[0] : Buffer.concat(picked, have);
+  return stripEphemeralSequences(have > n ? joined.subarray(have - n) : joined);
+}
+
 function clearScrollback(session: Session): void {
   session.scrollbackChunks = [];
   session.scrollbackBytes = 0;
@@ -1782,6 +1830,7 @@ function baseSession(appKey: string, appConfig: AppConfig, createdBy = ''): Sess
     pty: null,
     scrollbackChunks: [] as Buffer[],
     scrollbackBytes: 0,
+    scrollbackTotal: 0,
     strippedScrollback: null,
     writer: null,
     peers: new Map(),
@@ -1936,6 +1985,20 @@ function pollUntilReady(port: number, healthPath = '/', timeoutMs = 30000): Prom
   });
 }
 
+/** The `ready` message. `instance` identifies the child process now behind the
+ *  app proxy, so a reconnecting client can tell "my app was restarted" (reload
+ *  the iframe — its upstream is gone) from "my socket dropped and came back"
+ *  (leave the iframe alone). The session ID can't carry that: a reconnect that
+ *  respawns a dead singleton reuses the ID the client asked for, and the server's
+ *  own PID is included so the same is true across a server restart. */
+function readyMessage(session: Session): string {
+  return JSON.stringify({
+    type: 'ready',
+    path: session.webPath,
+    instance: `${process.pid}:${session.child?.pid ?? 0}`,
+  });
+}
+
 async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig, createdBy = '', options?: { notify?: boolean }): Promise<Session> {
   const port = await findFreePort();
   const configuredTimeout = appConfig.timeout ? parseTimeout(appConfig.timeout) : undefined;
@@ -2011,7 +2074,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   pollUntilReady(port, healthPath, effectiveStartupTimeout).then(() => {
     session.ready = true;
     console.log(`[session ${id}] web app ready`);
-    broadcast(session, JSON.stringify({ type: 'ready', path: session.webPath }));
+    broadcast(session, readyMessage(session));
     // Notify catalog pages so they can show a clickable "open" toast
     if (options?.notify) {
       const escJs = (s: string) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -5363,11 +5426,25 @@ function getRoleForSession(req: http.IncomingMessage, sessionId: string): Role |
   return 'viewer'; // no writer token → viewer (session ID alone is the viewer secret)
 }
 
-function sendRoleMessage(ws: WebSocket, sessionId: string, session: Session, role: Role, credential: Role): void {
+function sendRoleMessage(ws: WebSocket, sessionId: string, session: Session, role: Role, credential: Role, replay: ReplayMode = 'full'): void {
   const pinnedOther = role === 'owner'
     ? [...sessions.entries()].filter(([sid, s]) => sid !== sessionId && s.pinned).map(([sid, s]) => ({ id: sid, title: s.title, app: s.app ?? 'bash' }))
     : undefined;
-  ws.send(JSON.stringify({ type: 'role', role, credential, session: sessionId, app: session.app, appType: session.appType, cwd: session.cwd, base: BASE, icon: session.icon, title: session.title, ...(role === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
+  // `pos` is the stream position the client will be caught up to once the replay
+  // that follows this message lands. It has to come from us: replays are stripped,
+  // so their byte count is smaller than the stream they stand for and a client
+  // counting what it receives would drift.
+  ws.send(JSON.stringify({ type: 'role', role, credential, session: sessionId, app: session.app, appType: session.appType, cwd: session.cwd, base: BASE, icon: session.icon, title: session.title, pos: session.scrollbackTotal, replay, ...(role === 'owner' ? { pinned: session.pinned, pinnedOther } : {}) }));
+}
+
+/** Admit a peer: role, then `ready` (web), then whatever scrollback it's missing.
+ *  Single path so the `replay` mode announced in the role message can't drift
+ *  from the bytes actually sent after it. */
+function sendAttach(ws: WebSocket, sessionId: string, session: Session, role: Role, credential: Role, since: number): void {
+  const { mode, buf } = replayFrom(session, since);
+  sendRoleMessage(ws, sessionId, session, role, credential, buf ? mode : 'none');
+  if (session.appType === 'web' && session.ready) ws.send(readyMessage(session));
+  if (buf) ws.send(buf, { binary: true });
 }
 
 function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -5497,6 +5574,11 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
 
   let session = sessions.get(id);
   let credential = getRoleForSession(req, id) ?? 'viewer';
+  // Stream position this client already has, so a reattach can be handed just
+  // the tail it missed. Absent/garbage means "I have nothing" → full replay.
+  const sinceRaw = Number(url.searchParams.get('since'));
+  const since = Number.isSafeInteger(sinceRaw) && sinceRaw > 0 ? sinceRaw : 0;
+
   // Public PTY apps: a forwarded stranger drives their OWN per-visitor session,
   // so grant 'writer' (type/resize/clear) — never 'owner', which would disclose
   // other sessions via pinnedOther and allow pin/keep-alive. For an existing
@@ -5547,15 +5629,18 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     // Store 'viewer' for yielding connections so auto-promotion on writer-disconnect skips them.
     const sentRole = (yields && !effectiveWriter) ? 'viewer' : credential;
     session.peers.set(ws, sentRole);
-    sendRoleMessage(ws, id, session, sentRole, credential);
-    if (session.appType === 'web' && session.ready) {
-      ws.send(JSON.stringify({ type: 'ready', path: session.webPath }));
-    }
-    const replay = scrollbackReplay(session);
-    if (replay) ws.send(replay, { binary: true });
+    sendAttach(ws, id, session, sentRole, credential, since);
   } else {
-    // reconnect=1 means "only attach to existing session, don't create a new one"
-    if (url.searchParams.get('reconnect') === '1') {
+    // reconnect=1 means "attach to an existing session, don't create a new one" —
+    // a reconnecting PTY client wants its shell back, not a surprise fresh one.
+    //
+    // Web apps are the exception. They're singletons resolved by app key, and the
+    // HTTP proxy (`/_a/<appKey>`) already auto-spawns them, so the iframe can
+    // revive an app that the control WebSocket refuses to. A client whose session
+    // ID died with a server restart (or a `wsh new -s` replacement) must be able
+    // to find — or restart — the singleton here; otherwise every retry it makes
+    // can only ever come back 4003 and it retries forever against a wall.
+    if (url.searchParams.get('reconnect') === '1' && apps[requestedAppForPublic]?.type !== 'web') {
       ws.close(WS_CLOSE.FORBIDDEN, 'session not found');
       return;
     }
@@ -5635,10 +5720,7 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
       }
       const sentRole = (yields && !effectiveWriter) ? 'viewer' : credential;
       session.peers.set(ws, sentRole);
-      sendRoleMessage(ws, id, session, sentRole, credential);
-      if (session.ready) ws.send(JSON.stringify({ type: 'ready', path: session.webPath }));
-      const replay = scrollbackReplay(session);
-      if (replay) ws.send(replay, { binary: true });
+      sendAttach(ws, id, session, sentRole, credential, since);
     } else if (effectiveConfig.type === 'job') {
       // Jobs cannot be spawned via WebSocket — use POST /api/sessions instead.
       ws.close(WS_CLOSE.FORBIDDEN, 'jobs must be created via POST /api/sessions');
@@ -5686,12 +5768,9 @@ wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
         clearTimeout(session.cleanupTimer);
         session.cleanupTimer = null;
       }
-      sendRoleMessage(ws, id, session, credential, credential);
       // A guard-resolved web singleton may already be ready (its ready broadcast
-      // fired before this peer attached) — replay it so the iframe loads.
-      if (session.appType === 'web' && session.ready) ws.send(JSON.stringify({ type: 'ready', path: session.webPath }));
-      const replay = scrollbackReplay(session);
-      if (replay) ws.send(replay, { binary: true });
+      // fired before this peer attached) — sendAttach replays it so the iframe loads.
+      sendAttach(ws, id, session, credential, credential, since);
     }
   }
 

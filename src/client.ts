@@ -361,18 +361,39 @@ function buildWsQuery(): URLSearchParams {
   query.set('app', appName);
   if (wtoken && !isViewer) query.set('wtoken', wtoken);
   if (isViewer) query.set('yield', '1');
-  if (webReconnectAttempts > 0) query.set('reconnect', '1');
+  // Any connect after the first attach is a re-attach: "give me my session back,
+  // don't create a new one". Keyed off attachment rather than the retry counter
+  // so a manual Retry (which resets the counter) still says so.
+  if (everAttached) query.set('reconnect', '1');
+  // How far into the output stream we already are, so the server can send just
+  // the tail we missed instead of the whole buffer.
+  if (streamPos > 0) query.set('since', String(streamPos));
   return query;
 }
 
 let ws: WebSocket;
-let intentionalReconnect = false;
+/** Set once the server has confirmed an attach (`role` message). */
+let everAttached = false;
+/** Position in the session's output stream that this page has consumed. Comes
+ *  from the server's `pos` at attach and advances by live output after that —
+ *  replays are stripped, so counting received bytes alone would drift. */
+let streamPos = 0;
+/** The one binary frame following a `role` is the replay it announced; its bytes
+ *  are already accounted for by `pos` and must not advance streamPos again. */
+let expectReplayFrame = false;
 let currentRole = '';
 let sessionDead = false;
 let appType: 'pty' | 'web' = 'pty';
 let sessionCwd = '';
 let serverBase = '';
 let showingLogs = false;
+/** True once the iframe has painted — later `load` events are in-app navigation. */
+let iframeLoaded = false;
+/** The app instance (server PID : child PID) the iframe is pointed at. A change
+ *  means the process behind it was replaced, so the frame has to be reloaded.
+ *  The session ID can't stand in for this: a reconnect that respawns a dead web
+ *  singleton reuses the ID the client asked for, so it looks unchanged. */
+let iframeInstance = '';
 
 // --- Health check (feeds button color + tooltip context) ---
 let healthTimer: ReturnType<typeof setInterval> | null = null;
@@ -397,40 +418,93 @@ function startHealthCheck(): void {
   healthTimer = setInterval(updateHealthUI, 10000);
 }
 
-let webReconnectDelay = 1000;
-const MAX_WEB_RECONNECT_DELAY = 10000;
-const MAX_WEB_RECONNECT_ATTEMPTS = 10;
-let webReconnectAttempts = 0;
+// --- Web app reconnect ---
+// Backoff state is reset on a successful *attach* (arrival of the `role`
+// message), never on socket `open`. A server-side rejection completes the
+// WebSocket handshake first, so `open` fires before the rejecting `close` —
+// resetting there wiped the counter on every failed retry, which turned the
+// backoff into an endless 1 Hz reconnect loop.
+const RECONNECT_BASE_DELAY = 1000;
+const RECONNECT_MAX_DELAY = 30_000;
+const RETRY_BUTTON_AFTER = 3;       // attempts before offering a manual retry
+let reconnectDelay = RECONNECT_BASE_DELAY;
+let reconnectAttempts = 0;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-function scheduleWebReconnect(): void {
-  if (webReconnectAttempts >= MAX_WEB_RECONNECT_ATTEMPTS) {
-    sessionDead = true;
-    term.write(`\r\n[Could not reconnect after ${MAX_WEB_RECONNECT_ATTEMPTS} attempts. Refresh to try again.]\r\n`);
-    return;
-  }
-  webReconnectAttempts++;
-  setTimeout(() => {
-    term.write(`\r\n[Reconnecting (${webReconnectAttempts}/${MAX_WEB_RECONNECT_ATTEMPTS})...]\r\n`);
-    connect();
-    webReconnectDelay = Math.min(webReconnectDelay * 2, MAX_WEB_RECONNECT_DELAY);
-  }, webReconnectDelay);
+/** 4003 covers both "the session is gone" and outright permission denials. For a
+ *  web app only the latter is worth giving up on — the session itself is a
+ *  singleton the server can respawn. */
+const PERMANENT_4003 = /only owners|view-only|^jobs /i;
+
+/** Transport-level failures: the socket died without the server having an
+ *  opinion, so whatever we were attached to is very likely still there. */
+const TRANSPORT_CLOSE = new Set([1001, 1006, 4001]);
+
+/** Close conditions that mean "don't come back".
+ *
+ *  The split follows from whether what we were attached to can still come to
+ *  exist. A web app is a replaceable singleton, so anything short of a refusal
+ *  is worth retrying. A PTY is an irreplaceable process: once the server says
+ *  the session is gone, no amount of retrying brings that shell back, and
+ *  silently landing someone in a fresh one wearing the dead one's URL is worse
+ *  than an honest failure — so only transport failures are retried.
+ *
+ *  Before the first attach `appType` is still its 'pty' default, which is the
+ *  conservative side to be on. */
+function isTerminalClose(event: CloseEvent): boolean {
+  if (userRequestedClose) return true;
+  if (appType !== 'web') return !TRANSPORT_CLOSE.has(event.code);
+  if (event.code === 4029) return true;                        // rate limited
+  if (event.code === 4000) return true;                        // session ID required
+  if (event.code === 4003) return PERMANENT_4003.test(event.reason || '');
+  return false;
 }
 
+function clearReconnectTimer(): void {
+  if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+}
+
+function scheduleReconnect(): void {
+  if (reconnectTimer !== null) return;
+  reconnectAttempts++;
+  // Jitter so many tabs waking on the same server restart don't retry in lockstep.
+  const wait = Math.round(reconnectDelay * (0.75 + Math.random() * 0.5));
+  reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_DELAY);
+  setConnStatus('disconnected', reconnectAttempts > 1 ? `Reconnecting… (${reconnectAttempts})` : 'Reconnecting…');
+  if (reconnectAttempts >= RETRY_BUTTON_AFTER) connRetry?.removeAttribute('hidden');
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, wait);
+}
+
+/** Retry right now instead of waiting out the backoff — used when the network
+ *  comes back, the tab is brought forward, or the user clicks Retry. */
+function reconnectNow(): void {
+  if (sessionDead || userRequestedClose) return;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  clearReconnectTimer();
+  connect();
+}
+
+window.addEventListener('online', reconnectNow);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) reconnectNow(); });
+
 function connect(): void {
+  clearReconnectTimer();
   // Use document.baseURI (not location.href) so we resolve against the <base href>
   // — the document URL may have an app-subpath like /<app>/files/proj/ that
   // would otherwise make './terminal' resolve inside the subpath.
   const wsBase = new URL('./terminal', document.baseURI);
   wsBase.protocol = proto + ':';
   wsBase.search = buildWsQuery().toString();
-  ws = new WebSocket(wsBase.href);
-  ws.binaryType = 'arraybuffer';
+  const sock = new WebSocket(wsBase.href);
+  ws = sock;
+  sock.binaryType = 'arraybuffer';
 
-  ws.addEventListener('open', () => {
-    setConnStatus('connected');
-    webReconnectDelay = 1000;
-    webReconnectAttempts = 0;
-    sessionDead = false;
+  /** Events from a socket we've already replaced (role switch, retry that raced
+   *  a late close) must not drive UI or schedule a second retry chain. */
+  const stale = () => sock !== ws;
+
+  sock.addEventListener('open', () => {
+    if (stale()) return;
     if (!document.getElementById('desktop')?.hasAttribute('hidden') && appType !== 'web') {
       requestAnimationFrame(() => {
         fitAddon.fit();
@@ -440,27 +514,49 @@ function connect(): void {
     }
   });
 
-  ws.addEventListener('message', (event: MessageEvent) => {
+  sock.addEventListener('message', (event: MessageEvent) => {
+    if (stale()) return;
     if (event.data instanceof ArrayBuffer) {
+      if (expectReplayFrame) expectReplayFrame = false;
+      else streamPos += event.data.byteLength;
       term.write(new Uint8Array(event.data));
     } else if (typeof event.data === 'string') {
       if (handleWshRpc(event, document, makeResponder(ws))) return;
       try {
-        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; cwd?: string; base?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string; session?: string; icon?: string; title?: string; path?: string };
+        const msg = JSON.parse(event.data) as { type: string; role?: string; credential?: string; app?: string; appType?: string; cwd?: string; base?: string; pinned?: boolean; pinnedOther?: { id: string; title: string; app?: string }[]; name?: string; value?: string; status?: string; session?: string; icon?: string; title?: string; path?: string; instance?: string; pos?: number; replay?: 'none' | 'tail' | 'full' };
         if (msg.type === 'role' && msg.role) {
+          // Attached — this, not socket `open`, is what "connected" means.
+          setConnStatus('connected');
+          everAttached = true;
+          reconnectDelay = RECONNECT_BASE_DELAY;
+          reconnectAttempts = 0;
+          sessionDead = false;
+          // A demotion notice (writer → viewer) is a bare role message with no
+          // stream fields — leave the replay bookkeeping alone for those.
+          if (typeof msg.pos === 'number') streamPos = msg.pos;
+          if (msg.replay) {
+            expectReplayFrame = msg.replay !== 'none';
+            // A full replay re-sends output we may already be showing; without a
+            // reset the session would render twice. A tail is exactly the bytes
+            // we missed, so it appends and the screen is never cleared.
+            if (msg.replay === 'full') term.reset();
+          }
           if (msg.cwd) sessionCwd = msg.cwd;
           if (msg.base) serverBase = msg.base.replace(/\/+$/, '');
           if (msg.appType === 'web') appType = 'web';
           if (msg.title) { windowTitle.textContent = msg.title; document.title = msg.title; }
-          // Server-assigned session ID (for new sessions created without a hash).
-          if (msg.session && !sessionId) {
+          // Server-assigned session ID. Reassignment matters on reconnect: a web
+          // singleton respawned by the server carries a new ID, and holding the
+          // dead one would make every later retry ask for a session that's gone.
+          if (msg.session && msg.session !== sessionId) {
+            const firstAssignment = !sessionId;
             sessionId = msg.session;
             initRoleKey(sessionId);
             // Put session ID in hash for TUI apps (needed for share links / reconnect).
             // Web apps don't need it — singletons are found by app name.
             // Pathname is included because `<base href>` makes `#abc` resolve
             // against BASE (stripping the appName segment).
-            if (appType !== 'web') {
+            if (appType !== 'web' && firstAssignment) {
               history.replaceState(null, '', `${location.pathname}#${sessionId}`);
             }
           }
@@ -512,8 +608,18 @@ function connect(): void {
           const innerPath = initialInnerPath || configuredPath || '/';
           const targetSrc = `./_a/${appName}${innerPath}${currentAppHash ? '#' + currentAppHash : ''}`;
           if (!iframe.src || iframe.src === 'about:blank') {
+            iframeInstance = msg.instance ?? '';
             iframe.src = targetSrc;
             iframe.addEventListener('load', () => {
+              // Re-run on every iframe navigation: contentWindow (and its history
+              // object) is a fresh instance per load, so the path-sync patches
+              // have to be re-applied.
+              setupHashSync(iframe);
+              setupPathSync(iframe);
+              if (iframeLoaded) return;
+              // First paint only. Revealing the app and handing it focus on every
+              // in-app navigation would yank focus to [autofocus] mid-session.
+              iframeLoaded = true;
               const loadingEl = document.getElementById('web-loading')!;
               loadingEl.classList.add('fade-out');
               if ((window as any).__loadingTipTimer) clearInterval((window as any).__loadingTipTimer);
@@ -521,12 +627,17 @@ function connect(): void {
               iframe.classList.add('loaded');
               focusWebFrame();
               startHealthCheck();
-              setupHashSync(iframe);
-              setupPathSync(iframe);
             });
-          } else {
-            // Reconnect after server restart — reload the iframe
-            iframe.contentWindow?.location.reload();
+          } else if (msg.instance && iframeInstance && msg.instance !== iframeInstance) {
+            // The app process was replaced — the iframe is pointing at a dead
+            // child, so reload it. A transient WebSocket drop leaves a perfectly
+            // healthy iframe alone: the app is served over a separate HTTP path
+            // and reloading would throw away its state for nothing.
+            iframeInstance = msg.instance;
+            // reload() keeps the user where they were; before first paint there's
+            // no position to keep and no document to reload, so re-point instead.
+            if (iframeLoaded) iframe.contentWindow?.location.reload();
+            else iframe.src = targetSrc;
             iframe.addEventListener('load', () => { focusWebFrame(); }, { once: true });
           }
         }
@@ -535,32 +646,23 @@ function connect(): void {
     }
   });
 
-  ws.addEventListener('close', (event: CloseEvent) => {
-    if (intentionalReconnect) { intentionalReconnect = false; return; }
+  sock.addEventListener('close', (event: CloseEvent) => {
+    if (stale()) return;
     setConnStatus('disconnected');
     term.options.disableStdin = true;
 
-    // Web apps: auto-reconnect on process exit, session replacement (wsh new -s),
-    // or session not yet available (4003). This lets the browser page survive
-    // server restarts without manual refresh.
-    if (appType === 'web' && !userRequestedClose && !sessionDead) {
-      const isReconnectable = (
-        (event.code === 1000 && (
-          event.reason === 'Process exited' || event.reason === 'PTY process exited' ||
-          event.reason === 'Session replaced'
-        )) ||
-        event.code === 4003  // session not found — may still be starting
-      );
-      if (isReconnectable) {
-        if (webReconnectAttempts === 0) {
-          term.write('\r\n[Server restarting… reconnecting]\r\n');
-        }
-        scheduleWebReconnect();
-        return;
-      }
+    // Keep retrying through anything transient — a dropped network, a suspended
+    // laptop, a server restart, a replaced session — so the page recovers on its
+    // own instead of needing a manual refresh. Only an explicit "don't come
+    // back" ends it.
+    if (!sessionDead && !isTerminalClose(event)) {
+      scheduleReconnect();
+      return;
     }
 
     sessionDead = true;
+    clearReconnectTimer();
+    connRetry?.setAttribute('hidden', '');
     sharePopover.classList.remove('visible');
 
     const sessionGone = event.code === 1000 || event.code === 4003 || event.code === 4029;
@@ -583,6 +685,8 @@ function connect(): void {
       requestAnimationFrame(() => fitAddon.fit());
     }
 
+    // Web apps have no visible terminal, so the banner — not term.write — is
+    // what the user actually reads.
     if (event.code === 1000 && (event.reason === 'PTY process exited' || event.reason === 'Process exited')) {
       if (userRequestedClose) {
         window.close();
@@ -595,12 +699,16 @@ function connect(): void {
         requestAnimationFrame(() => fitAddon.fit());
       }
       term.write('\r\n[Process exited. Refresh to start a new session.]\r\n');
-    } else if (event.code === 4003) {
+      setConnStatus('disconnected', 'Process exited — refresh to restart');
+    } else if (event.code === 4003 || event.code === 4000) {
       term.write(`\r\n[${event.reason || 'Session not found.'}]\r\n`);
+      setConnStatus('disconnected', event.reason || 'Session not found');
     } else if (event.code === 4029) {
       term.write('\r\n[Too many attempts. Please wait and try again.]\r\n');
+      setConnStatus('disconnected', 'Too many attempts — wait and refresh');
     } else {
       term.write('\r\n[Disconnected. Refresh to reconnect.]\r\n');
+      setConnStatus('disconnected', 'Disconnected — refresh to reconnect');
     }
   });
 }
@@ -678,11 +786,42 @@ function sendResize(cols: number, rows: number): void {
 
 const connStatus = document.getElementById('conn-status')!;
 const connBanner = document.getElementById('conn-banner');
-function setConnStatus(state: 'connected' | 'disconnected'): void {
+const connBannerText = document.getElementById('conn-banner-text');
+const connRetry = document.getElementById('conn-retry');
+
+// Don't paint the banner the instant a socket drops — a blip that heals inside
+// the grace window should be invisible. Only a disconnection that actually
+// lasts is worth telling the user about.
+const CONN_BANNER_GRACE_MS = 1500;
+let connBannerTimer: ReturnType<typeof setTimeout> | null = null;
+
+function setConnStatus(state: 'connected' | 'disconnected', detail?: string): void {
   connStatus.className = state;
-  connStatus.title = state === 'connected' ? 'Connected' : 'Disconnected';
-  if (connBanner) connBanner.classList.toggle('visible', state === 'disconnected');
+  connStatus.title = state === 'connected' ? 'Connected' : (detail || 'Disconnected');
+  if (!connBanner) return;
+  if (state === 'connected') {
+    if (connBannerTimer !== null) { clearTimeout(connBannerTimer); connBannerTimer = null; }
+    connBanner.classList.remove('visible');
+    connRetry?.setAttribute('hidden', '');
+    return;
+  }
+  if (connBannerText) connBannerText.textContent = detail || 'Disconnected';
+  // Already up, or already counting down: retext only. Restarting the timer on
+  // every retry would push the banner out past the outage it's meant to report.
+  if (connBanner.classList.contains('visible') || connBannerTimer !== null) return;
+  connBannerTimer = setTimeout(() => {
+    connBannerTimer = null;
+    connBanner.classList.add('visible');
+  }, CONN_BANNER_GRACE_MS);
 }
+
+connRetry?.addEventListener('click', () => {
+  reconnectAttempts = 0;
+  reconnectDelay = RECONNECT_BASE_DELAY;
+  connRetry.setAttribute('hidden', '');
+  setConnStatus('disconnected', 'Reconnecting…');
+  reconnectNow();
+});
 
 const roleBadge = document.getElementById('role-badge')!;
 const pinBtn = document.getElementById('pin-btn') as HTMLButtonElement;
@@ -723,7 +862,9 @@ viewonlyUpgrade.addEventListener('click', () => {
   if (sessionDead) return;
   sessionStorage.setItem(ROLE_KEY, 'active');
   term.reset();
-  intentionalReconnect = true;
+  streamPos = 0;   // cleared the screen — ask for the whole buffer back, not a tail
+  // connect() replaces `ws` synchronously, so the old socket's close event is
+  // recognized as stale and ignored — no spurious "disconnected" or retry.
   ws.close();
   connect();
 });
@@ -796,7 +937,8 @@ roleBadge.addEventListener('click', () => {
   if (!canSwitch) return;
   sessionStorage.setItem(ROLE_KEY, currentRole === 'viewer' ? 'active' : 'viewer');
   term.reset();
-  intentionalReconnect = true;
+  streamPos = 0;
+  // See viewonlyUpgrade: the superseded socket's close is ignored as stale.
   ws.close();
   connect();
 });

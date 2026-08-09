@@ -834,23 +834,44 @@
     .agent-wrap.agent-actions { display: none !important; }
     .agent-wrap.agent-actions[hidden] { display: none !important; }
 
+    /* Connection banner — an absolutely positioned overlay, never an in-flow
+       flex child. As a flex sibling of #web-container it stole its own height
+       (~27px) from the iframe every time it appeared, so each disconnect /
+       reconnect cycle re-laid-out the embedded app. Overlaying costs the app
+       zero layout. Stays click-through; only the retry button takes pointer
+       events. */
     #conn-banner {
-      display: none;
+      position: absolute;
+      top: 46px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-4px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      z-index: 50;
+      display: flex;
       align-items: center;
-      justify-content: center;
       gap: 8px;
-      padding: 6px 14px;
-      background: rgba(243, 139, 168, 0.12);
-      border-bottom: 1px solid rgba(243, 139, 168, 0.2);
+      background: rgba(17, 17, 27, 0.88);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(243, 139, 168, 0.28);
+      border-radius: 8px;
+      padding: 7px 12px;
       font-size: 12px;
       color: #f38ba8;
-      flex-shrink: 0;
+      white-space: nowrap;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.55);
     }
-    #conn-banner.visible { display: flex; }
+    #conn-banner.visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
     #conn-banner .banner-dot {
       width: 6px;
       height: 6px;
       border-radius: 50%;
+      flex-shrink: 0;
       background: #f38ba8;
       animation: pulse-banner 1.5s ease-in-out infinite;
     }
@@ -858,6 +879,33 @@
       0%, 100% { opacity: 0.5; }
       50% { opacity: 1; }
     }
+    #conn-retry {
+      pointer-events: auto;
+      font: inherit;
+      font-size: 11px;
+      color: #f38ba8;
+      background: rgba(243, 139, 168, 0.12);
+      border: 1px solid rgba(243, 139, 168, 0.3);
+      border-radius: 5px;
+      padding: 2px 8px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #conn-retry:hover { background: rgba(243, 139, 168, 0.22); }
+    #conn-retry[hidden] { display: none; }
+    html.web #conn-banner {
+      background: rgba(255, 255, 255, 0.94);
+      border-color: rgba(220, 38, 38, 0.25);
+      color: #b91c1c;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.14);
+    }
+    html.web #conn-banner .banner-dot { background: #dc2626; }
+    html.web #conn-retry {
+      color: #b91c1c;
+      background: rgba(220, 38, 38, 0.08);
+      border-color: rgba(220, 38, 38, 0.25);
+    }
+    html.web #conn-retry:hover { background: rgba(220, 38, 38, 0.16); }
     @media (max-height: 500px) and (orientation: landscape) {
       .shortcut-input-row { display: none; }
       html.narrow .shortcut-row, html.touch .shortcut-row, .shortcut-row { display: none; }
@@ -1105,7 +1153,7 @@
           </button>
         </div>
       </div>
-      <div id="conn-banner"><span class="banner-dot"></span><span id="conn-banner-text">Disconnected</span></div>
+      <div id="conn-banner"><span class="banner-dot"></span><span id="conn-banner-text">Disconnected</span><button id="conn-retry" hidden>Retry</button></div>
       <div id="pinned-toast">
         <span id="pinned-toast-icon">
           <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">

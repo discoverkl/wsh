@@ -25,7 +25,7 @@ Both PTY and web app processes are spawned via `/bin/sh -c` (not `$SHELL`). The 
 
 **Server -> Client:**
 - **Binary**: Raw PTY output (TUI) or stdout/stderr log stream (web)
-- **Text/JSON**: `role` (with `app`, `appType`, `credential`, `pinned`, `pinnedOther`), `pin`, `ready`, `status`, `cookie`, `rpc`
+- **Text/JSON**: `role` (with `app`, `appType`, `credential`, `pinned`, `pinnedOther`, `pos`, `replay`), `pin`, `ready` (with `path`, `instance`), `status`, `cookie`, `rpc`
 
 ## Session Lifecycle
 
@@ -53,6 +53,57 @@ writer disconnects --> same promotion logic as TUI
   pinned=false   --> timeoutMs (default 1h, configurable via `timeout` field)
 child exits      --> all peers closed, session deleted immediately
 ```
+
+### Reconnect
+
+Both TUI and web pages keep their control WebSocket alive on their own, with
+exponential backoff (1s → 30s, ±25% jitter) for as long as the tab lives, plus an
+immediate attempt on `online` and on the tab becoming visible. Backoff state
+resets on **attach** (the `role` message), never on socket `open` — a rejected
+connection completes the handshake first, so `open` fires before the rejecting
+`close`, and resetting there degenerates into an endless 1 Hz retry loop.
+
+What counts as retryable follows from whether the thing you were attached to can
+still come to exist:
+
+| Close | Web | PTY |
+|---|---|---|
+| 1006 / 1001 / 4001 (transport) | retry | retry |
+| 1000 `Process exited` / `Session replaced` | retry — respawnable | **stop** |
+| 4003 `session not found` | retry — respawnable | **stop** |
+| 4003 permission, 4029, 4000, user closed | stop | stop |
+
+A web app is a replaceable singleton; a PTY is an irreplaceable process, and
+handing someone a fresh shell wearing the dead one's URL is worse than an honest
+failure. Retries carry `reconnect=1` ("attach to my session, don't create a new
+one"); for **web** the server may still resolve or respawn the singleton by app
+key — they're singletons, `/_a/<appKey>` auto-spawns them over HTTP anyway, and a
+session ID that died with a server restart would otherwise make every retry
+unanswerable. For **pty** it stays strict.
+
+The `ready` message carries `instance` (`<server pid>:<child pid>`), identifying
+the process behind the app proxy. The iframe is reloaded only when `instance`
+changes — a restarted app leaves the frame pointing at a dead child, while a
+socket that merely dropped and came back does not (the app is served over a
+separate HTTP path and is still live, so reloading would throw away its state for
+nothing). The session ID can't carry this signal: a reconnect that respawns a dead
+singleton reuses the ID the client asked for.
+
+Disconnection is reported by an overlay banner that appears only after 1.5s of
+continuous disconnection and offers a manual **Retry** after three failed
+attempts. It is absolutely positioned on purpose: as an in-flow element it took
+its own height out of the iframe, so every disconnect/reconnect cycle re-laid-out
+the embedded app.
+
+**Resume from offset.** A reattach carries `since=<streamPos>` and the `role`
+reply carries `pos` (the stream position the client is caught up to once the
+replay lands) plus `replay: 'none' | 'tail' | 'full'`. When the requested offset
+is still inside the retained buffer the server sends only the missing tail, so a
+short gap costs nothing and the terminal is never cleared; otherwise it sends a
+full replay and the client resets first (without a reset the whole session would
+render twice). The client can't count received bytes itself — replays are
+stripped, so they're shorter than the stream they stand for — which is why `pos`
+is authoritative and the one replay frame following a `role` isn't counted.
 
 ### Job Sessions
 
@@ -100,7 +151,7 @@ Re-attach from any new shell with `wsh logs -f <sid>` (replays the full log from
 ### Common Rules
 
 - Only owners can create sessions; non-owners get rejected with WS close code 4003
-- On WebSocket reconnect, the full scrollback buffer is replayed (up to 5 MB for TUI, 512 KB for web). Jobs do not use WebSocket and have no scrollback — their output lives only on disk. Terminal query sequences (DSR, DA, DECRQM, DECRQSS, window-size ops, OSC color queries) and their responses are stripped from replayed scrollback — stale queries would otherwise trigger xterm.js to generate responses that flow back to PTY stdin as garbage text, since the originating program is no longer listening.
+- On WebSocket reconnect, the scrollback buffer is replayed — only the tail past the client's `since` offset when it's still retained, otherwise in full (bounded at 5 MB for TUI, 512 KB for web). Jobs do not use WebSocket and have no scrollback — their output lives only on disk. Terminal query sequences (DSR, DA, DECRQM, DECRQSS, window-size ops, OSC color queries) and their responses are stripped from replayed scrollback — stale queries would otherwise trigger xterm.js to generate responses that flow back to PTY stdin as garbage text, since the originating program is no longer listening.
 - Only one active writer at a time; a new writer demotes the current one to viewer
 - Only owners can close sessions or toggle pin state; writers can resize and clear
 - Pin state is in-memory only; a server restart resets it (processes die anyway)
