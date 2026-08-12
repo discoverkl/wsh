@@ -1934,7 +1934,7 @@ function spawnPty(id: string, session: Session, appConfig: AppConfig, cols: numb
     session.pty = null;
     broadcastClose(session, WS_CLOSE.OK, 'PTY process exited');
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
-    if (sessions.get(id) === session) sessions.delete(id);
+    unregisterSession(id, session, 'process-exit');
     removeSkillSnapshot(id);
   });
 
@@ -2059,8 +2059,7 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
     void recordClosedWithTokens(id, session);
     broadcastClose(session, WS_CLOSE.OK, 'Process exited');
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
-    // Only delete if this session is still the current one (not replaced by -s reuse)
-    if (sessions.get(id) === session) sessions.delete(id);
+    unregisterSession(id, session, 'process-exit');
   });
 
   console.log(`[session ${id}] web app spawned on port ${port}`);
@@ -2150,7 +2149,7 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
     try { fs.writeFileSync(path.join(JOB_LOG_DIR, `${id}.exit`), String(exitVal)); } catch {}
     rotateJobLogs();
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
-    if (sessions.get(id) === session) sessions.delete(id);
+    unregisterSession(id, session, 'process-exit');
   });
 
   console.log(`[session ${id}] job spawned: ${appConfig.command}`);
@@ -2190,7 +2189,7 @@ function scheduleCleanup(id: string, session: Session): void {
     console.log(`[session ${id}] TTL expired`);
     // No process to kill (e.g. pending session that never received a resize)
     if (!session.child && !session.pty) {
-      if (sessions.get(id) === session) sessions.delete(id);
+      unregisterSession(id, session, 'idle-timeout');
       return;
     }
     if (session.child) killProcessGroup(session.child);
@@ -2210,12 +2209,62 @@ function scheduleCleanup(id: string, session: Session): void {
   }, ttl);
 }
 
+/** Session lifecycle, for anything watching the box from outside it.
+ *
+ * Jobs are deliberately excluded. Every `wsh run` spawns one, so emitting for
+ * jobs would put high-frequency churn into `~/.wsh/events.log` — a user-facing
+ * log — to announce sessions nobody holds a window open on. Readers that display
+ * jobs re-read `/api/sessions` on any event anyway, so a job still lands: on the
+ * next event, or on the reader's own heartbeat.
+ *
+ * The appType gate lives here rather than at the call sites. `unregisterSession`
+ * is reached from the session-replaced path, which fires for every type, and a
+ * rule copied into five callers is a rule the sixth caller will not have.
+ *
+ * It must never break session teardown. `emit` appends to disk, and a `~/.wsh`
+ * that cannot be written must not turn a PTY exit into an unhandled throw —
+ * losing an event costs a reader one heartbeat of staleness, which is the whole
+ * reason readers keep one.
+ */
+function emitSessionEvent(kind: 'start' | 'exit', id: string, session: Session, reason?: string): void {
+  if (session.appType === 'job') return;
+  try {
+    emitEvent(`session.${kind}`, {
+      id,
+      app: session.app,
+      appType: session.appType,
+      ...(session.daemon ? { daemon: true } : {}),
+      ...(reason ? { reason } : {}),
+    });
+  } catch {}
+}
+
 /** Add session to the map and enforce idle-timeout invariant. */
 function registerSession(id: string, session: Session): void {
   sessions.set(id, session);
   if (session.peers.size === 0) {
     scheduleCleanup(id, session);
   }
+  // After the map, never before: a reader woken by this event asks
+  // /api/sessions what is open, and must not be told to look before it is there.
+  emitSessionEvent('start', id, session);
+}
+
+/** Remove a session from the map, if it is still the one being removed.
+ *
+ * The identity check is the whole point. A session replaced by `-s` reuse leaves
+ * the old one's exit handler still holding its id, and an unconditional delete
+ * there evicts the *new* session. Four call sites carried a hand-written copy of
+ * that check; collecting it here also gives the exit event one place to be
+ * emitted from, so no caller has to remember to.
+ *
+ * Returns whether this call is the one that removed it.
+ */
+function unregisterSession(id: string, session: Session, reason?: string): boolean {
+  if (sessions.get(id) !== session) return false;
+  sessions.delete(id);
+  emitSessionEvent('exit', id, session, reason);
+  return true;
 }
 
 // --- Args ---
@@ -5316,7 +5365,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     // Kill existing session with same ID so it can be reused
     const existing = sessions.get(requestedSession)!;
     // Remove from map first so the old exit handler won't delete the new session
-    sessions.delete(requestedSession);
+    unregisterSession(requestedSession, existing, 'replaced');
     if (existing.cleanupTimer !== null) clearTimeout(existing.cleanupTimer);
     broadcastClose(existing, WS_CLOSE.OK, 'Session replaced');
     if (existing.child) killProcessGroup(existing.child);
