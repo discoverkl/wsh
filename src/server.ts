@@ -26,6 +26,7 @@ import { agentOf, captureTokens, dropSession } from './agentTokens';
 import { commandBinary } from './commandBinary';
 import { loadPushIgnoreDir, compilePushIgnore, pushIgnored, PushIgnoreRule, PUSH_IGNORE_DIR as PUSH_IGNORE_DEFAULT_DIR } from './pushIgnore';
 import { SyncHash, syncClassify, syncFind, syncValidReplica, syncWrite } from './syncState';
+import { pushTrashDisplace, pushTrashStamp, pushTrashSweep } from './pushTrash';
 import { runPushPostfix, PUSH_POSTFIX_HOOK as PUSH_POSTFIX_DEFAULT_HOOK } from './pushPostfix';
 
 // --- Error handling ---
@@ -4036,6 +4037,10 @@ interface PushPlan {
   deletes: boolean;
   /** Null when nothing should be recorded. See PushRecordIntent. */
   record: PushRecordIntent | null;
+  // Keep what this push overwrites or removes. On unless the client opted out;
+  // the batch name is fixed at plan time so every chunk of one push displaces
+  // into the same place.
+  trash: string | null;
 }
 
 /**
@@ -4552,6 +4557,7 @@ async function pushBuildPlan(opts: {
   collectPaths: boolean; // v1 answers in paths and has to keep them
   deletes: boolean;      // false → report the leftovers instead of removing them
   sweep: boolean;        // false for a dry run, which must change nothing
+  trash: boolean;        // this push will displace rather than destroy
   deny: PushIgnoreRule[];
   file: string;          // single-file push: the one name under target, else ''
 }): Promise<PushPlanBuild> {
@@ -4602,6 +4608,14 @@ async function pushBuildPlan(opts: {
     );
     serverEntries = walked.entries;
     reclaimedBytes = opts.sweep ? await pushSweepStaging(walked.staging) : 0;
+  }
+  // Swept before the apply rather than after it, so a second mirror does not
+  // stack on the first one's trash — which is precisely the sequence that would
+  // otherwise run a box out of disk, since the second mirror is also the one
+  // with the most to displace. Not gated on `deletes`: an overwrite fills the
+  // trash just as surely as a removal does.
+  if (opts.sweep && opts.trash) {
+    reclaimedBytes += await pushTrashSweep();
   }
   const sMap = new Map<string, PushEntry>();
   for (const e of serverEntries) sMap.set(e.path, e);
@@ -4737,7 +4751,7 @@ function pushDeleteRollup(paths: string[], limit: number): { dir: string; count:
 }
 
 /** Record a freshly-built plan so apply can find it. */
-function pushRegisterPlan(built: PushPlanBuild, target: string, rel: string, deletes: boolean, deny: PushIgnoreRule[], file: string, record: PushRecordIntent | null): void {
+function pushRegisterPlan(built: PushPlanBuild, target: string, rel: string, deletes: boolean, deny: PushIgnoreRule[], file: string, record: PushRecordIntent | null, trash: string | null): void {
   pushPlans.set(built.planId, {
     target,
     rel,
@@ -4751,6 +4765,7 @@ function pushRegisterPlan(built: PushPlanBuild, target: string, rel: string, del
     deny,
     deletes,
     record,
+    trash,
   });
 }
 
@@ -4910,6 +4925,7 @@ router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: expre
       collectPaths: true,
       deletes:      true,
       sweep:        true,
+      trash:        false,
       deny,
       file:         '',
     });
@@ -4917,7 +4933,9 @@ router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: expre
 
   // v1 predates the sync record entirely, so there is nothing to record and no
   // client that would read it back.
-  pushRegisterPlan(built, target, hdr.rel, true, deny, '', null);
+  // v1 predates both the record and the trash. Displacing for a client that has
+  // no way to be told about it would be a surprise the user cannot see.
+  pushRegisterPlan(built, target, hdr.rel, true, deny, '', null, null);
   res.json({
     plan_id:       built.planId,
     target,
@@ -4947,7 +4965,7 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     const lines = pushReadNdjson(req);
     const first = await lines.next();
     if (first.done) { fail(400, 'empty body: expected a header line'); return; }
-    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; deletes?: unknown; dry_run?: unknown; file?: unknown; replica?: unknown; skip_fp?: unknown; local_hash?: unknown };
+    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; deletes?: unknown; dry_run?: unknown; file?: unknown; replica?: unknown; skip_fp?: unknown; local_hash?: unknown; no_trash?: unknown };
     const hdr = pushCheckHeader(raw);
     if ('error' in hdr) { fail(400, hdr.error); return; }
     // A dry run neither writes nor deletes, so it has nothing to conflict with.
@@ -4966,6 +4984,10 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     // of the file — least of all in `$HOME`, the one directory this mode is
     // allowed into that a subdirectory push is not.
     const deletes = raw.deletes !== false && !hdr.file;
+    // Fixed at plan time, not per chunk: a large push arrives as several
+    // applies against one plan, and each of them displacing into a batch of its
+    // own would scatter one push's undo across a dozen directories.
+    const trash = raw.no_trash === true ? null : pushTrashStamp();
     const built = await pushBuildPlan({
       target,
       rel:          hdr.rel,
@@ -4977,6 +4999,7 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
       // A dry run reports what a push would do and touches nothing, which has
       // to include not quietly reclaiming disk on the way past.
       sweep:        !dryRun,
+      trash:        trash !== null,
       deny,
       file:         hdr.file,
     });
@@ -4986,7 +5009,7 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     // the most natural sequence there is — would answer 409.
     // A dry run records nothing, for the same reason it registers no plan: it
     // changes neither side, so there is no new agreement to remember.
-    if (!dryRun) pushRegisterPlan(built, target, hdr.rel, deletes, deny, hdr.file, pushRecordIntent(raw, hdr.skip));
+    if (!dryRun) pushRegisterPlan(built, target, hdr.rel, deletes, deny, hdr.file, pushRecordIntent(raw, hdr.skip), trash);
     sent = true;
     res.json({
       plan_id:       dryRun ? '' : built.planId,
@@ -5108,6 +5131,10 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   let sawSentinel = false;
   let bytesWritten = 0;
   let filesWritten = 0;
+  // What this chunk moved aside rather than destroyed, reported so the summary
+  // can say where it went instead of leaving the user to find out later.
+  let displacedFiles = 0;
+  let displacedBytes = 0;
   const t0 = Date.now();
   // Slices staged by this apply, in arrival order. They are pulled out of
   // staging and appended to their accumulator *after* the sentinel proves the
@@ -5330,6 +5357,13 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
           await promote(childRel);
         } else {
           await fs.promises.mkdir(path.dirname(dstPath), { recursive: true });
+          // Keep whatever we are about to write over. One rename, on the same
+          // filesystem, and only when something is actually there — which on a
+          // first push is nothing at all. See pushTrash.ts.
+          if (plan.trash) {
+            const t = await pushTrashDisplace(plan.trash, homePrefix + childRel, dstPath);
+            if (t.moved) { displacedFiles += 1; displacedBytes += t.bytes; }
+          }
           await fs.promises.rename(stagePath, dstPath);
         }
       }
@@ -5362,6 +5396,13 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
       if (rel.startsWith('/') || segs.some(seg => seg === '..')) continue;
       const abs = path.join(target, rel);
       if (!abs.startsWith(target + path.sep) && abs !== target) continue;
+      // A removal is the one thing a push does that nothing else can undo, so
+      // it is the case the trash exists for most. A directory moves whole, in
+      // one rename, rather than being walked and re-created.
+      if (plan.trash) {
+        const t = await pushTrashDisplace(plan.trash, homePrefix + rel, abs);
+        if (t.moved) { deleted += 1; displacedFiles += 1; displacedBytes += t.bytes; continue; }
+      }
       try { await fs.promises.rm(abs, { recursive: true, force: true }); deleted += 1; }
       catch (err) { console.error(`[push] delete failed rel=${rel}: ${errorMessage(err)}`); }
     }
@@ -5419,6 +5460,8 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
     bytes_written: bytesWritten,
     files_written: filesWritten,
     took_ms:       Date.now() - t0,
+    // Where what this push replaced can be found, when it replaced anything.
+    ...(displacedFiles ? { trashed: displacedFiles, trashed_bytes: displacedBytes, trash_dir: `~/.wsh/trash/${plan.trash}` } : {}),
     // Present only when a hook ran. `output` is one line per repair by
     // convention; abox-cli echoes it so the hook owns its own reporting and
     // wsh never has to know what a repair means.

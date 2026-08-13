@@ -108,14 +108,42 @@ export function compilePushIgnore(text: string, source: string): PushIgnoreRule[
  * Order is cosmetic (it only affects which rule gets reported for a path);
  * with no negation in the syntax it cannot change *whether* a path matches.
  */
+/**
+ * Rules wsh enforces itself, whatever the image says.
+ *
+ * Everything else in this file is the *image's* policy, and it is right that it
+ * is: the box owner decides what their env-bound config is. These two are not
+ * policy. They are wsh's own bookkeeping about the push protocol — the record
+ * of what each machine last agreed with this box, and the copies of whatever a
+ * push replaced — and both are false the instant they land on a different box.
+ *
+ * The record is the dangerous one, and it is dangerous in the unsafe direction:
+ * a mirrored record says "when we last agreed, my copy hashed to X" about a
+ * tree that was never party to the agreement, so the target would read its own
+ * freshly-overwritten files as matching and conclude nobody had changed it.
+ * That is precisely the conclusion the whole design exists to make a box earn.
+ *
+ * Relying on `/etc/abox/push-ignore.d/` for that would make a safety property
+ * of wsh depend on a file shipped by a different repo on its own release
+ * cadence — so a box running last month's image would silently lose the
+ * guarantee, with no symptom until someone lost work. wsh creates these
+ * directories; wsh protects them.
+ */
+const PUSH_BUILTIN_DENY = `
+/.wsh/push-state/
+/.wsh/trash/
+`;
+
 export function loadPushIgnoreDir(dir: string = PUSH_IGNORE_DIR): PushIgnoreRule[] {
+  // Built-ins first, so they apply even when the directory is missing entirely
+  // — an older image, or a host that isn't a box.
+  const rules: PushIgnoreRule[] = compilePushIgnore(PUSH_BUILTIN_DENY, 'wsh built-in');
   let names: string[];
   try {
     names = fs.readdirSync(dir).filter(n => n.endsWith('.conf')).sort();
   } catch {
-    return [];
+    return rules;
   }
-  const rules: PushIgnoreRule[] = [];
   for (const name of names) {
     let text: string;
     try { text = fs.readFileSync(path.join(dir, name), 'utf8'); } catch { continue; }
