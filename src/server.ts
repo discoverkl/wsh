@@ -17,7 +17,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
 import YAML from 'yaml';
-import { extract as tarExtract } from 'tar-stream';
+import { extract as tarExtract, pack as tarPack } from 'tar-stream';
 import type { Headers as TarHeaders } from 'tar-stream';
 import { version } from '../package.json';
 import { emit as emitEvent, on as onEvent, readSince, getCursor, setCursor, rotate as rotateEvents, trim as trimEvents, isValidEventType, LOG_FILE as EVENT_LOG_FILE, CURSOR_DIR as EVENT_CURSOR_DIR, WshEvent } from './events';
@@ -4528,6 +4528,11 @@ interface PushPlanBuild {
   // rel path. Only files big enough to be ranged are looked for, so the common
   // push pays one map allocation and no stats at all.
   partials: Record<string, number>;
+  // The box's own entries for everything a pull would carry, and their total
+  // size. Empty unless the caller asked — a push never looks at the box's
+  // version of a file it is about to replace.
+  pullFetch: PushEntry[];
+  pullBytes: number;
 }
 
 /**
@@ -4558,6 +4563,15 @@ async function pushBuildPlan(opts: {
   deletes: boolean;      // false → report the leftovers instead of removing them
   sweep: boolean;        // false for a dry run, which must change nothing
   trash: boolean;        // this push will displace rather than destroy
+  // Collect the BOX's copy of everything the client would need to become a
+  // mirror of it — the other half of the same comparison. Off for a push, which
+  // never looks at the box's version of a file it is about to replace.
+  //
+  // Sharing the walk rather than writing a second one is the point: the deny
+  // filter, the skip filter and the held-ancestor rule are subtle and they must
+  // mean the same thing in both directions, or a path one direction protects
+  // the other one moves.
+  pull: boolean;
   deny: PushIgnoreRule[];
   file: string;          // single-file push: the one name under target, else ''
 }): Promise<PushPlanBuild> {
@@ -4629,6 +4643,9 @@ async function pushBuildPlan(opts: {
   let bytesToSend = 0;
   let manifestCount = 0;
   const rangeCandidates: [string, number][] = [];
+  // The box's own entries for everything a pull would carry: the files it holds
+  // that differ, plus the ones the client has never seen.
+  const pullFetch: PushEntry[] = [];
 
   for await (const c of opts.entries) {
     // Position in the manifest as *received*, counted before the deny filter.
@@ -4665,6 +4682,10 @@ async function pushBuildPlan(opts: {
       updateBits.set(i);
       updateCount += 1;
       if (opts.collectPaths) updatePaths.push(c.path);
+      // Same file, different content: a push would send ours, a pull wants
+      // theirs. `s` is non-null here — pushCompare only says 'add' when it is
+      // missing — so this is the box's own copy, sizes and all.
+      if (opts.pull && s) pullFetch.push(s);
     }
     if (c.type === 'file') bytesToSend += c.size ?? 0;
     // Only a file the client could choose to range is worth asking about, and
@@ -4696,6 +4717,24 @@ async function pushBuildPlan(opts: {
   // delete would work from. Empty in file mode, so the answer cannot depend on
   // the caller having remembered to turn deletes off.
   const leftover = opts.file ? [] : Array.from(sMap.keys()).filter(p => !heldAncestors.has(p));
+  // Everything the box holds and the client never mentioned. To a push these
+  // are leftovers to remove or report; to a pull they are the files that would
+  // arrive. Same set, opposite meaning — which is why one walk answers both.
+  if (opts.pull) {
+    for (const p of leftover) {
+      const s = sMap.get(p);
+      if (s) pullFetch.push(s);
+    }
+  }
+  // Directories first and then by path, so a client extracting in order always
+  // has the parent of whatever it is about to write. Sorting here rather than
+  // relying on walk order makes that a property of the plan rather than of how
+  // the box happened to traverse.
+  pullFetch.sort((a, b) => {
+    if ((a.type === 'dir') !== (b.type === 'dir')) return a.type === 'dir' ? -1 : 1;
+    return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+  });
+  const pullBytes = pullFetch.reduce((n, e) => n + (e.type === 'file' ? e.size ?? 0 : 0), 0);
 
   // A plan has to outlive the upload it describes, and a chunked apply keeps
   // coming back to it, so the allowance follows the payload rather than a flat
@@ -4727,6 +4766,8 @@ async function pushBuildPlan(opts: {
     preserved:     Array.from(preserved).sort(),
     reclaimedBytes,
     partials,
+    pullFetch,
+    pullBytes,
   };
 }
 
@@ -4926,6 +4967,7 @@ router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: expre
       deletes:      true,
       sweep:        true,
       trash:        false,
+      pull:         false,
       deny,
       file:         '',
     });
@@ -5000,6 +5042,7 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
       // to include not quietly reclaiming disk on the way past.
       sweep:        !dryRun,
       trash:        trash !== null,
+      pull:         false,
       deny,
       file:         hdr.file,
     });
@@ -5469,6 +5512,201 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   });
 });
 
+// =================== PULL (box → client) ===================
+//
+//   POST /api/pull/plan2   same manifest up, the box's side of the diff down
+//   GET  /api/pull/fetch   tar of what the client is missing + a sentinel
+//
+// The diff is push's diff read the other way round, from the same walk: what
+// push calls an `update` is a file a pull wants the box's copy of, and what
+// push calls a `leftover` is a file the client has never seen. Sharing the walk
+// is not a saving, it is the correctness argument — the deny filter, the skip
+// filter and the held-ancestor rule have to mean the same thing in both
+// directions, or a path one direction protects the other one moves.
+//
+// What is NOT shared is trust. Push writes client-controlled bytes into a box;
+// pull writes box-controlled bytes into someone's home directory, where
+// ~/.ssh/authorized_keys and the shell rc files live. Everything the box names
+// is therefore checked again on the client — see the escape guard in pull.go.
+// The box does its half here: entries are already deny-filtered, and paths are
+// re-validated on the way out.
+
+interface PullPlan {
+  target: string;
+  rel: string;
+  // Exactly what this plan may hand over, in the order it will be sent.
+  // Enumerated at plan time so `fetch` reads a list rather than re-walking a
+  // tree that may have changed underneath it.
+  fetch: PushEntry[];
+  bytes: number;
+  expiresAt: number;
+  // Proves a download completed. Echoed in a response header and written as the
+  // final tar entry; the client refuses to promote anything unless the two
+  // match, which is what makes a truncated stream land nothing at all.
+  sentinel: string;
+}
+
+const pullPlans = new Map<string, PullPlan>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, p] of pullPlans) if (p.expiresAt < now) pullPlans.delete(id);
+}, 60_000).unref();
+
+const PULL_SENTINEL_ENTRY = '.abox-pull-sentinel';
+
+router.post('/api/pull/plan2', async (req: express.Request, res: express.Response) => {
+  let sent = false;
+  const fail = (code: number, error: string): void => {
+    if (!sent) { sent = true; res.status(code).json({ error }); }
+  };
+  try {
+    const lines = pushReadNdjson(req);
+    const first = await lines.next();
+    if (first.done) { fail(400, 'empty body: expected a header line'); return; }
+    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; file?: unknown };
+    const hdr = pushCheckHeader(raw);
+    if ('error' in hdr) { fail(400, hdr.error); return; }
+    // A pull reads; it never writes to the box. So there is nothing to reserve
+    // and nothing to conflict with, and a pull running beside a push is fine —
+    // the worst case is a plan naming a file that changed, which the fetch
+    // notices and reports rather than silently splicing.
+    const resolved = pushResolveTarget(hdr, false);
+    if ('error' in resolved) { fail(resolved.code, resolved.error); return; }
+    const target = resolved.target;
+
+    const deny = loadPushIgnoreDir(PUSH_IGNORE_DIR);
+    const entries = (async function* () {
+      for await (const v of lines) yield pushParseEntry(v);
+    })();
+    const built = await pushBuildPlan({
+      target,
+      rel:          hdr.rel,
+      checksum:     raw.checksum === true,
+      skipPatterns: hdr.skip,
+      entries,
+      collectPaths: false,
+      // Both off: a pull changes nothing on the box, so it must not remove the
+      // box's leftovers, must not sweep its staging, and must not touch its
+      // trash. `deletes: false` also keeps the leftover list intact, which for
+      // a pull is the payload rather than a warning.
+      deletes:      false,
+      sweep:        false,
+      trash:        false,
+      pull:         true,
+      deny,
+      file:         hdr.file,
+    });
+
+    // What the box actually holds at this path. A client pulling something it
+    // does not have yet cannot tell a file from a directory locally — there is
+    // nothing there to look at — so it assumes a directory and asks. Saying so
+    // costs one lstat and saves the alternative, which is guessing from the
+    // shape of the name.
+    let targetType = 'missing';
+    try {
+      const st = await fs.promises.lstat(target);
+      targetType = st.isDirectory() ? 'dir' : st.isSymbolicLink() ? 'symlink' : 'file';
+    } catch { /* missing, which is a fact rather than a failure */ }
+
+    const planId = crypto.randomUUID();
+    const sentinel = crypto.randomBytes(16).toString('hex');
+    pullPlans.set(planId, {
+      target,
+      rel:       hdr.rel,
+      fetch:     built.pullFetch,
+      bytes:     built.pullBytes,
+      expiresAt: built.expiresAt,
+      sentinel,
+    });
+    sent = true;
+    res.json({
+      plan_id:        planId,
+      target,
+      target_type:    targetType,
+      manifest_count: built.manifestCount,
+      // What would arrive here, as entries rather than positions: these are
+      // paths the client has never seen, so there is no manifest slot to point
+      // at. This list IS the delta, not the tree — a client that already
+      // matches the box gets an empty one however large the box is.
+      fetch:          built.pullFetch,
+      fetch_count:    built.pullFetch.length,
+      bytes_to_fetch: built.pullBytes,
+      // Manifest positions the box does not have at all. A pull never removes
+      // them; they are reported so the summary can say what it is leaving.
+      local_only_bits:  built.addBits,
+      local_only_count: built.addCount,
+      preserved:       built.preserved.slice(0, PUSH_PRESERVED_SAMPLE),
+      preserved_count: built.preserved.length,
+      expires_at:      Math.floor(built.expiresAt / 1000),
+      accept_encoding: PUSH_ACCEPT_ENCODING,
+    });
+  } catch (err) {
+    fail(400, `pull plan failed: ${errorMessage(err)}`);
+  }
+});
+
+router.get('/api/pull/fetch', async (req: express.Request, res: express.Response) => {
+  const planId = (req.query.plan_id as string) || '';
+  const plan = pullPlans.get(planId);
+  if (!plan || plan.expiresAt < Date.now()) {
+    if (plan) pullPlans.delete(planId);
+    res.status(404).json({ error: 'plan not found or expired' });
+    return;
+  }
+  // Resume at an entry boundary. A partial file is never resumed mid-way: the
+  // client promotes by rename after the sentinel, so anything incomplete was
+  // discarded rather than left half-written, and re-sending one file is cheap
+  // next to the bookkeeping that not re-sending it would need.
+  const from = Math.max(0, Number(req.query.from ?? 0) || 0);
+  if (from > plan.fetch.length) {
+    res.status(400).json({ error: `from=${from} is past the end of this plan (${plan.fetch.length} entries)` });
+    return;
+  }
+
+  res.setHeader('Content-Type', 'application/x-tar');
+  res.setHeader('X-Abox-Pull-Sentinel', plan.sentinel);
+  res.setHeader('X-Abox-Pull-Total', String(plan.fetch.length));
+
+  const pack = tarPack();
+  pack.pipe(res);
+  try {
+    for (let i = from; i < plan.fetch.length; i++) {
+      const e = plan.fetch[i];
+      const abs = path.join(plan.target, e.path);
+      if (e.type === 'dir') {
+        pack.entry({ name: e.path + '/', type: 'directory', mode: 0o755 });
+        continue;
+      }
+      if (e.type === 'symlink') {
+        pack.entry({ name: e.path, type: 'symlink', linkname: e.target ?? '' });
+        continue;
+      }
+      // Restat rather than trusting the plan: the tar header declares a size,
+      // and a body that does not match it corrupts the stream for every entry
+      // after it. A file that changed since planning is skipped and the next
+      // pull picks it up, which is better than a truncated archive.
+      let st: fs.Stats;
+      try { st = await fs.promises.stat(abs); } catch { continue; }
+      if (!st.isFile()) continue;
+      await new Promise<void>((resolve, reject) => {
+        const entry = pack.entry({ name: e.path, size: st.size, mode: st.mode & 0o777, mtime: st.mtime },
+          (err?: Error | null) => err ? reject(err) : resolve());
+        fs.createReadStream(abs).on('error', reject).pipe(entry);
+      });
+    }
+    // Last, and only on a clean walk: its absence is how a client tells a
+    // truncated download from a short one.
+    pack.entry({ name: PULL_SENTINEL_ENTRY, size: plan.sentinel.length }, plan.sentinel);
+    pack.finalize();
+  } catch (err) {
+    // The headers are long gone, so there is no status to change. Destroying
+    // the response truncates the stream, the sentinel never arrives, and the
+    // client discards its staging directory — which is exactly the outcome.
+    console.error(`[pull] fetch failed plan=${planId}: ${errorMessage(err)}`);
+    res.destroy();
+  }
+});
+
 // =================== SYNC (the agreed-state record) ===================
 //
 // One round trip, about a hundred bytes each way, answering the only question
@@ -5483,6 +5721,78 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
 // A box that predates this answers 404, and the client reads that as "keeps no
 // records" rather than as a failure. That is the whole capability negotiation —
 // there is no bit to advertise, because the endpoint's absence says it.
+/**
+ * What an entity means ON THIS BOX — the resolution half of `abox-cli pull app`.
+ *
+ * Resolution belongs to the side that owns the entity: the client for a push,
+ * the box for a pull. A pulling client cannot read the box's apps.yaml, and it
+ * must not guess, so the box answers with the card(s) and the one project each
+ * command's `command` names.
+ *
+ * Everything here is untrusted input by the time it reaches the client — a
+ * shared or borrowed box choosing the paths a pull writes to is the whole
+ * threat model — so the client re-validates every `root` as a relative path
+ * under $HOME. This end does its half: system-layer keys are never offered,
+ * because a system card copied into the user layer would shadow the image's own
+ * and survive an upgrade that was meant to replace it.
+ */
+router.get('/api/sync/entity', (req: express.Request, res: express.Response) => {
+  const wantAll = req.query.all === '1';
+  const name = typeof req.query.name === 'string' ? req.query.name : '';
+  if (!wantAll && !name) { res.status(400).json({ error: 'name or all=1 is required' }); return; }
+
+  const userCfg = loadConfigFile(path.join(os.homedir(), '.wsh')) as Record<string, unknown> | null;
+  const user = (userCfg ?? {}) as Record<string, unknown>;
+
+  const pickable = (key: string, entry: unknown): entry is Record<string, unknown> => {
+    if (key.startsWith('_')) return false;                       // shared defaults, not an app
+    if (!entry || typeof entry !== 'object') return false;
+    // A skill card names no project and its body is not in apps.yaml, so a
+    // sweep would land the card and not the skill. Named explicitly it still
+    // goes; swept up it is half an app. Mirrors `push app --all`.
+    if (wantAll && 'skill' in (entry as Record<string, unknown>)) return false;
+    return true;
+  };
+
+  const cards: { key: string; entry: unknown }[] = [];
+  if (wantAll) {
+    for (const [k, v] of Object.entries(user)) if (pickable(k, v)) cards.push({ key: k, entry: v });
+    cards.sort((a, b) => a.key.localeCompare(b.key));
+  } else {
+    const entry = user[name];
+    if (!pickable(name, entry)) {
+      // Deliberately the same answer for "not yours" and "not there": the user
+      // layer is the only thing pullable either way, and distinguishing them
+      // would only teach a caller what the image ships.
+      res.status(404).json({ error: `no user-layer app ${name} on this box` });
+      return;
+    }
+    cards.push({ key: name, entry });
+  }
+
+  // One project per card, from its `command` alone. Not `cwd`: a cwd is where a
+  // command runs — routinely ~/bin or $HOME — so treating it as a root means
+  // naming one app syncs an unrelated tree.
+  const roots = new Set<string>();
+  for (const c of cards) {
+    const cmd = (c.entry as { command?: unknown }).command;
+    if (typeof cmd !== 'string') continue;
+    const found = new Set<string>();
+    for (const m of cmd.matchAll(/(?:^|[\s"'=:])(?:~|\/root|\$HOME)\/workspace\/([A-Za-z0-9._-]+)/g)) {
+      found.add(m[1]);
+    }
+    if (found.size > 1) {
+      res.status(409).json({
+        error: `app ${c.key} names more than one project (${[...found].join(', ')}) — taking the first would land half an app`,
+      });
+      return;
+    }
+    for (const p of found) roots.add(`workspace/${p}`);
+  }
+
+  res.json({ cards, roots: [...roots].sort() });
+});
+
 router.post('/api/sync/check', express.json({ limit: '1mb' }), async (req: express.Request, res: express.Response) => {
   const body = req.body as { replica?: unknown; root?: Record<string, unknown> };
   const root = (body?.root ?? {}) as { rel?: unknown; home?: unknown; file?: unknown; skip?: unknown; skip_fp?: unknown; local_hash?: unknown };
