@@ -4533,6 +4533,8 @@ interface PushPlanBuild {
   // version of a file it is about to replace.
   pullFetch: PushEntry[];
   pullBytes: number;
+  /** Hash of the box's whole tree, for a pull to record. '' unless pull. */
+  pullBoxHash: string;
 }
 
 /**
@@ -4628,11 +4630,32 @@ async function pushBuildPlan(opts: {
   // otherwise run a box out of disk, since the second mirror is also the one
   // with the most to displace. Not gated on `deletes`: an overwrite fills the
   // trash just as surely as a removal does.
-  if (opts.sweep && opts.trash) {
+  //
+  // Never for a single-file push, though. The sweep sizes every batch it is
+  // considering, which on a large trash is tens of thousands of stats — and it
+  // runs before the manifest is even read, so the client's upload stalls behind
+  // it. File mode exists precisely so that copying one file costs what one file
+  // costs; paying a directory walk here would hand that back, for a push that
+  // can displace at most one file.
+  if (opts.sweep && opts.trash && !opts.file) {
     reclaimedBytes += await pushTrashSweep();
   }
   const sMap = new Map<string, PushEntry>();
   for (const e of serverEntries) sMap.set(e.path, e);
+
+  // The box's hash of its own tree, for a pull to record.
+  //
+  // Free here and only here: a pull does not change the box, so the state this
+  // walk just described IS the state the two sides will have agreed on once the
+  // client promotes. Push cannot reuse it — its record has to describe the tree
+  // *after* the apply and the repair hook — which is why that side still pays a
+  // re-walk and this one does not.
+  let pullBoxHash = '';
+  if (opts.pull) {
+    const h = new SyncHash();
+    for (const e of serverEntries) h.add(e);
+    pullBoxHash = h.digest();
+  }
 
   const addBits = new PushBitmap();
   const updateBits = new PushBitmap();
@@ -4768,6 +4791,7 @@ async function pushBuildPlan(opts: {
     partials,
     pullFetch,
     pullBytes,
+    pullBoxHash,
   };
 }
 
@@ -5631,6 +5655,10 @@ router.post('/api/pull/plan2', async (req: express.Request, res: express.Respons
       fetch:          built.pullFetch,
       fetch_count:    built.pullFetch.length,
       bytes_to_fetch: built.pullBytes,
+      // What the client should record as the box's half once it has promoted.
+      // The box is unchanged by a pull, so this walk's answer is still true
+      // afterwards — no second walk, and no window for it to go stale.
+      box_hash:       built.pullBoxHash,
       // Manifest positions the box does not have at all. A pull never removes
       // them; they are reported so the summary can say what it is leaving.
       local_only_bits:  built.addBits,
@@ -5791,6 +5819,60 @@ router.get('/api/sync/entity', (req: express.Request, res: express.Response) => 
   }
 
   res.json({ cards, roots: [...roots].sort() });
+});
+
+/**
+ * Record an agreement the client established — the pull side of the record.
+ *
+ * Writing the record is an operation, not a phase of push. Push happens to do
+ * it inside its own apply because that is where the post-hook tree exists; a
+ * pull has no apply on this box at all, since the transfer lands on the client.
+ * Making it an endpoint is what lets both directions establish an agreement
+ * rather than only the one that happens to run code here.
+ *
+ * The client supplies both halves, and neither is taken on trust in any way
+ * that matters: `local_hash` describes the client's own tree, which only it can
+ * see, and `box_hash` is the value this box handed it in the pull plan. A
+ * client that lies writes a record its own next check reads as a mismatch — the
+ * cost lands entirely on the machine that lied, which is the same bargain
+ * ~/.abox/replica already makes.
+ */
+router.post('/api/sync/record', express.json({ limit: '1mb' }), (req: express.Request, res: express.Response) => {
+  const body = req.body as { replica?: unknown; root?: Record<string, unknown> };
+  const root = (body?.root ?? {}) as { rel?: unknown; file?: unknown; skip_fp?: unknown; local_hash?: unknown; box_hash?: unknown; deletes?: unknown };
+  if (!syncValidReplica(body?.replica)) { res.status(400).json({ error: 'replica must be 32 hex digits' }); return; }
+  if (typeof root.rel !== 'string' || typeof root.skip_fp !== 'string' || !root.skip_fp) {
+    res.status(400).json({ error: 'root.rel and root.skip_fp are required' });
+    return;
+  }
+  const file = pushFileName(root.file);
+  if (file === null) { res.status(400).json({ error: 'root.file must be a single path segment' }); return; }
+  for (const k of ['local_hash', 'box_hash'] as const) {
+    if (typeof root[k] !== 'string' || !/^[0-9a-f]{64}$/.test(root[k] as string)) {
+      res.status(400).json({ error: `root.${k} must be a sha256 hex digest` });
+      return;
+    }
+  }
+  // Validated even though nothing here dereferences it: the rel becomes the key
+  // of a stored record, and a key no real sync could ever produce is one
+  // nothing will ever match — a slow leak rather than a loud error.
+  const home = root.rel === PUSH_HOME_REL;
+  if (!pushSafeTarget(home ? PUSH_HOME : path.join(PUSH_HOME, root.rel), root.rel, home)) {
+    res.status(400).json({ error: 'rel must name a path inside $HOME' });
+    return;
+  }
+  syncWrite(body.replica, {
+    rel: pushRecordRel(root.rel, file),
+    fp:  root.skip_fp,
+    lh:  root.local_hash as string,
+    bh:  root.box_hash as string,
+    // A pull never deletes, so what it records is an overlay: the client may
+    // hold files the box does not. Saying so is what stops a later
+    // `push --delete` reading "in sync" and leaving them behind.
+    del: root.deletes === true,
+    at:  Math.floor(Date.now() / 1000),
+  });
+  res.json({ ok: true });
 });
 
 router.post('/api/sync/check', express.json({ limit: '1mb' }), async (req: express.Request, res: express.Response) => {
