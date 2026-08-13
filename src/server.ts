@@ -25,6 +25,7 @@ import * as metrics from './metrics';
 import { agentOf, captureTokens, dropSession } from './agentTokens';
 import { commandBinary } from './commandBinary';
 import { loadPushIgnoreDir, compilePushIgnore, pushIgnored, PushIgnoreRule, PUSH_IGNORE_DIR as PUSH_IGNORE_DEFAULT_DIR } from './pushIgnore';
+import { SyncHash, syncClassify, syncFind, syncValidReplica, syncWrite } from './syncState';
 import { runPushPostfix, PUSH_POSTFIX_HOOK as PUSH_POSTFIX_DEFAULT_HOOK } from './pushPostfix';
 
 // --- Error handling ---
@@ -3992,6 +3993,23 @@ interface PushEntry {
   sha256?: string;     // when --checksum
 }
 
+/**
+ * What a plan should record once it has fully landed, from the client that
+ * asked for it. Absent when the client keeps no records or the box was told
+ * nothing — an older client, or one that could not determine its own replica.
+ *
+ * The box supplies the other half itself, from a re-walk taken after the repair
+ * hook has run. A hash derived from the plan would report "box moved" forever
+ * on exactly the files the hook exists to rewrite.
+ */
+interface PushRecordIntent {
+  replica: string;
+  skipFp: string;
+  localHash: string;
+  /** The client's skip list, needed again to filter the re-walk. */
+  skip: string[];
+}
+
 interface PushPlan {
   target: string;
   // Target's path relative to $HOME. Deny rules are written against $HOME, so
@@ -4012,6 +4030,12 @@ interface PushPlan {
   // than re-read at apply time so the two phases can't disagree if the image's
   // rule files change underneath a push in flight.
   deny: PushIgnoreRule[];
+  // Whether this plan acts on the leftovers. Recorded alongside the hashes, so
+  // a later `push --delete` can tell "both sides are where we left them" from
+  // "both sides are where we left them, as an overlay we now want collapsed".
+  deletes: boolean;
+  /** Null when nothing should be recorded. See PushRecordIntent. */
+  record: PushRecordIntent | null;
 }
 
 /**
@@ -4377,8 +4401,22 @@ async function pushStatOne(dir: string, name: string): Promise<PushEntry | undef
   };
 }
 
-/** One client entry against the target's copy. null means "already identical". */
-function pushCompare(c: PushEntry, s: PushEntry | undefined, checksum: boolean): 'add' | 'update' | null {
+/**
+ * One client entry against the target's copy.
+ *
+ * null means "already identical". 'verify' means metadata says identical and
+ * the client asked us not to take metadata's word for it — the caller resolves
+ * that by hashing the box's copy (see pushVerifyChecksum).
+ *
+ * That extra verdict exists because the box has no content hash to compare
+ * against here: pushWalk reports size, mtime and mode, never sha256. The
+ * original `checksum && c.sha256 && s.sha256 && ...` test therefore could never
+ * fire — `s.sha256` is never assigned anywhere on this side — so `--checksum`
+ * silently did nothing at all while costing the client a full read of every
+ * file it pushed. Deciding here and hashing in the caller keeps the comparison
+ * itself synchronous and total.
+ */
+function pushCompare(c: PushEntry, s: PushEntry | undefined, checksum: boolean): 'add' | 'update' | 'verify' | null {
   if (!s) return 'add';
   if (c.type !== s.type) return 'update';
   if (c.type === 'file') {
@@ -4387,11 +4425,36 @@ function pushCompare(c: PushEntry, s: PushEntry | undefined, checksum: boolean):
     // flag every empty file as a perpetual update.
     const sizeDiff = (c.size ?? 0) !== (s.size ?? 0);
     const mtDiff   = Math.abs((c.mtime_ns ?? 0) - (s.mtime_ns ?? 0)) > PUSH_MTIME_TOL_NS;
-    const shaDiff  = checksum && !!c.sha256 && !!s.sha256 && c.sha256 !== s.sha256;
-    return sizeDiff || mtDiff || shaDiff ? 'update' : null;
+    if (sizeDiff || mtDiff) return 'update';
+    // Only a file the metadata calls identical is worth hashing: anything else
+    // is already an update, and hashing it could not change that.
+    return checksum && !!c.sha256 ? 'verify' : null;
   }
   if (c.type === 'symlink') return (c.target ?? '') !== (s.target ?? '') ? 'update' : null;
   return null; // dirs: mode-only changes ignored
+}
+
+/**
+ * Hash the box's copy of one file and say whether it differs from the client's.
+ *
+ * A read of the file is what `--checksum` is buying, so it is only spent on the
+ * entries where it can change the answer. An unreadable file counts as
+ * different: re-sending a file we cannot verify is the safe direction, and the
+ * alternative is a push that silently skips exactly the files it could not read.
+ */
+async function pushVerifyChecksum(abs: string, want: string): Promise<boolean> {
+  try {
+    const h = crypto.createHash('sha256');
+    await new Promise<void>((resolve, reject) => {
+      const r = fs.createReadStream(abs);
+      r.on('data', (chunk) => h.update(chunk));
+      r.on('error', reject);
+      r.on('end', () => resolve());
+    });
+    return h.digest('hex') !== want;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -4572,7 +4635,13 @@ async function pushBuildPlan(opts: {
     if (denied(c.path, c.type === 'dir')) continue;
     const s = sMap.get(c.path);
     if (s) sMap.delete(c.path);
-    const verdict = pushCompare(c, s, opts.checksum);
+    let verdict = pushCompare(c, s, opts.checksum);
+    if (verdict === 'verify') {
+      // Metadata says identical; --checksum says prove it. This is the whole
+      // cost of the flag, and it is spent only on the files where the answer
+      // is still open.
+      verdict = (await pushVerifyChecksum(path.join(opts.target, c.path), c.sha256!)) ? 'update' : null;
+    }
     if (verdict === null) continue;
     if (verdict === 'add') {
       addBits.set(i);
@@ -4668,7 +4737,7 @@ function pushDeleteRollup(paths: string[], limit: number): { dir: string; count:
 }
 
 /** Record a freshly-built plan so apply can find it. */
-function pushRegisterPlan(built: PushPlanBuild, target: string, rel: string, deletes: boolean, deny: PushIgnoreRule[], file: string): void {
+function pushRegisterPlan(built: PushPlanBuild, target: string, rel: string, deletes: boolean, deny: PushIgnoreRule[], file: string, record: PushRecordIntent | null): void {
   pushPlans.set(built.planId, {
     target,
     rel,
@@ -4680,7 +4749,94 @@ function pushRegisterPlan(built: PushPlanBuild, target: string, rel: string, del
     delete:      deletes ? built.leftover : [],
     expiresAt:   built.expiresAt,
     deny,
+    deletes,
+    record,
   });
+}
+
+/**
+ * Read the client's intent to have this push recorded, or null.
+ *
+ * All three fields or none: a record keyed by a replica with no hash to
+ * remember, or a hash with nobody to attribute it to, is a line the next check
+ * can only ever read as a mismatch. Silently ignored rather than rejected —
+ * these fields are additive, and a client that half-sends them is one this box
+ * simply keeps no records for.
+ */
+function pushRecordIntent(raw: { replica?: unknown; skip_fp?: unknown; local_hash?: unknown }, skip: string[]): PushRecordIntent | null {
+  if (!syncValidReplica(raw.replica)) return null;
+  if (typeof raw.skip_fp !== 'string' || !raw.skip_fp) return null;
+  if (typeof raw.local_hash !== 'string' || !/^[0-9a-f]{64}$/.test(raw.local_hash)) return null;
+  return { replica: raw.replica, skipFp: raw.skip_fp, localHash: raw.local_hash, skip };
+}
+
+/**
+ * The $HOME-relative name a record is keyed by. A single file is a sync root
+ * like any other — one whose walk is one lstat — so it is recorded under its
+ * own path rather than under the directory that happens to contain it.
+ */
+function pushRecordRel(rel: string, file: string): string {
+  return file ? pushHomePrefix(rel) + file : rel;
+}
+
+/**
+ * Hash what this box currently holds under `target`, through the same filter
+ * the diff uses. Also reports the entry count, since "the destination is
+ * empty" is what lets a first push land without a prompt.
+ */
+async function pushHashTarget(
+  target: string,
+  rel: string,
+  skipPatterns: string[],
+  deny: PushIgnoreRule[],
+  file: string,
+): Promise<{ hash: string; entries: number }> {
+  const h = new SyncHash();
+  if (file) {
+    const one = await pushStatOne(target, file);
+    if (one) h.add(one);
+    return { hash: h.digest(), entries: h.entries };
+  }
+  const homePrefix = pushHomePrefix(rel);
+  const skip = compilePushIgnore(skipPatterns.join('\n'), 'client skip list');
+  const walked = await pushWalk(
+    target,
+    (p, isDir) => !!pushRuleHit(deny, homePrefix, p, isDir) || !!pushRuleHit(skip, homePrefix, p, isDir),
+  );
+  for (const e of walked.entries) h.add(e);
+  return { hash: h.digest(), entries: walked.entries.length };
+}
+
+/**
+ * Write the agreement this push just established, from a fresh walk of the
+ * finished tree.
+ *
+ * A re-walk, not the plan: the repair hook rewrites files after they land, so a
+ * hash derived from what was sent would report "box moved" forever on exactly
+ * the files the image exists to rewrite. Skip-filtered, because the box's tree
+ * holds paths the client never sends. Called only on a full success — a push
+ * that dies mid-chunk leaves the record alone, so the next run sees more
+ * difference than there is, which is the safe direction.
+ */
+async function pushWriteRecord(plan: PushPlan, target: string): Promise<void> {
+  const rec = plan.record;
+  if (!rec) return;
+  try {
+    const { hash } = await pushHashTarget(target, plan.rel, rec.skip, plan.deny, plan.file);
+    syncWrite(rec.replica, {
+      rel: pushRecordRel(plan.rel, plan.file),
+      fp:  rec.skipFp,
+      lh:  rec.localHash,
+      bh:  hash,
+      del: plan.deletes,
+      at:  Math.floor(Date.now() / 1000),
+    });
+  } catch (err) {
+    // The files have landed and there is nothing to roll back. A missing record
+    // costs the next push a confirmation prompt, which is what having no record
+    // has always meant.
+    console.error(`[sync] could not record ${plan.rel}: ${errorMessage(err)}`);
+  }
 }
 
 /**
@@ -4759,7 +4915,9 @@ router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: expre
     });
   } catch (err) { res.status(500).json({ error: `plan failed: ${errorMessage(err)}` }); return; }
 
-  pushRegisterPlan(built, target, hdr.rel, true, deny, '');
+  // v1 predates the sync record entirely, so there is nothing to record and no
+  // client that would read it back.
+  pushRegisterPlan(built, target, hdr.rel, true, deny, '', null);
   res.json({
     plan_id:       built.planId,
     target,
@@ -4789,7 +4947,7 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     const lines = pushReadNdjson(req);
     const first = await lines.next();
     if (first.done) { fail(400, 'empty body: expected a header line'); return; }
-    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; deletes?: unknown; dry_run?: unknown; file?: unknown };
+    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; deletes?: unknown; dry_run?: unknown; file?: unknown; replica?: unknown; skip_fp?: unknown; local_hash?: unknown };
     const hdr = pushCheckHeader(raw);
     if ('error' in hdr) { fail(400, hdr.error); return; }
     // A dry run neither writes nor deletes, so it has nothing to conflict with.
@@ -4826,7 +4984,9 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     // A dry run reserves nothing. Registering it would hold the tree against
     // other pushes for the idle timeout, so `push -n ~` followed by `push ~` —
     // the most natural sequence there is — would answer 409.
-    if (!dryRun) pushRegisterPlan(built, target, hdr.rel, deletes, deny, hdr.file);
+    // A dry run records nothing, for the same reason it registers no plan: it
+    // changes neither side, so there is no new agreement to remember.
+    if (!dryRun) pushRegisterPlan(built, target, hdr.rel, deletes, deny, hdr.file, pushRecordIntent(raw, hdr.skip));
     sent = true;
     res.json({
       plan_id:       dryRun ? '' : built.planId,
@@ -5208,8 +5368,6 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   }
 
   await cleanup();
-  // The push is over: drop the plan and the tree it was holding.
-  if (isFinal) { pushPlans.delete(planId); pushActiveApplies.delete(planId); }
 
   // Hand the finished tree to the image's repair script — whole-box pushes
   // only. Replicating a box is what lands one box's env-bound config on
@@ -5239,6 +5397,21 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
     console.error(`[push] postfix hook exited ${postfix.code}: ${postfix.output}`);
   }
 
+  // What the two sides now agree on. Last of all, and only on the final chunk:
+  // after the deletes so the walk sees the tree the push actually leaves, and
+  // after the hook so it sees the files as repaired rather than as sent — a
+  // hash taken before the hook would report "box moved" forever on exactly the
+  // files the image exists to rewrite.
+  //
+  // The tree is still reserved here. The plan used to be dropped before the
+  // hook ran, which left the hook — the one thing that writes files after the
+  // promote — outside the guard that keeps two pushes off one tree. Releasing
+  // below instead closes that window as well as this one.
+  if (isFinal) await pushWriteRecord(plan, target);
+
+  // The push is over: drop the plan and the tree it was holding.
+  if (isFinal) { pushPlans.delete(planId); pushActiveApplies.delete(planId); }
+
   res.json({
     added:         plan.addCount,
     updated:       plan.updateCount,
@@ -5251,6 +5424,66 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
     // wsh never has to know what a repair means.
     ...(postfix ? { postfix } : {}),
   });
+});
+
+// =================== SYNC (the agreed-state record) ===================
+//
+// One round trip, about a hundred bytes each way, answering the only question
+// push cannot answer for itself: has anyone changed the box since we last
+// agreed? The client combines the answer with the shape of its plan to decide
+// how much it may do without asking — see abox's sync.md.
+//
+// Read-only and cheap enough to run before the manifest is offered, which is
+// what lets a tree neither side has touched stop here entirely: no manifest
+// uploaded, no diff computed, nothing promoted.
+//
+// A box that predates this answers 404, and the client reads that as "keeps no
+// records" rather than as a failure. That is the whole capability negotiation —
+// there is no bit to advertise, because the endpoint's absence says it.
+router.post('/api/sync/check', express.json({ limit: '1mb' }), async (req: express.Request, res: express.Response) => {
+  const body = req.body as { replica?: unknown; root?: Record<string, unknown> };
+  const root = (body?.root ?? {}) as { rel?: unknown; home?: unknown; file?: unknown; skip?: unknown; skip_fp?: unknown; local_hash?: unknown };
+  if (!syncValidReplica(body?.replica)) { res.status(400).json({ error: 'replica must be 32 hex digits' }); return; }
+  if (typeof root.rel !== 'string' || typeof root.skip_fp !== 'string' || !root.skip_fp) {
+    res.status(400).json({ error: 'root.rel and root.skip_fp are required' });
+    return;
+  }
+  if (typeof root.local_hash !== 'string' || !/^[0-9a-f]{64}$/.test(root.local_hash)) {
+    res.status(400).json({ error: 'root.local_hash must be a sha256 hex digest' });
+    return;
+  }
+  const file = pushFileName(root.file);
+  if (file === null) { res.status(400).json({ error: 'root.file must be a single path segment' }); return; }
+  const skip = root.skip ?? [];
+  if (!Array.isArray(skip) || skip.some(s => typeof s !== 'string') || skip.length > PUSH_MAX_SKIP_PATTERNS) {
+    res.status(400).json({ error: 'root.skip must be an array of at most ' + PUSH_MAX_SKIP_PATTERNS + ' strings' });
+    return;
+  }
+  const home = root.home === true;
+  // The destination is derived here rather than taken from the request: the
+  // check has no upload to pin down, so there is nothing for a caller-supplied
+  // target to add beyond another string to validate.
+  const target = pushSafeTarget(home ? PUSH_HOME : path.join(PUSH_HOME, root.rel), root.rel, home);
+  if (!target) { res.status(400).json({ error: 'rel must name a path inside $HOME' }); return; }
+
+  try {
+    const deny = loadPushIgnoreDir(PUSH_IGNORE_DIR);
+    const { hash, entries } = await pushHashTarget(target, root.rel, skip as string[], deny, file);
+    const rec = syncFind(body.replica, pushRecordRel(root.rel, file), root.skip_fp);
+    res.json({
+      root: {
+        state: syncClassify(rec, root.local_hash, hash),
+        // An empty destination has nothing that could have been deleted, which
+        // is what lets a first push land in silence with no record to prove it.
+        empty:          entries === 0,
+        box_hash:       hash,
+        at:             rec?.at ?? 0,
+        deletes_agreed: rec?.del ?? false,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: `sync check failed: ${errorMessage(err)}` });
+  }
 });
 
 router.use(express.json());
