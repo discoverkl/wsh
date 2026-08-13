@@ -3178,6 +3178,85 @@ router.post('/api/apps/:key/undefault', (req: express.Request, res: express.Resp
   res.json({ ok: true });
 });
 
+/**
+ * Merge one app entry into the user layer — the write half of `abox-cli push app`.
+ *
+ * The six toggles above set a single field on an app that already exists. This
+ * one carries a whole definition from another box, so it differs in three ways
+ * that are each load-bearing:
+ *
+ * 1. It writes through `parseDocument`, not `parse`/`stringify`. The toggles
+ *    round-trip the file through plain JS objects, which silently drops every
+ *    comment and reorders nothing back. That is tolerable for a button the user
+ *    pressed on this box; it is not tolerable for a push, whose whole promise is
+ *    to touch the one entry it names and leave the rest of the file as it found
+ *    it. `~/.wsh/apps.yaml` ships from skel as a commented starter, so the
+ *    comments being lost are usually the ones explaining the syntax.
+ * 2. The entry is *replaced*, not field-merged. The pushing box's definition is
+ *    the truth for that key — a field-merge would leave the target holding a
+ *    hybrid of two boxes' configs that neither one has, and which no later push
+ *    could clean up.
+ * 3. It refuses keys the caller has no business defining: `_`-prefixed reserved
+ *    keys, and any key the *system* layer defines. `abox-cli` refuses to send
+ *    those too, and deliberately so — the two checks are independent, so neither
+ *    side has to trust the other.
+ */
+router.post('/api/apps/:key', express.json({ limit: '256kb' }), (req: express.Request, res: express.Response) => {
+  const appKey = req.params.key;
+
+  // The key becomes a URL path segment (`${BASE}${appKey}`) and a YAML mapping
+  // key, so it is constrained to what is safe as both.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(appKey)) {
+    res.status(400).json({ error: 'Invalid app key' });
+    return;
+  }
+  // `_skills` and friends are shared defaults for every skill app, not an app.
+  // Replacing one from another box would silently repoint this box's agent.
+  if (appKey.startsWith('_')) {
+    res.status(400).json({ error: `${appKey} is a reserved key, not an app` });
+    return;
+  }
+  const entry = req.body;
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    res.status(400).json({ error: 'Body must be an app entry object' });
+    return;
+  }
+
+  // A system app arrives with the image on both ends, so a copy could only
+  // disagree with it — and the disagreement would win, since the user layer is
+  // merged last.
+  const systemConfig = (loadConfigFile(SYSTEM_CONFIG_DIR) ?? {}) as Record<string, any>;
+  if (systemConfig[appKey]) {
+    res.status(409).json({ error: `${appKey} is defined by this box's system config and ships with the image` });
+    return;
+  }
+
+  const userDir = path.join(os.homedir(), '.wsh');
+  const userFile = path.join(userDir, 'apps.yaml');
+  // A missing file and an empty one are the same starting point. A file that
+  // parsed to something other than a mapping is not: overwriting it would throw
+  // away whatever the user actually had there.
+  let doc: YAML.Document;
+  try { doc = YAML.parseDocument(fs.readFileSync(userFile, 'utf8')); } catch { doc = new YAML.Document({}); }
+  if (doc.contents === null) doc = new YAML.Document({});
+  if (doc.errors?.length) {
+    res.status(422).json({ error: `~/.wsh/apps.yaml does not parse: ${doc.errors[0].message}` });
+    return;
+  }
+  if (!YAML.isMap(doc.contents)) {
+    res.status(422).json({ error: '~/.wsh/apps.yaml root is not a mapping' });
+    return;
+  }
+
+  const created = doc.get(appKey) === undefined;
+  doc.set(appKey, entry);
+  fs.mkdirSync(userDir, { recursive: true });
+  fs.writeFileSync(userFile, doc.toString(), 'utf8');
+  // loadApps() reads this file on every request, so the card is live from here
+  // — there is nothing to reload and nothing to restart.
+  res.json({ ok: true, key: appKey, created });
+});
+
 router.get('/api/workspace', (req: express.Request, res: express.Response) => {
   const allowed = TRUST_PROXY ? gatewayAllowed(req) : true;
   if (!allowed) { res.status(403).json({ error: 'Forbidden' }); return; }
@@ -4789,6 +4868,13 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
       // every box did before this and what an old one would do with a slice:
       // write it as the entire file.
       accept_ranges: true,
+      // This box can merge an app entry into ~/.wsh/apps.yaml (POST
+      // /api/apps/<key>), so `abox-cli push app` can land a card as well as the
+      // files behind it. A client seeing no such field must refuse the entity
+      // push outright rather than uploading the files and skipping the card:
+      // half an app is a card-less directory the user could have pushed by path
+      // anyway, or worse, a directory whose card never arrives to point at it.
+      accept_entities: true,
       // Verified prefixes left by a run that died partway, so the next one
       // resumes instead of re-sending gigabytes it already sent.
       ...(Object.keys(built.partials).length ? { partials: built.partials } : {}),
