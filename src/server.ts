@@ -26,7 +26,7 @@ import { agentOf, captureTokens, dropSession } from './agentTokens';
 import { commandBinary } from './commandBinary';
 import { loadPushIgnoreDir, compilePushIgnore, pushIgnored, PushIgnoreRule, PUSH_IGNORE_DIR as PUSH_IGNORE_DEFAULT_DIR } from './pushIgnore';
 import { SyncHash, syncClassify, syncFind, syncValidReplica, syncWrite } from './syncState';
-import { pushTrashDisplace, pushTrashStamp, pushTrashSweep } from './pushTrash';
+import { PUSH_TRASH_DIR, pushTrashDisplace, pushTrashRecordSize, pushTrashStamp, pushTrashSweep } from './pushTrash';
 import { runPushPostfix, PUSH_POSTFIX_HOOK as PUSH_POSTFIX_DEFAULT_HOOK } from './pushPostfix';
 
 // --- Error handling ---
@@ -3251,6 +3251,29 @@ router.post('/api/apps/:key', express.json({ limit: '256kb' }), (req: express.Re
   }
 
   const created = doc.get(appKey) === undefined;
+  // Keep whatever this replaces. A card is the commit point of an entity push,
+  // and it is the one thing either direction overwrites without asking — the
+  // files beside it are classified and gated, the card is not. Until it goes
+  // through the same guard, the least this can do is be recoverable.
+  //
+  // One card per file under the batch, rather than a copy of apps.yaml: what
+  // someone wants back is the entry, and the surrounding document is already
+  // whatever the merge left.
+  if (!created) {
+    const prev = doc.get(appKey);
+    try {
+      const stamp = pushTrashStamp();
+      const dir = path.join(PUSH_TRASH_DIR, stamp, '.wsh', 'apps');
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(dir, `${appKey}.yaml`),
+        new YAML.Document({ [appKey]: prev }).toString(), 'utf8');
+    } catch (err) {
+      // Best-effort, in one direction only: a card that cannot be set aside is
+      // still merged. Refusing would make a box that cannot write its own trash
+      // a box that cannot receive an app.
+      console.error(`[apps] could not set aside ${appKey}: ${errorMessage(err)}`);
+    }
+  }
   doc.set(appKey, entry);
   fs.mkdirSync(userDir, { recursive: true });
   fs.writeFileSync(userFile, doc.toString(), 'utf8');
@@ -4765,7 +4788,12 @@ async function pushBuildPlan(opts: {
   }
   // The in-loop check above can only fire on an entry that arrived; a manifest
   // with none at all would otherwise plan a file push carrying no file.
-  if (opts.file && manifestCount !== 1) {
+  //
+  // A pull is exempt, and the exemption is the whole point of the mode there:
+  // `pull ~/.zshrc` onto a machine that has no ~/.zshrc sends an empty manifest
+  // because there is genuinely nothing to describe. Demanding one entry made
+  // the headline case the one case that could not work.
+  if (opts.file && !opts.pull && manifestCount !== 1) {
     throw new Error(`single-file push must carry exactly one entry named ${opts.file}`);
   }
 
@@ -4784,7 +4812,16 @@ async function pushBuildPlan(opts: {
   // one file, which is not a thing anyone asked about — and is the list a
   // delete would work from. Empty in file mode, so the answer cannot depend on
   // the caller having remembered to turn deletes off.
-  const leftover = opts.file ? [] : Array.from(sMap.keys()).filter(p => !heldAncestors.has(p));
+  // For a push, "what the box holds that we did not send" in file mode is every
+  // sibling of the one file — not a thing anyone asked about, and the list a
+  // delete would work from. Empty, so the answer cannot depend on the caller
+  // having remembered to turn deletes off.
+  //
+  // For a pull it is the opposite: the walk saw exactly one path, and if the
+  // client did not send it then that single entry IS what the pull carries.
+  const leftover = opts.file && !opts.pull
+    ? []
+    : Array.from(sMap.keys()).filter(p => !heldAncestors.has(p));
   // Everything the box holds and the client never mentioned. To a push these
   // are leftovers to remove or report; to a pull they are the files that would
   // arrive. Same set, opposite meaning — which is why one walk answers both.
@@ -5622,6 +5659,9 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   // promote — outside the guard that keeps two pushes off one tree. Releasing
   // below instead closes that window as well as this one.
   if (isFinal) pushWriteRecord(plan);
+  // Tell the batch how much it holds, so the next sweep can apply its size cap
+  // without measuring anything. This apply already counted it.
+  if (plan.trash && displacedBytes > 0) await pushTrashRecordSize(plan.trash, displacedBytes);
 
   // The push is over: drop the plan and the tree it was holding.
   if (isFinal) { pushPlans.delete(planId); pushActiveApplies.delete(planId); }
@@ -5728,17 +5768,6 @@ router.post('/api/pull/plan2', async (req: express.Request, res: express.Respons
       file:         hdr.file,
     });
 
-    // What the box actually holds at this path. A client pulling something it
-    // does not have yet cannot tell a file from a directory locally — there is
-    // nothing there to look at — so it assumes a directory and asks. Saying so
-    // costs one lstat and saves the alternative, which is guessing from the
-    // shape of the name.
-    let targetType = 'missing';
-    try {
-      const st = await fs.promises.lstat(target);
-      targetType = st.isDirectory() ? 'dir' : st.isSymbolicLink() ? 'symlink' : 'file';
-    } catch { /* missing, which is a fact rather than a failure */ }
-
     const planId = crypto.randomUUID();
     const sentinel = crypto.randomBytes(16).toString('hex');
     pullPlans.set(planId, {
@@ -5753,7 +5782,6 @@ router.post('/api/pull/plan2', async (req: express.Request, res: express.Respons
     res.json({
       plan_id:        planId,
       target,
-      target_type:    targetType,
       manifest_count: built.manifestCount,
       // What would arrive here, as entries rather than positions: these are
       // paths the client has never seen, so there is no manifest slot to point
@@ -5871,6 +5899,23 @@ router.get('/api/pull/fetch', async (req: express.Request, res: express.Response
  * because a system card copied into the user layer would shadow the image's own
  * and survive an upgrade that was meant to replace it.
  */
+/**
+ * The ways a card's `command` can name this box's home.
+ *
+ * All four, because a card is a shell line somebody wrote by hand and every one
+ * of these is ordinary there. The expanded form comes from os.homedir() rather
+ * than a literal `/root`: that is what an abox container's $HOME happens to be,
+ * so hardcoding it worked and would have gone on working right up until it
+ * didn't. The client builds its list the same way — see pushWorkspaceSpellings
+ * — and the two are held together by
+ * abox/cmd/abox-cli/testdata/command-projects.json, which both test suites run.
+ */
+function syncCommandProjectRe(): RegExp {
+  const esc = (v: string): string => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const homes = [esc(PUSH_HOME), '~', '\\$HOME', '/root'].join('|');
+  return new RegExp(`(?:^|[\\s"'=:])(?:${homes})/workspace/([A-Za-z0-9._-]+)`, 'g');
+}
+
 router.get('/api/sync/entity', (req: express.Request, res: express.Response) => {
   const wantAll = req.query.all === '1';
   const name = typeof req.query.name === 'string' ? req.query.name : '';
@@ -5913,7 +5958,7 @@ router.get('/api/sync/entity', (req: express.Request, res: express.Response) => 
     const cmd = (c.entry as { command?: unknown }).command;
     if (typeof cmd !== 'string') continue;
     const found = new Set<string>();
-    for (const m of cmd.matchAll(/(?:^|[\s"'=:])(?:~|\/root|\$HOME)\/workspace\/([A-Za-z0-9._-]+)/g)) {
+    for (const m of cmd.matchAll(syncCommandProjectRe())) {
       found.add(m[1]);
     }
     if (found.size > 1) {
@@ -6012,9 +6057,19 @@ router.post('/api/sync/check', express.json({ limit: '1mb' }), async (req: expre
     const deny = loadPushIgnoreDir(PUSH_IGNORE_DIR);
     const { hash, entries } = await pushHashTarget(target, root.rel, skip as string[], deny, file);
     const rec = syncFind(body.replica, pushRecordRel(root.rel, file), root.skip_fp);
+    // What the box actually holds here. A client pulling something it does not
+    // have yet cannot tell a file from a directory locally — there is nothing
+    // there to look at — and this walk has already been to the path, so saying
+    // so costs one lstat and saves a second round trip.
+    let targetType = 'missing';
+    try {
+      const st = await fs.promises.lstat(file ? path.join(target, file) : target);
+      targetType = st.isDirectory() ? 'dir' : st.isSymbolicLink() ? 'symlink' : 'file';
+    } catch { /* missing, which is a fact rather than a failure */ }
     res.json({
       root: {
         state: syncClassify(rec, root.local_hash, hash),
+        target_type: targetType,
         // An empty destination has nothing that could have been deleted, which
         // is what lets a first push land in silence with no record to prove it.
         empty:          entries === 0,

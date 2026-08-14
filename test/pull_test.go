@@ -96,9 +96,6 @@ func TestPullFetchesWhatTheClientLacks(t *testing.T) {
 	if got := numField(plan, "fetch_count"); got != 3 {
 		t.Errorf("fetch_count = %v, want 3 (a.txt, sub, sub/b.txt) — plan=%v", got, plan)
 	}
-	if plan["target_type"] != "dir" {
-		t.Errorf("target_type = %v, want dir", plan["target_type"])
-	}
 
 	planID, _ := plan["plan_id"].(string)
 	entries, sentinel := pullFetch(t, srv, planID, 0)
@@ -239,24 +236,6 @@ func TestPullResumesFromAnIndex(t *testing.T) {
 	}
 }
 
-// The box reports what it holds, because a client pulling something it does not
-// have yet cannot tell a file from a directory locally.
-func TestPullReportsTargetType(t *testing.T) {
-	srv, home := setupPush(t)
-	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte("export X=1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	plan := pullPlan(t, srv, ".zshrc", filepath.Join(home, ".zshrc"), nil)
-	if plan["target_type"] != "file" {
-		t.Errorf("target_type = %v, want file", plan["target_type"])
-	}
-
-	missing := pullPlan(t, srv, "workspace/nope", filepath.Join(home, "workspace", "nope"), nil)
-	if missing["target_type"] != "missing" {
-		t.Errorf("target_type = %v, want missing", missing["target_type"])
-	}
-}
-
 // A pull changes nothing on the box — no deletes, no staging sweep, no trash.
 func TestPullChangesNothingOnTheBox(t *testing.T) {
 	srv, home := setupPush(t)
@@ -278,5 +257,88 @@ func TestPullChangesNothingOnTheBox(t *testing.T) {
 	}
 	if b := trashBatches(t, home); len(b) != 0 {
 		t.Errorf("a pull created trash on the box: %v", b)
+	}
+}
+
+// Pulling a file this machine does not have — the headline case, and the one
+// that could not work.
+//
+// Two box-side assumptions were built for a single-file PUSH, where a manifest
+// of exactly one entry is guaranteed: the plan threw unless it got one, and it
+// forced `leftover` empty because a push's leftovers in file mode are every
+// sibling of the file. For a pull both are backwards. The manifest is empty
+// precisely because the client has nothing, and that single leftover IS what
+// the pull carries.
+func TestPullFileTheClientDoesNotHave(t *testing.T) {
+	srv, home := setupPush(t)
+	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte("export X=1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// rel is $HOME, file is the one name under it, manifest empty.
+	code, plan := srv.postNdjson(t, "/api/pull/plan2",
+		map[string]any{"rel": ".", "target": home, "home": true, "file": ".zshrc"},
+		[]map[string]any{})
+	if code != 200 {
+		t.Fatalf("pull plan: status %d, body=%v", code, plan)
+	}
+	if got := numField(plan, "fetch_count"); got != 1 {
+		t.Fatalf("fetch_count = %v, want 1 — the file the client lacks is the payload (plan=%v)", got, plan)
+	}
+
+	planID, _ := plan["plan_id"].(string)
+	entries, sentinel := pullFetch(t, srv, planID, 0)
+	if entries[".zshrc"] != "export X=1" {
+		t.Errorf("the file did not come down: %v", entries)
+	}
+	if sentinel == "" || entries[".abox-pull-sentinel"] != sentinel {
+		t.Error("the sentinel must still prove the download completed")
+	}
+}
+
+// And a client that already has it fetches nothing — the same mode, the other
+// answer, so the exemption above cannot have broken the ordinary case.
+func TestPullFileTheClientAlreadyHas(t *testing.T) {
+	srv, home := setupPush(t)
+	body := []byte("export X=1")
+	if err := os.WriteFile(filepath.Join(home, ".zshrc"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(filepath.Join(home, ".zshrc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, plan := srv.postNdjson(t, "/api/pull/plan2",
+		map[string]any{"rel": ".", "target": home, "home": true, "file": ".zshrc"},
+		[]map[string]any{
+			{"path": ".zshrc", "type": "file", "size": len(body), "mtime_ns": st.ModTime().UnixNano(), "mode": 0o644},
+		})
+	if code != 200 {
+		t.Fatalf("pull plan: status %d, body=%v", code, plan)
+	}
+	if got := numField(plan, "fetch_count"); got != 0 {
+		t.Errorf("fetch_count = %v, want 0 — the two sides already match", got)
+	}
+}
+
+// The check reports what the box holds, so a client with nothing locally can
+// resolve in one step rather than planning twice.
+func TestSyncCheckReportsTargetType(t *testing.T) {
+	srv, home := setupPush(t)
+	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "workspace", "101"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ rel, want string }{
+		{".zshrc", "file"},
+		{"workspace/101", "dir"},
+		{"workspace/nope", "missing"},
+	} {
+		got, _ := syncCheck(t, srv, syncRoot(tc.rel, syncFakeHash("a")))["target_type"].(string)
+		if got != tc.want {
+			t.Errorf("target_type for %s = %q, want %q", tc.rel, got, tc.want)
+		}
 	}
 }

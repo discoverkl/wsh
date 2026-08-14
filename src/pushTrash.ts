@@ -53,16 +53,34 @@ export function pushTrashStamp(): string {
   return `${now}-${crypto.randomBytes(3).toString('hex')}`;
 }
 
-/** Recursive size of a path, following nothing. 0 for anything unreadable. */
-async function pushTrashBytes(abs: string): Promise<number> {
-  let st: fs.Stats;
-  try { st = await fs.promises.lstat(abs); } catch { return 0; }
-  if (!st.isDirectory()) return st.size;
-  let total = 0;
-  let ents: fs.Dirent[];
-  try { ents = await fs.promises.readdir(abs, { withFileTypes: true }); } catch { return 0; }
-  for (const ent of ents) total += await pushTrashBytes(path.join(abs, ent.name));
-  return total;
+/**
+ * The file each batch records its own size in.
+ *
+ * Written once, when the apply that filled the batch finishes. The alternative
+ * — measuring at sweep time — means recursively stat-ing every batch under
+ * consideration before deciding anything, serially, before the manifest has
+ * even been read. On a large trash that is tens of thousands of syscalls in
+ * front of every push, to answer a question the process that created the batch
+ * already knew the answer to.
+ */
+const PUSH_TRASH_SIZE_FILE = '.bytes';
+
+/** Record what a batch holds, so the sweep never has to go and measure. */
+export async function pushTrashRecordSize(stamp: string, bytes: number): Promise<void> {
+  if (bytes <= 0) return;
+  try {
+    await fs.promises.writeFile(path.join(PUSH_TRASH_DIR, stamp, PUSH_TRASH_SIZE_FILE), String(bytes), 'utf8');
+  } catch { /* a batch with no sidecar is simply sized 0 by the sweep */ }
+}
+
+/** What a batch says it holds. 0 when it never got to say — see the sweep. */
+async function pushTrashRecordedBytes(abs: string): Promise<number> {
+  try {
+    const n = Number(await fs.promises.readFile(path.join(abs, PUSH_TRASH_SIZE_FILE), 'utf8'));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -81,7 +99,10 @@ export async function pushTrashDisplace(stamp: string, homeRel: string, abs: str
   let bytes: number;
   try {
     const st = await fs.promises.lstat(abs);
-    bytes = st.isDirectory() ? await pushTrashBytes(abs) : st.size;
+    // A directory's own size, not its contents'. Recursively measuring one just
+    // to put a number in a summary line meant a displaced node_modules cost a
+    // full walk before the single rename that does the actual work.
+    bytes = st.size;
   } catch {
     // Nothing there to displace — the overwhelmingly common case, and the
     // reason a mirror onto a fresh box costs nothing at all.
@@ -98,18 +119,22 @@ export async function pushTrashDisplace(stamp: string, homeRel: string, abs: str
   }
 }
 
-/** Batches, newest first, with their sizes. */
-async function pushTrashBatches(): Promise<{ name: string; abs: string; at: number; bytes: number }[]> {
+/**
+ * Batches, newest first. One stat each, and a size only for the ones that
+ * survive the age cut — nothing is measured that is about to be removed.
+ */
+async function pushTrashBatches(cutoff: number): Promise<{ abs: string; at: number; bytes: number; tooOld: boolean }[]> {
   let ents: fs.Dirent[];
   try { ents = await fs.promises.readdir(PUSH_TRASH_DIR, { withFileTypes: true }); }
   catch { return []; }
-  const out: { name: string; abs: string; at: number; bytes: number }[] = [];
+  const out: { abs: string; at: number; bytes: number; tooOld: boolean }[] = [];
   for (const ent of ents) {
     if (!ent.isDirectory()) continue;
     const abs = path.join(PUSH_TRASH_DIR, ent.name);
     let at = 0;
     try { at = (await fs.promises.stat(abs)).mtimeMs; } catch { continue; }
-    out.push({ name: ent.name, abs, at, bytes: await pushTrashBytes(abs) });
+    const tooOld = at < cutoff;
+    out.push({ abs, at, tooOld, bytes: tooOld ? 0 : await pushTrashRecordedBytes(abs) });
   }
   return out.sort((a, b) => b.at - a.at);
 }
@@ -137,12 +162,12 @@ async function pushTrashFreeBytes(): Promise<number> {
  * so a push is the only thing that needs to empty it.
  */
 export async function pushTrashSweep(): Promise<number> {
-  const batches = await pushTrashBatches();
+  const cutoff = Date.now() - PUSH_TRASH_MAX_AGE_MS;
+  const batches = await pushTrashBatches(cutoff);
   if (batches.length === 0) return 0;
 
   const free = await pushTrashFreeBytes();
   const cap = Math.min(PUSH_TRASH_MAX_BYTES, free === Infinity ? PUSH_TRASH_MAX_BYTES : free * PUSH_TRASH_FREE_SHARE);
-  const cutoff = Date.now() - PUSH_TRASH_MAX_AGE_MS;
 
   let kept = 0;
   let reclaimed = 0;
@@ -150,14 +175,13 @@ export async function pushTrashSweep(): Promise<number> {
     // Age first, then size: a batch inside the window can still be dropped for
     // being past the cap, but one outside it goes regardless of how small the
     // total is. Otherwise a box nobody pushes to keeps one batch for ever.
-    const tooOld = b.at < cutoff;
     const tooBig = kept + b.bytes > cap;
-    if (!tooOld && !tooBig) { kept += b.bytes; continue; }
+    if (!b.tooOld && !tooBig) { kept += b.bytes; continue; }
     try {
       await fs.promises.rm(b.abs, { recursive: true, force: true });
       reclaimed += b.bytes;
     } catch (err) {
-      console.error(`[trash] sweep failed for ${b.name}: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`[trash] sweep failed for ${b.abs}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return reclaimed;
