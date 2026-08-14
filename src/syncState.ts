@@ -191,7 +191,34 @@ export class SyncHash {
     this.count += 1;
   }
 
+  /**
+   * Take one entry back out.
+   *
+   * XOR is its own inverse, so removing is the same operation as adding — which
+   * is the property the whole incremental record rests on. A push can subtract
+   * the entries it is about to replace at plan time, add the ones it wrote at
+   * apply time, and arrive at the hash of the finished tree without ever
+   * walking it a second time.
+   */
+  remove(e: { path: string; type: string; size?: number; mtime_ns?: number; target?: string }): void {
+    const before = this.count;
+    this.add(e);
+    this.count = before - 1;
+  }
+
   get entries(): number { return this.count; }
+
+  /** The running state, small enough to park on a plan between requests. */
+  snapshot(): { acc: string; count: number } {
+    return { acc: this.acc.toString('hex'), count: this.count };
+  }
+
+  static restore(s: { acc: string; count: number }): SyncHash {
+    const h = new SyncHash();
+    h.acc = Buffer.from(s.acc, 'hex');
+    h.count = s.count;
+    return h;
+  }
 
   digest(): string {
     const tail = Buffer.alloc(8);

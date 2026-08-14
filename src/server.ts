@@ -4037,6 +4037,11 @@ interface PushPlan {
   deletes: boolean;
   /** Null when nothing should be recorded. See PushRecordIntent. */
   record: PushRecordIntent | null;
+  /**
+   * The record's running fold, carried across a chunked apply. Mutated in
+   * place as each chunk promotes, finalized on the last one.
+   */
+  recordHash: { acc: string; count: number } | null;
   // Keep what this push overwrites or removes. On unless the client opted out;
   // the batch name is fixed at plan time so every chunk of one push displaces
   // into the same place.
@@ -4068,6 +4073,22 @@ class PushBitmap {
   /** Trailing zero bytes are dropped; a bitmap with nothing set is ''. */
   toBase64(): string {
     return this.buf.subarray(0, (this.max >> 3) + 1).toString('base64');
+  }
+}
+
+/**
+ * Whether an operator has quiesced this box (`abox edge lock`).
+ *
+ * Read per plan rather than cached: a lock is applied precisely in order to
+ * change what the next command may do, and a stale "no" here is a refusal an
+ * operator cannot clear without restarting wsh.
+ */
+function pushBoxLocked(): boolean {
+  try {
+    fs.statSync(path.join(PUSH_HOME, '.abox', 'locked'));
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -4533,8 +4554,16 @@ interface PushPlanBuild {
   // version of a file it is about to replace.
   pullFetch: PushEntry[];
   pullBytes: number;
-  /** Hash of the box's whole tree, for a pull to record. '' unless pull. */
-  pullBoxHash: string;
+  /** Hash of the box's whole tree from this walk. '' unless hashTree. */
+  treeHash: string;
+  /** How many entries that walk saw — "is the destination empty". */
+  treeCount: number;
+  /**
+   * The running fold for the record: this walk, minus everything the push is
+   * about to replace or remove. Apply folds in what it writes. Null when no
+   * record is wanted.
+   */
+  recordHash: { acc: string; count: number } | null;
 }
 
 /**
@@ -4574,6 +4603,10 @@ async function pushBuildPlan(opts: {
   // mean the same thing in both directions, or a path one direction protects
   // the other one moves.
   pull: boolean;
+  // Hash the box's tree from this walk. Wanted by a pull (the client records
+  // it) and by any push carrying a record intent (it is the box's half of who
+  // moved). A whole-box push asks for neither and skips it.
+  hashTree: boolean;
   deny: PushIgnoreRule[];
   file: string;          // single-file push: the one name under target, else ''
 }): Promise<PushPlanBuild> {
@@ -4643,19 +4676,29 @@ async function pushBuildPlan(opts: {
   const sMap = new Map<string, PushEntry>();
   for (const e of serverEntries) sMap.set(e.path, e);
 
-  // The box's hash of its own tree, for a pull to record.
+  // The box's hash of its own tree, taken from the walk this plan already did.
   //
-  // Free here and only here: a pull does not change the box, so the state this
-  // walk just described IS the state the two sides will have agreed on once the
-  // client promotes. Push cannot reuse it — its record has to describe the tree
-  // *after* the apply and the repair hook — which is why that side still pays a
-  // re-walk and this one does not.
-  let pullBoxHash = '';
-  if (opts.pull) {
+  // Free, and it answers both directions. For a pull it is what the client
+  // records once it promotes, since a pull leaves the box untouched. For a push
+  // it is the box's half of "who moved" — which is why push needs no
+  // /api/sync/check round trip of its own any more: the walk that computes the
+  // diff can answer the question at the same time.
+  let treeHash = '';
+  const recordHash = opts.hashTree ? new SyncHash() : null;
+  if (opts.hashTree) {
     const h = new SyncHash();
-    for (const e of serverEntries) h.add(e);
-    pullBoxHash = h.digest();
+    for (const e of serverEntries) { h.add(e); recordHash!.add(e); }
+    treeHash = h.digest();
   }
+  // The same fold, minus the entries this push is about to replace or remove.
+  // Apply adds back what it actually wrote, and the result is the hash of the
+  // finished tree — computed without walking it again. XOR is its own inverse,
+  // so this is exact rather than an approximation.
+  //
+  // Only the accumulator survives, never the paths: the plan drops its add and
+  // update lists on purpose (they are hundreds of megabytes of strings on a big
+  // push) and this must not quietly put them back.
+
 
   const addBits = new PushBitmap();
   const updateBits = new PushBitmap();
@@ -4709,6 +4752,8 @@ async function pushBuildPlan(opts: {
       // theirs. `s` is non-null here — pushCompare only says 'add' when it is
       // missing — so this is the box's own copy, sizes and all.
       if (opts.pull && s) pullFetch.push(s);
+      // And for a push it is the version about to stop existing.
+      if (recordHash && s) recordHash.remove(s);
     }
     if (c.type === 'file') bytesToSend += c.size ?? 0;
     // Only a file the client could choose to range is worth asking about, and
@@ -4758,6 +4803,13 @@ async function pushBuildPlan(opts: {
     return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
   });
   const pullBytes = pullFetch.reduce((n, e) => n + (e.type === 'file' ? e.size ?? 0 : 0), 0);
+  // Leftovers leave the tree only when this push is actually deleting them.
+  if (recordHash && opts.deletes) {
+    for (const rel of leftover) {
+      const s = sMap.get(rel);
+      if (s) recordHash.remove(s);
+    }
+  }
 
   // A plan has to outlive the upload it describes, and a chunked apply keeps
   // coming back to it, so the allowance follows the payload rather than a flat
@@ -4791,7 +4843,9 @@ async function pushBuildPlan(opts: {
     partials,
     pullFetch,
     pullBytes,
-    pullBoxHash,
+    treeHash,
+    treeCount: serverEntries.length,
+    recordHash: recordHash ? recordHash.snapshot() : null,
   };
 }
 
@@ -4830,6 +4884,7 @@ function pushRegisterPlan(built: PushPlanBuild, target: string, rel: string, del
     deny,
     deletes,
     record,
+    recordHash: built.recordHash,
     trash,
   });
 }
@@ -4898,16 +4953,15 @@ async function pushHashTarget(
  * that dies mid-chunk leaves the record alone, so the next run sees more
  * difference than there is, which is the safe direction.
  */
-async function pushWriteRecord(plan: PushPlan, target: string): Promise<void> {
+function pushWriteRecord(plan: PushPlan): void {
   const rec = plan.record;
-  if (!rec) return;
+  if (!rec || !plan.recordHash) return;
   try {
-    const { hash } = await pushHashTarget(target, plan.rel, rec.skip, plan.deny, plan.file);
     syncWrite(rec.replica, {
       rel: pushRecordRel(plan.rel, plan.file),
       fp:  rec.skipFp,
       lh:  rec.localHash,
-      bh:  hash,
+      bh:  SyncHash.restore(plan.recordHash).digest(),
       del: plan.deletes,
       at:  Math.floor(Date.now() / 1000),
     });
@@ -4917,6 +4971,25 @@ async function pushWriteRecord(plan: PushPlan, target: string): Promise<void> {
     // has always meant.
     console.error(`[sync] could not record ${plan.rel}: ${errorMessage(err)}`);
   }
+}
+
+/**
+ * Fold one just-written entry into the record's running hash.
+ *
+ * Built from what apply itself wrote rather than from an lstat: apply sets the
+ * mode and the mtime from the tar header, so it already knows the tuple the
+ * next walk would produce. That keeps the record free — no second walk, and not
+ * even a stat per file.
+ *
+ * The repair hook would break this, since it rewrites files after they land.
+ * It cannot arise: the hook runs on whole-box pushes alone, and those carry no
+ * record intent.
+ */
+function pushRecordWrote(plan: PushPlan, e: PushEntry): void {
+  if (!plan.recordHash) return;
+  const h = SyncHash.restore(plan.recordHash);
+  h.add(e);
+  plan.recordHash = h.snapshot();
 }
 
 /**
@@ -4992,6 +5065,7 @@ router.post('/api/push/plan', express.json({ limit: '50mb' }), async (req: expre
       sweep:        true,
       trash:        false,
       pull:         false,
+      hashTree:     false,
       deny,
       file:         '',
     });
@@ -5054,6 +5128,10 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     // applies against one plan, and each of them displacing into a batch of its
     // own would scatter one push's undo across a dozen directories.
     const trash = raw.no_trash === true ? null : pushTrashStamp();
+    // Who moved, answered from the plan's own walk rather than from a separate
+    // /api/sync/check. A push that carries no record intent — a whole-box push,
+    // or an older client — asks for no hash and gets none.
+    const intent = pushRecordIntent(raw, hdr.skip);
     const built = await pushBuildPlan({
       target,
       rel:          hdr.rel,
@@ -5067,6 +5145,7 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
       sweep:        !dryRun,
       trash:        trash !== null,
       pull:         false,
+      hashTree:     intent !== null,
       deny,
       file:         hdr.file,
     });
@@ -5076,7 +5155,7 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     // the most natural sequence there is — would answer 409.
     // A dry run records nothing, for the same reason it registers no plan: it
     // changes neither side, so there is no new agreement to remember.
-    if (!dryRun) pushRegisterPlan(built, target, hdr.rel, deletes, deny, hdr.file, pushRecordIntent(raw, hdr.skip), trash);
+    if (!dryRun) pushRegisterPlan(built, target, hdr.rel, deletes, deny, hdr.file, intent, trash);
     sent = true;
     res.json({
       plan_id:       dryRun ? '' : built.planId,
@@ -5112,6 +5191,22 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
       // Invisible to every walk, so nothing else would ever have reclaimed
       // them; worth saying out loud when it is gigabytes.
       reclaimed_bytes: built.reclaimedBytes,
+      // Who moved, from the walk above. Absent when no record intent came with
+      // the request, which is how a client tells "this box keeps no record of
+      // us" from "we did not ask".
+      ...(intent ? (() => {
+        const rec = syncFind(intent.replica, pushRecordRel(hdr.rel, hdr.file), intent.skipFp);
+        return {
+          sync_state:     syncClassify(rec, intent.localHash, built.treeHash),
+          sync_empty:     built.treeCount === 0,
+          deletes_agreed: rec?.del ?? false,
+        };
+      })() : {}),
+      // Whether an operator has quiesced this box. A whole-box push is the one
+      // command --yes cannot approve on its own, and a lock is the only
+      // standing statement that nobody is working in here — see abox edge lock,
+      // which permits push precisely so a box can be quiesced and replaced.
+      locked: pushBoxLocked(),
       accept_encoding: PUSH_ACCEPT_ENCODING,
       // This box folds ranged slices back into whole files. A client that sees
       // no such field must send each file in one request, because that is what
@@ -5256,7 +5351,7 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
 
     if (header.type === 'directory') {
       fs.promises.mkdir(entryAbs, { recursive: true, mode: (header.mode ?? 0o755) & 0o777 })
-        .then(() => { filesWritten += 1; stream.resume(); stream.on('end', () => next()); stream.on('error', (e) => next(e as Error)); })
+        .then(() => { filesWritten += 1; pushRecordWrote(plan, { path: cleanName, type: 'dir' }); stream.resume(); stream.on('end', () => next()); stream.on('error', (e) => next(e as Error)); })
         .catch((err) => next(err as Error));
       return;
     }
@@ -5264,7 +5359,7 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
       const linkname = header.linkname ?? '';
       fs.promises.mkdir(path.dirname(entryAbs), { recursive: true })
         .then(() => fs.promises.symlink(linkname, entryAbs))
-        .then(() => { filesWritten += 1; stream.resume(); stream.on('end', () => next()); stream.on('error', (e) => next(e as Error)); })
+        .then(() => { filesWritten += 1; pushRecordWrote(plan, { path: cleanName, type: 'symlink', target: linkname }); stream.resume(); stream.on('end', () => next()); stream.on('error', (e) => next(e as Error)); })
         .catch((err) => next(err as Error));
       return;
     }
@@ -5320,7 +5415,18 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
         bytesWritten += entryBytes;
         // A slice is not a file. Counting one per slice would report more files
         // written than the tree gained; the slice that completes it counts.
-        if (!range || range.off + entryBytes >= range.total) filesWritten += 1;
+        if (!range || range.off + entryBytes >= range.total) {
+          filesWritten += 1;
+          // The tuple the next walk would see, from what we just wrote: mode
+          // and mtime came off this header and were applied above, so there is
+          // nothing to go and look up.
+          pushRecordWrote(plan, {
+            path:     cleanName,
+            type:     'file',
+            size:     range ? range.total : entryBytes,
+            mtime_ns: header.mtime instanceof Date ? header.mtime.getTime() * 1e6 : 0,
+          });
+        }
       } catch (err) {
         await fs.promises.unlink(tmp).catch(() => {});
         throw err;
@@ -5515,7 +5621,7 @@ router.post('/api/push/apply', async (req: express.Request, res: express.Respons
   // hook ran, which left the hook — the one thing that writes files after the
   // promote — outside the guard that keeps two pushes off one tree. Releasing
   // below instead closes that window as well as this one.
-  if (isFinal) await pushWriteRecord(plan, target);
+  if (isFinal) pushWriteRecord(plan);
 
   // The push is over: drop the plan and the tree it was holding.
   if (isFinal) { pushPlans.delete(planId); pushActiveApplies.delete(planId); }
@@ -5617,6 +5723,7 @@ router.post('/api/pull/plan2', async (req: express.Request, res: express.Respons
       sweep:        false,
       trash:        false,
       pull:         true,
+      hashTree:     true,
       deny,
       file:         hdr.file,
     });
@@ -5658,7 +5765,7 @@ router.post('/api/pull/plan2', async (req: express.Request, res: express.Respons
       // What the client should record as the box's half once it has promoted.
       // The box is unchanged by a pull, so this walk's answer is still true
       // afterwards — no second walk, and no window for it to go stale.
-      box_hash:       built.pullBoxHash,
+      box_hash:       built.treeHash,
       // Manifest positions the box does not have at all. A pull never removes
       // them; they are reported so the summary can say what it is leaving.
       local_only_bits:  built.addBits,
