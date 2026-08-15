@@ -4696,6 +4696,12 @@ function pushWalkKey(target: string, rel: string, skipPatterns: string[], file: 
 }
 
 function pushWalkRetain(key: string, walk: PushWalkResult): string {
+  // A root bigger than the whole budget is not worth holding: keeping it would
+  // mean evicting everything else and then blowing the bound anyway, so the one
+  // tree that most needs the memory back is the one that would keep it longest.
+  // It pays the second walk instead, which is what every root did before this
+  // cache existed — a miss is always allowed.
+  if (walk.entries.length > PUSH_WALK_MAX_ENTRIES) return '';
   pushWalkSweep(walk.entries.length);
   const token = crypto.randomUUID();
   pushWalks.set(token, { walk, key, at: Date.now() });
