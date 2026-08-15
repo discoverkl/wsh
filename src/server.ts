@@ -4605,6 +4605,134 @@ interface PushPlanBuild {
  * matching; otherwise `cd ~/.trae && abox-cli push` sends a manifest whose only
  * entry is `traecli.yaml`, which no anchored rule can match.
  */
+/**
+ * One walk of the target through the plan's filter, with everything either
+ * endpoint needs out of it.
+ *
+ * Split out so /api/sync/check and the plan that follows cannot disagree about
+ * what a walk of the same tree means. The filter has side effects the plan
+ * depends on: `preserved` is reported back to the client, and `heldLocal` is
+ * what stops a delete removing a directory that still holds an excluded path.
+ * A cached bare entry list would be a plan silently missing both.
+ */
+interface PushWalkResult {
+  entries: PushEntry[];
+  staging: string[];
+  preserved: string[];  // $HOME-relative, deny only
+  heldLocal: string[];  // push-root-relative, deny ∪ skip
+}
+
+async function pushFilteredWalk(
+  target: string,
+  rel: string,
+  skipPatterns: string[],
+  deny: PushIgnoreRule[],
+): Promise<PushWalkResult> {
+  const homePrefix = pushHomePrefix(rel);
+  const preserved = new Set<string>();
+  const heldLocal = new Set<string>();
+  // The client's own skip list (~/.aboxignore, --exclude), shipped with the
+  // manifest. It only ever filters the TARGET's walk — the client already left
+  // those paths out. Without it the diff sees them present on the box and
+  // missing upstream and schedules them for deletion, so "ignore node_modules"
+  // would mean "delete node_modules on the box".
+  const skip = compilePushIgnore(skipPatterns.join('\n'), 'client skip list');
+  const walked = await pushWalk(target, (path_, isDir) => {
+    const hit = pushRuleHit(deny, homePrefix, path_, isDir);
+    if (hit) { preserved.add(hit.home); heldLocal.add(path_); return true; }
+    if (pushRuleHit(skip, homePrefix, path_, isDir)) { heldLocal.add(path_); return true; }
+    return false;
+  });
+  return {
+    entries:   walked.entries,
+    staging:   walked.staging,
+    preserved: Array.from(preserved),
+    heldLocal: Array.from(heldLocal),
+  };
+}
+
+/**
+ * Walks retained between /api/sync/check and the plan that follows it.
+ *
+ * rule-2 in sync.md: step 2 reuses step 1's work. The box walked its tree to
+ * answer who moved and then walked it again to compute the diff — the same
+ * million lstats twice, seconds apart, over a tree nobody touched in between.
+ *
+ * Retained only when a plan is actually going to follow. An `in_sync` answer is
+ * the one that ends the run, and holding a few hundred megabytes of entries for
+ * a client that has already finished is how a box runs out of memory saying
+ * "nothing changed".
+ *
+ * Every miss — expired, evicted, restarted, or a request whose key does not
+ * match what was walked — costs one walk and nothing else. That is what keeps
+ * this an optimisation rather than a mechanism: no correctness claim anywhere
+ * rests on a hit.
+ *
+ * The cost of a hit is that the diff is computed against the tree as of the
+ * check rather than as of the plan. That window is one round trip with no human
+ * in it, and it sits inside the plan→apply window that already exists and
+ * already spans the confirmation prompt — so it widens an exposure rather than
+ * creating one.
+ */
+const PUSH_WALK_TTL_MS = 120_000;
+const PUSH_WALK_MAX = 4;                  // concurrent syncs against one box
+const PUSH_WALK_MAX_ENTRIES = 2_000_000;  // ~ a few hundred MB of PushEntry
+
+interface RetainedWalk {
+  walk: PushWalkResult;
+  key: string;
+  at: number;
+}
+const pushWalks = new Map<string, RetainedWalk>();
+
+/**
+ * Everything the walk depended on. A plan whose key differs walks for itself —
+ * a different root, a different filter, or an image whose deny rules were
+ * reloaded in between all mean the retained entries describe something else.
+ */
+function pushWalkKey(target: string, rel: string, skipPatterns: string[], file: string, deny: PushIgnoreRule[]): string {
+  const denyFp = crypto.createHash('sha256').update(JSON.stringify(deny)).digest('hex').slice(0, 16);
+  return JSON.stringify([target, rel, file, skipPatterns, denyFp]);
+}
+
+function pushWalkRetain(key: string, walk: PushWalkResult): string {
+  pushWalkSweep(walk.entries.length);
+  const token = crypto.randomUUID();
+  pushWalks.set(token, { walk, key, at: Date.now() });
+  return token;
+}
+
+/**
+ * Take a retained walk, if this is the request it was kept for. Single use:
+ * the plan is the only reader, and holding the tree past that would keep it
+ * alive for a client that has already moved on.
+ */
+function pushWalkTake(token: string, key: string): PushWalkResult | null {
+  const hit = pushWalks.get(token);
+  if (!hit) return null;
+  pushWalks.delete(token);
+  if (Date.now() - hit.at > PUSH_WALK_TTL_MS) return null;
+  if (hit.key !== key) return null;
+  return hit.walk;
+}
+
+/** Drop what has expired, then the oldest until both bounds hold again. */
+function pushWalkSweep(incoming = 0): void {
+  const now = Date.now();
+  for (const [token, r] of pushWalks) {
+    if (now - r.at > PUSH_WALK_TTL_MS) pushWalks.delete(token);
+  }
+  let held = incoming;
+  for (const r of pushWalks.values()) held += r.walk.entries.length;
+  // Insertion order is age order, so the first key is always the oldest.
+  while (pushWalks.size > 0 && (pushWalks.size >= PUSH_WALK_MAX || held > PUSH_WALK_MAX_ENTRIES)) {
+    const oldest = pushWalks.keys().next();
+    if (oldest.done) break;
+    held -= pushWalks.get(oldest.value)!.walk.entries.length;
+    pushWalks.delete(oldest.value);
+  }
+}
+
 async function pushBuildPlan(opts: {
   target: string;
   rel: string;
@@ -4632,6 +4760,10 @@ async function pushBuildPlan(opts: {
   hashTree: boolean;
   deny: PushIgnoreRule[];
   file: string;          // single-file push: the one name under target, else ''
+  // The walk /api/sync/check kept for us, when it kept one. Null is not an
+  // error and never reported: a miss walks the tree here instead, which is
+  // exactly what this endpoint did before the cache existed.
+  reuse?: PushWalkResult | null;
 }): Promise<PushPlanBuild> {
   const homePrefix = pushHomePrefix(opts.rel);
   const preserved = new Set<string>();  // $HOME-relative, deny only, reported back
@@ -4644,18 +4776,6 @@ async function pushBuildPlan(opts: {
     heldLocal.add(p);
     return true;
   };
-  // The client's own skip list (~/.aboxignore, --exclude), shipped with the
-  // manifest. It only ever filters the TARGET's walk — the client already left
-  // those paths out. Without this the diff sees them present on the box and
-  // missing upstream and schedules them for deletion, so "ignore node_modules"
-  // would mean "delete node_modules on the box".
-  const skip = compilePushIgnore(opts.skipPatterns.join('\n'), 'client skip list');
-  const skipped = (p: string, isDir: boolean): boolean => {
-    if (!pushRuleHit(skip, homePrefix, p, isDir)) return false;
-    heldLocal.add(p);
-    return true;
-  };
-
   // A single-file push diffs one path, so it neither walks the containing
   // directory nor sweeps the staging directories such a walk would have found.
   // Both are the tree push's business: the sweep is a side effect of having
@@ -4674,11 +4794,14 @@ async function pushBuildPlan(opts: {
     }
     serverEntries = one ? [one] : [];
   } else {
-    const walked = await pushWalk(
-      opts.target,
-      (p, isDir) => denied(p, isDir) || skipped(p, isDir),
-    );
+    // rule-2: reuse what step 1 already walked, when step 1 kept it. The
+    // filter's side effects travel with the entries, because a plan holding
+    // neither `preserved` nor `heldLocal` reports the wrong thing and deletes
+    // the wrong thing.
+    const walked = opts.reuse ?? await pushFilteredWalk(opts.target, opts.rel, opts.skipPatterns, opts.deny);
     serverEntries = walked.entries;
+    for (const path_ of walked.preserved) preserved.add(path_);
+    for (const path_ of walked.heldLocal) heldLocal.add(path_);
     reclaimedBytes = opts.sweep ? await pushSweepStaging(walked.staging) : 0;
   }
   // Swept before the apply rather than after it, so a second mirror does not
@@ -4701,11 +4824,11 @@ async function pushBuildPlan(opts: {
 
   // The box's hash of its own tree, taken from the walk this plan already did.
   //
-  // Free, and it answers both directions. For a pull it is what the client
-  // records once it promotes, since a pull leaves the box untouched. For a push
-  // it is the box's half of "who moved" — which is why push needs no
-  // /api/sync/check round trip of its own any more: the walk that computes the
-  // diff can answer the question at the same time.
+  // For a pull it is what the client records once it promotes, since a pull
+  // leaves the box untouched. For a push it is the starting point the record is
+  // derived from — apply subtracts and adds against it rather than walking
+  // again. Push asks who moved separately, before any of this, so that an
+  // unchanged tree never gets as far as sending a manifest.
   let treeHash = '';
   const recordHash = opts.hashTree ? new SyncHash() : null;
   if (opts.hashTree) {
@@ -4952,34 +5075,6 @@ function pushRecordRel(rel: string, file: string): string {
 }
 
 /**
- * Hash what this box currently holds under `target`, through the same filter
- * the diff uses. Also reports the entry count, since "the destination is
- * empty" is what lets a first push land without a prompt.
- */
-async function pushHashTarget(
-  target: string,
-  rel: string,
-  skipPatterns: string[],
-  deny: PushIgnoreRule[],
-  file: string,
-): Promise<{ hash: string; entries: number }> {
-  const h = new SyncHash();
-  if (file) {
-    const one = await pushStatOne(target, file);
-    if (one) h.add(one);
-    return { hash: h.digest(), entries: h.entries };
-  }
-  const homePrefix = pushHomePrefix(rel);
-  const skip = compilePushIgnore(skipPatterns.join('\n'), 'client skip list');
-  const walked = await pushWalk(
-    target,
-    (p, isDir) => !!pushRuleHit(deny, homePrefix, p, isDir) || !!pushRuleHit(skip, homePrefix, p, isDir),
-  );
-  for (const e of walked.entries) h.add(e);
-  return { hash: h.digest(), entries: walked.entries.length };
-}
-
-/**
  * Write the agreement this push just established, from a fresh walk of the
  * finished tree.
  *
@@ -5046,8 +5141,8 @@ function pushResolveTarget(
 
 /** Shared validation of the small header both plan versions carry. */
 function pushCheckHeader(
-  hdr: { rel?: unknown; target?: unknown; skip?: unknown; home?: unknown; file?: unknown },
-): { error: string } | { rel: string; target: string; skip: string[]; home: boolean; file: string } {
+  hdr: { rel?: unknown; target?: unknown; skip?: unknown; home?: unknown; file?: unknown; walk_token?: unknown },
+): { error: string } | { rel: string; target: string; skip: string[]; home: boolean; file: string; walkToken: string } {
   if (!hdr || typeof hdr.rel !== 'string' || typeof hdr.target !== 'string') {
     return { error: 'rel and target are required' };
   }
@@ -5063,7 +5158,10 @@ function pushCheckHeader(
   if (skip.length > PUSH_MAX_SKIP_PATTERNS) {
     return { error: `too many skip patterns (${skip.length} > ${PUSH_MAX_SKIP_PATTERNS})` };
   }
-  return { rel: hdr.rel, target: hdr.target, skip: skip as string[], home: hdr.home === true, file };
+  // Not validated beyond being a string: it is a lookup key into this
+  // process's own map, and anything that does not hit simply walks instead.
+  const walkToken = typeof hdr.walk_token === 'string' ? hdr.walk_token : '';
+  return { rel: hdr.rel, target: hdr.target, skip: skip as string[], home: hdr.home === true, file, walkToken };
 }
 
 // v1: the whole manifest as one JSON body. Kept for clients older than the
@@ -5142,7 +5240,7 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     const lines = pushReadNdjson(req);
     const first = await lines.next();
     if (first.done) { fail(400, 'empty body: expected a header line'); return; }
-    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; deletes?: unknown; dry_run?: unknown; file?: unknown; replica?: unknown; skip_fp?: unknown; local_hash?: unknown; no_trash?: unknown };
+    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; deletes?: unknown; dry_run?: unknown; file?: unknown; replica?: unknown; skip_fp?: unknown; local_hash?: unknown; no_trash?: unknown; walk_token?: unknown };
     const hdr = pushCheckHeader(raw);
     if ('error' in hdr) { fail(400, hdr.error); return; }
     // A dry run neither writes nor deletes, so it has nothing to conflict with.
@@ -5165,9 +5263,10 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     // applies against one plan, and each of them displacing into a batch of its
     // own would scatter one push's undo across a dozen directories.
     const trash = raw.no_trash === true ? null : pushTrashStamp();
-    // Who moved, answered from the plan's own walk rather than from a separate
-    // /api/sync/check. A push that carries no record intent — a whole-box push,
-    // or an older client — asks for no hash and gets none.
+    // What to record once this lands. Its presence is also what decides whether
+    // the walk below hashes: the derived record needs a running fold, and a
+    // push that keeps no record — a whole-box push, or an older client — should
+    // not pay for one.
     const intent = pushRecordIntent(raw, hdr.skip);
     const built = await pushBuildPlan({
       target,
@@ -5176,6 +5275,7 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
       skipPatterns: hdr.skip,
       entries,
       collectPaths: false,
+      reuse:        pushWalkTake(hdr.walkToken, pushWalkKey(target, hdr.rel, hdr.skip, hdr.file, deny)),
       deletes,
       // A dry run reports what a push would do and touches nothing, which has
       // to include not quietly reclaiming disk on the way past.
@@ -5228,21 +5328,16 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
       // Invisible to every walk, so nothing else would ever have reclaimed
       // them; worth saying out loud when it is gigabytes.
       reclaimed_bytes: built.reclaimedBytes,
-      // Who moved, from the walk above. Absent when no record intent came with
-      // the request, which is how a client tells "this box keeps no record of
-      // us" from "we did not ask".
-      ...(intent ? (() => {
-        const rec = syncFind(intent.replica, pushRecordRel(hdr.rel, hdr.file), intent.skipFp);
-        return {
-          sync_state:     syncClassify(rec, intent.localHash, built.treeHash),
-          sync_empty:     built.treeCount === 0,
-          deletes_agreed: rec?.del ?? false,
-        };
-      })() : {}),
       // Whether an operator has quiesced this box. A whole-box push is the one
       // command --yes cannot approve on its own, and a lock is the only
       // standing statement that nobody is working in here — see abox edge lock,
       // which permits push precisely so a box can be quiesced and replaced.
+      //
+      // Who moved is NOT answered here. The client asks /api/sync/check before
+      // it offers a manifest, so a tree neither side has touched costs a few
+      // hundred bytes instead of the whole thing. The walk below still hashes,
+      // because the derived record needs its accumulator — but that hash is for
+      // the record, not for an answer nobody asked for.
       locked: pushBoxLocked(),
       accept_encoding: PUSH_ACCEPT_ENCODING,
       // This box folds ranged slices back into whole files. A client that sees
@@ -5733,7 +5828,7 @@ router.post('/api/pull/plan2', async (req: express.Request, res: express.Respons
     const lines = pushReadNdjson(req);
     const first = await lines.next();
     if (first.done) { fail(400, 'empty body: expected a header line'); return; }
-    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; file?: unknown };
+    const raw = first.value as { rel?: unknown; target?: unknown; checksum?: unknown; skip?: unknown; home?: unknown; file?: unknown; walk_token?: unknown };
     const hdr = pushCheckHeader(raw);
     if ('error' in hdr) { fail(400, hdr.error); return; }
     // A pull reads; it never writes to the box. So there is nothing to reserve
@@ -5755,6 +5850,7 @@ router.post('/api/pull/plan2', async (req: express.Request, res: express.Respons
       skipPatterns: hdr.skip,
       entries,
       collectPaths: false,
+      reuse:        pushWalkTake(hdr.walkToken, pushWalkKey(target, hdr.rel, hdr.skip, hdr.file, deny)),
       // Both off: a pull changes nothing on the box, so it must not remove the
       // box's leftovers, must not sweep its staging, and must not touch its
       // trash. `deletes: false` also keeps the leftover list intact, which for
@@ -6055,8 +6151,22 @@ router.post('/api/sync/check', express.json({ limit: '1mb' }), async (req: expre
 
   try {
     const deny = loadPushIgnoreDir(PUSH_IGNORE_DIR);
-    const { hash, entries } = await pushHashTarget(target, root.rel, skip as string[], deny, file);
+    // Step 1's whole cost is this walk. A single file is one lstat and has no
+    // walk to keep; a tree gets one, folded here and handed to the plan below
+    // if there turns out to be a plan.
+    const h = new SyncHash();
+    let walk: PushWalkResult | null = null;
+    if (file) {
+      const one = await pushStatOne(target, file);
+      if (one) h.add(one);
+    } else {
+      walk = await pushFilteredWalk(target, root.rel, skip as string[], deny);
+      for (const e of walk.entries) h.add(e);
+    }
+    const hash = h.digest();
+    const entries = h.entries;
     const rec = syncFind(body.replica, pushRecordRel(root.rel, file), root.skip_fp);
+    const state = syncClassify(rec, root.local_hash, hash);
     // What the box actually holds here. A client pulling something it does not
     // have yet cannot tell a file from a directory locally — there is nothing
     // there to look at — and this walk has already been to the path, so saying
@@ -6066,9 +6176,16 @@ router.post('/api/sync/check', express.json({ limit: '1mb' }), async (req: expre
       const st = await fs.promises.lstat(file ? path.join(target, file) : target);
       targetType = st.isDirectory() ? 'dir' : st.isSymbolicLink() ? 'symlink' : 'file';
     } catch { /* missing, which is a fact rather than a failure */ }
+    // Kept only when this answer does NOT end the run. `in_sync` means the
+    // client stops here and the entries would be held for nobody — which is
+    // the case that would otherwise make an unchanged tree the most expensive
+    // thing this endpoint does. A client that plans anyway (--checksum, or a
+    // --delete collapsing an overlay) walks again, and pays what it always did.
+    const walkToken = walk && state !== 'in_sync' ? pushWalkRetain(
+      pushWalkKey(target, root.rel, skip as string[], file, deny), walk) : '';
     res.json({
       root: {
-        state: syncClassify(rec, root.local_hash, hash),
+        state,
         target_type: targetType,
         // An empty destination has nothing that could have been deleted, which
         // is what lets a first push land in silence with no record to prove it.
@@ -6076,6 +6193,9 @@ router.post('/api/sync/check', express.json({ limit: '1mb' }), async (req: expre
         box_hash:       hash,
         at:             rec?.at ?? 0,
         deletes_agreed: rec?.del ?? false,
+        // Hand this back on the plan to skip the second walk. Advisory in both
+        // directions: a client may ignore it, and a box may have dropped it.
+        walk_token:     walkToken,
       },
     });
   } catch (err) {
