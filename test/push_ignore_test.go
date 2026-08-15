@@ -416,3 +416,74 @@ func TestPushSkipAnchoredToHome(t *testing.T) {
 		t.Errorf("/dist names ~/dist, not this one — it must not fire, delete=%v", plan["delete"])
 	}
 }
+
+// The protocol's own bookkeeping is denied by wsh itself, whatever the image
+// ships — and both halves of it, the box's under ~/.wsh and the client's under
+// ~/.abox. The rule is two-way, so one list has to hold in three places: what a
+// push uploads, what a push deletes, and what a pull would name local-only.
+//
+// The client's replica id is the sharp one. Carry it and the destination becomes
+// a second machine claiming the source's identity — and a box is a client too,
+// so A syncs with C, B (holding A's id) syncs with C, and A's next check reads
+// B's record as its own and concludes nobody moved. That is the silent skip the
+// record exists to prevent, reached from the other end.
+func TestPushDenyProtectsTheProtocolsOwnState(t *testing.T) {
+	srv, home := setupPush(t)
+	bookkeeping := []string{
+		".wsh/sync-state/abcd",
+		".wsh/push-state/abcd",
+		".wsh/trash/20260101T000000Z-aaa/x",
+		".abox/replica",
+		".abox/trash/20260101T000000Z-aaa/x",
+	}
+
+	// Upload half: a client that sends them anyway has them dropped.
+	entries := []map[string]any{{"path": "ok.txt", "type": "file", "size": 2, "mtime_ns": time.Now().UnixNano()}}
+	for _, p := range bookkeeping {
+		entries = append(entries, map[string]any{
+			"path": p, "type": "file", "size": 2, "mtime_ns": time.Now().UnixNano(),
+		})
+	}
+	plan := srv.postJSON(t, "/api/push/plan", map[string]any{
+		"rel": ".", "target": home, "home": true, "entries": entries,
+	})
+	add := strSet(t, plan, "add")
+	for _, p := range bookkeeping {
+		if add[p] {
+			t.Errorf("a push would carry the protocol's own state: %s", p)
+		}
+	}
+	if !add["ok.txt"] {
+		t.Errorf("ordinary files must still travel, add=%v", plan["add"])
+	}
+
+	// Delete half: the box holds them, the client sends none of them, and they
+	// must survive. This is also the half that makes `pull ~ --delete` safe —
+	// the same filter decides what the pull plan reports as local-only.
+	for _, p := range bookkeeping {
+		abs := filepath.Join(home, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "stale.txt"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan = srv.postJSON(t, "/api/push/plan", map[string]any{
+		"rel": ".", "target": home, "home": true, "entries": []map[string]any{},
+	})
+	del := strSet(t, plan, "delete")
+	for _, p := range bookkeeping {
+		for _, seg := range []string{p, filepath.ToSlash(filepath.Dir(p))} {
+			if del[seg] {
+				t.Errorf("a push would delete the protocol's own state: %s", seg)
+			}
+		}
+	}
+	if !del["stale.txt"] {
+		t.Errorf("unprotected files must still be deleted, delete=%v", plan["delete"])
+	}
+}

@@ -112,10 +112,30 @@ export function compilePushIgnore(text: string, source: string): PushIgnoreRule[
  * Rules wsh enforces itself, whatever the image says.
  *
  * Everything else in this file is the *image's* policy, and it is right that it
- * is: the box owner decides what their env-bound config is. These two are not
- * policy. They are wsh's own bookkeeping about the push protocol — the record
+ * is: the box owner decides what their env-bound config is. These are not
+ * policy. They are wsh's own bookkeeping about the sync protocol — the record
  * of what each machine last agreed with this box, and the copies of whatever a
  * push replaced — and both are false the instant they land on a different box.
+ *
+ * `push-state` is the record store's old name. It stays listed beside the
+ * current one because a box that synced before the rename still has the
+ * directory, and a name that stops being denied is a directory that becomes
+ * pushable.
+ *
+ * The last two are the *client's* half of the same pair, under ~/.abox, and
+ * they are denied here because a deny rule filters the client's manifest as
+ * well as this box's walk — so one list closes both directions at once.
+ *
+ *   ~/.abox/replica names the machine every record is keyed by. Carry it and
+ *   the destination becomes a second machine claiming the first one's identity
+ *   — and a box is a client too. A pushes to C; B, holding A's id, pushes to C;
+ *   A's next check reads B's record as its own and answers in_sync. That is the
+ *   silent skip the record exists to prevent, reached from the other end.
+ *
+ *   ~/.abox/trash is the client's undo, and it is the wrong box's undo the
+ *   moment it lands — the same argument as /.wsh/trash/, in the other
+ *   direction. Without the rule a `pull ~ --delete` also names both local-only
+ *   and removes them, since the box does not have them.
  *
  * The record is the dangerous one, and it is dangerous in the unsafe direction:
  * a mirrored record says "when we last agreed, my copy hashed to X" about a
@@ -130,8 +150,11 @@ export function compilePushIgnore(text: string, source: string): PushIgnoreRule[
  * directories; wsh protects them.
  */
 const PUSH_BUILTIN_DENY = `
+/.wsh/sync-state/
 /.wsh/push-state/
 /.wsh/trash/
+/.abox/replica
+/.abox/trash/
 `;
 
 export function loadPushIgnoreDir(dir: string = PUSH_IGNORE_DIR): PushIgnoreRule[] {

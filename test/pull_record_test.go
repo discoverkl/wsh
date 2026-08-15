@@ -8,7 +8,7 @@ import (
 
 // A pull establishes an agreement, so it has to be able to record one.
 //
-// Nothing did before: the only writer of a push-state line was inside
+// Nothing did before: the only writer of a sync-state line was inside
 // /api/push/apply, so a successful pull stored nothing and the NEXT pull read
 // no_record — group 3, --yes refused. A scripted pull worked exactly once, and
 // no test noticed because pull's own tests stop at the plan.

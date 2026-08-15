@@ -25,7 +25,7 @@ import * as metrics from './metrics';
 import { agentOf, captureTokens, dropSession } from './agentTokens';
 import { commandBinary } from './commandBinary';
 import { loadPushIgnoreDir, compilePushIgnore, pushIgnored, PushIgnoreRule, PUSH_IGNORE_DIR as PUSH_IGNORE_DEFAULT_DIR } from './pushIgnore';
-import { SyncHash, syncClassify, syncFind, syncValidReplica, syncWrite } from './syncState';
+import { SYNC_CARD_REL, SyncHash, syncCardFp, syncCardHash, syncClassify, syncFind, syncValidReplica, syncWrite } from './syncState';
 import { PUSH_TRASH_DIR, pushTrashDisplace, pushTrashRecordSize, pushTrashStamp, pushTrashSweep } from './pushTrash';
 import { runPushPostfix, PUSH_POSTFIX_HOOK as PUSH_POSTFIX_DEFAULT_HOOK } from './pushPostfix';
 
@@ -3279,7 +3279,13 @@ router.post('/api/apps/:key', express.json({ limit: '256kb' }), (req: express.Re
   fs.writeFileSync(userFile, doc.toString(), 'utf8');
   // loadApps() reads this file on every request, so the card is live from here
   // — there is nothing to reload and nothing to restart.
-  res.json({ ok: true, key: appKey, created });
+  //
+  // `hash` is this box's half of the agreement the client is about to record:
+  // the canonical value it now holds, which it cannot compute for itself
+  // because a hash is only ever compared against one from the same side. A
+  // client that predates the field records nothing, which is the ordinary
+  // degradation — the next push stops and asks.
+  res.json({ ok: true, key: appKey, created, hash: syncCardHash(entry) });
 });
 
 router.get('/api/workspace', (req: express.Request, res: express.Response) => {
@@ -5081,15 +5087,22 @@ function pushRecordRel(rel: string, file: string): string {
 }
 
 /**
- * Write the agreement this push just established, from a fresh walk of the
- * finished tree.
+ * Write the agreement this push just established.
  *
- * A re-walk, not the plan: the repair hook rewrites files after they land, so a
- * hash derived from what was sent would report "box moved" forever on exactly
- * the files the image exists to rewrite. Skip-filtered, because the box's tree
- * holds paths the client never sends. Called only on a full success — a push
- * that dies mid-chunk leaves the record alone, so the next run sees more
- * difference than there is, which is the safe direction.
+ * Derived, not re-walked. XOR is its own inverse, so the fold runs backwards:
+ * the plan subtracted what this push was about to replace or delete, and apply
+ * added back what it actually wrote, from the tar headers it had just applied.
+ * `post = pre XOR old XOR new`, exact, and only a 32-byte accumulator crosses
+ * between the two phases — never a path list, which on a whole-box push is the
+ * hundreds of megabytes of strings the positional plan exists to avoid.
+ *
+ * Deriving would be wrong if anything rewrote files after apply, and the repair
+ * hook does. It cannot arise: the hook runs on whole-box pushes alone, and those
+ * carry no record intent — the same `intent` that gates `hashTree` in plan2.
+ *
+ * Called only on a full success and on the final chunk, while the tree is still
+ * reserved. A push that dies mid-chunk leaves the record alone, so the next run
+ * sees more difference than there is, which is the safe direction.
  */
 function pushWriteRecord(plan: PushPlan): void {
   const rec = plan.record;
@@ -6020,6 +6033,15 @@ function syncCommandProjectRe(): RegExp {
 
 router.get('/api/sync/entity', (req: express.Request, res: express.Response) => {
   const wantAll = req.query.all === '1';
+  // Does the caller understand a root plus a skip list?
+  //
+  // `--all` used to answer with one root per referenced project, and a client
+  // that expects that reads `roots: ['workspace']` as "pull the whole
+  // workspace" — with `--delete`, that prunes every local project the box does
+  // not have. The capability rides on the request rather than being negotiated,
+  // because only the caller knows what it can read, and the failure mode of
+  // guessing is destructive rather than merely wrong.
+  const filtered = req.query.filtered === '1';
   const name = typeof req.query.name === 'string' ? req.query.name : '';
   if (!wantAll && !name) { res.status(400).json({ error: 'name or all=1 is required' }); return; }
 
@@ -6036,9 +6058,12 @@ router.get('/api/sync/entity', (req: express.Request, res: express.Response) => 
     return true;
   };
 
-  const cards: { key: string; entry: unknown }[] = [];
+  // `hash` is this box's canonical value for the entry, so a pull can record
+  // the box's half of the agreement without asking again — the pull leaves the
+  // box untouched, so what is true now is still true afterwards.
+  const cards: { key: string; entry: unknown; hash: string }[] = [];
   if (wantAll) {
-    for (const [k, v] of Object.entries(user)) if (pickable(k, v)) cards.push({ key: k, entry: v });
+    for (const [k, v] of Object.entries(user)) if (pickable(k, v)) cards.push({ key: k, entry: v, hash: syncCardHash(v) });
     cards.sort((a, b) => a.key.localeCompare(b.key));
   } else {
     const entry = user[name];
@@ -6049,13 +6074,13 @@ router.get('/api/sync/entity', (req: express.Request, res: express.Response) => 
       res.status(404).json({ error: `no user-layer app ${name} on this box` });
       return;
     }
-    cards.push({ key: name, entry });
+    cards.push({ key: name, entry, hash: syncCardHash(entry) });
   }
 
   // One project per card, from its `command` alone. Not `cwd`: a cwd is where a
   // command runs — routinely ~/bin or $HOME — so treating it as a root means
   // naming one app syncs an unrelated tree.
-  const roots = new Set<string>();
+  const referenced = new Set<string>();
   for (const c of cards) {
     const cmd = (c.entry as { command?: unknown }).command;
     if (typeof cmd !== 'string') continue;
@@ -6069,10 +6094,38 @@ router.get('/api/sync/entity', (req: express.Request, res: express.Response) => 
       });
       return;
     }
-    for (const p of found) roots.add(`workspace/${p}`);
+    for (const p of found) referenced.add(p);
   }
 
-  res.json({ cards, roots: [...roots].sort() });
+  // Naming one app is one project, or none. `--all` is a *filtered* sync of
+  // ~/workspace instead: one root, with the projects no card names added to the
+  // skip list. Skip is two-way invisible, so an unreferenced project is neither
+  // fetched nor — when the client asks for deletes — removed. A loop of one
+  // pull per project would be several commands wearing one name, each with its
+  // own record and its own prompt.
+  if (!wantAll || !filtered) {
+    // One project per card: the narrowed form, and the shape a client that
+    // predates the filtered sweep expects from `--all` too.
+    res.json({ cards, roots: [...referenced].map(p => `workspace/${p}`).sort(), skip: [] });
+    return;
+  }
+  const ws = path.join(PUSH_HOME, 'workspace');
+  let names: string[];
+  try { names = fs.readdirSync(ws); }
+  catch { names = []; }
+  if (!names.length && !fs.existsSync(ws)) {
+    // No workspace here: every card this box has is pure config.
+    res.json({ cards, roots: [], skip: [] });
+    return;
+  }
+  // A name holding a pattern character cannot be written as a rule meaning only
+  // itself, so it stays in the sync rather than being given an over-broad one.
+  // No card can name it either — a project name is [A-Za-z0-9._-] on both ends.
+  const skip = names
+    .filter(n => !referenced.has(n) && !/[*?]/.test(n))
+    .map(n => `/workspace/${n}`)
+    .sort();
+  res.json({ cards, roots: ['workspace'], skip });
 });
 
 /**
@@ -6129,8 +6182,39 @@ router.post('/api/sync/record', express.json({ limit: '1mb' }), (req: express.Re
   res.json({ ok: true });
 });
 
+/** Cap on the cards one check may ask about — `push app --all` on a busy box. */
+const SYNC_MAX_CARDS = 500;
+
+/**
+ * Who moved, for each card the caller asked about.
+ *
+ * A card is a sync root whose walk is one map lookup, so it gets the same
+ * answer shape a directory does. `present` is the half the caller cannot work
+ * out for itself when it is pushing: the receiver's card state is at this end,
+ * and the merge endpoint only reports `created` after it has written.
+ *
+ * An absent key needs no state at all — the client reads it as an add, which is
+ * group 1 whatever any record says — but one is returned anyway rather than
+ * inventing a second shape for the same question.
+ */
+function syncCheckCards(replica: string, want: { key: string; local_hash: string }[]): unknown[] {
+  const userCfg = (loadConfigFile(path.join(os.homedir(), '.wsh')) ?? {}) as Record<string, unknown>;
+  return want.map(c => {
+    const entry = userCfg[c.key];
+    const present = entry !== undefined;
+    const boxHash = present ? syncCardHash(entry) : '';
+    const rec = syncFind(replica, SYNC_CARD_REL, syncCardFp(c.key));
+    return {
+      key:      c.key,
+      present,
+      state:    syncClassify(rec, c.local_hash, boxHash),
+      box_hash: boxHash,
+    };
+  });
+}
+
 router.post('/api/sync/check', express.json({ limit: '1mb' }), async (req: express.Request, res: express.Response) => {
-  const body = req.body as { replica?: unknown; root?: Record<string, unknown> };
+  const body = req.body as { replica?: unknown; root?: Record<string, unknown>; cards?: unknown };
   const root = (body?.root ?? {}) as { rel?: unknown; home?: unknown; file?: unknown; skip?: unknown; skip_fp?: unknown; local_hash?: unknown };
   if (!syncValidReplica(body?.replica)) { res.status(400).json({ error: 'replica must be 32 hex digits' }); return; }
   if (typeof root.rel !== 'string' || typeof root.skip_fp !== 'string' || !root.skip_fp) {
@@ -6154,6 +6238,27 @@ router.post('/api/sync/check', express.json({ limit: '1mb' }), async (req: expre
   // target to add beyond another string to validate.
   const target = pushSafeTarget(home ? PUSH_HOME : path.join(PUSH_HOME, root.rel), root.rel, home);
   if (!target) { res.status(400).json({ error: 'rel must name a path inside $HOME' }); return; }
+
+  // The cards half. Optional, so a client that carries none — every path push
+  // — sends nothing and reads nothing back.
+  const rawCards = Array.isArray(body?.cards) ? body.cards : [];
+  if (rawCards.length > SYNC_MAX_CARDS) {
+    res.status(400).json({ error: `too many cards (${rawCards.length} > ${SYNC_MAX_CARDS})` });
+    return;
+  }
+  const wantCards: { key: string; local_hash: string }[] = [];
+  for (const raw of rawCards) {
+    const c = raw as { key?: unknown; local_hash?: unknown };
+    if (typeof c?.key !== 'string' || !c.key) {
+      res.status(400).json({ error: 'each card needs a key' });
+      return;
+    }
+    if (typeof c.local_hash !== 'string' || !/^[0-9a-f]{64}$/.test(c.local_hash)) {
+      res.status(400).json({ error: `card ${c.key}: local_hash must be a sha256 hex digest` });
+      return;
+    }
+    wantCards.push({ key: c.key, local_hash: c.local_hash });
+  }
 
   try {
     const deny = loadPushIgnoreDir(PUSH_IGNORE_DIR);
@@ -6203,6 +6308,9 @@ router.post('/api/sync/check', express.json({ limit: '1mb' }), async (req: expre
         // directions: a client may ignore it, and a box may have dropped it.
         walk_token:     walkToken,
       },
+      // Absent rather than empty when nothing was asked, so a path push's reply
+      // stays the ~100 bytes it has always been.
+      ...(wantCards.length ? { cards: syncCheckCards(body.replica, wantCards) } : {}),
     });
   } catch (err) {
     res.status(500).json({ error: `sync check failed: ${errorMessage(err)}` });

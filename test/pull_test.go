@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -184,13 +185,27 @@ func TestPullReportsLocalOnlyFilesAndNeverRemovesThem(t *testing.T) {
 // them would carry the box's identity onto a laptop.
 func TestPullNeverSendsDeniedPaths(t *testing.T) {
 	srv, home := setupPush(t)
-	// ~/.wsh/push-state is denied by wsh itself, whatever the image ships.
-	if err := os.MkdirAll(filepath.Join(home, ".wsh", "push-state"), 0o755); err != nil {
+	// The record store is denied by wsh itself, whatever the image ships —
+	// under its current name and under the one it had before `pull` existed,
+	// since a box that synced back then still holds the old directory.
+	// Both halves of the protocol's own bookkeeping: the box's under ~/.wsh,
+	// and the client's under ~/.abox. push-state is the record store's old name,
+	// still denied because a box that synced before the rename still holds it.
+	denied := []string{".wsh/sync-state/", ".wsh/push-state/", ".wsh/trash/", ".abox/trash/"}
+	for _, dir := range denied {
+		if err := os.MkdirAll(filepath.Join(home, filepath.FromSlash(dir)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, filepath.FromSlash(dir), "abcd"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A file rather than a directory, and the sharpest of the lot: carry it and
+	// the far end becomes a second machine claiming this one's replica id.
+	if err := os.WriteFile(filepath.Join(home, ".abox", "replica"), []byte("0123456789abcdef0123456789abcdef"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".wsh", "push-state", "abcd"), []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	denied = append(denied, ".abox/replica")
 	if err := os.WriteFile(filepath.Join(home, "ok.txt"), []byte("fine"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -201,8 +216,10 @@ func TestPullNeverSendsDeniedPaths(t *testing.T) {
 	}
 	for _, e := range plan["fetch"].([]any) {
 		p := e.(map[string]any)["path"].(string)
-		if len(p) >= 4 && p[:4] == ".wsh" && len(p) > 5 && p[5:] == "push-state" {
-			t.Errorf("a pull would carry the box's own sync records: %s", p)
+		for _, dir := range denied {
+			if p == strings.TrimSuffix(dir, "/") || strings.HasPrefix(p, dir) {
+				t.Errorf("a pull would carry the protocol's own bookkeeping: %s", p)
+			}
 		}
 	}
 }

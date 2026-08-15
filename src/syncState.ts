@@ -26,8 +26,20 @@ import * as path from 'path';
 
 const SYNC_HOME = os.homedir();
 
-/** One line per synced root, keyed by the replica that synced it. */
-export const SYNC_STATE_DIR = path.join(SYNC_HOME, '.wsh', 'push-state');
+/**
+ * One line per synced root, keyed by the replica that synced it.
+ *
+ * `sync-state`, not `push-state`: nothing in a record names a direction, and
+ * both verbs read and write these through the same check. The old name predates
+ * `pull` and described the only writer there was at the time.
+ *
+ * Renaming drops every existing record. That costs one confirmation prompt per
+ * root and then the record is rewritten, which is what having no record has
+ * always meant — so there is no migration here for state that is an
+ * optimisation by construction. Both names stay denied in pushIgnore.ts, or an
+ * existing box's leftover push-state directory becomes pushable.
+ */
+export const SYNC_STATE_DIR = path.join(SYNC_HOME, '.wsh', 'sync-state');
 
 /**
  * Cap on the lines one replica's file may hold, oldest dropped first.
@@ -225,6 +237,55 @@ export class SyncHash {
     tail.writeBigUInt64LE(BigInt(this.count));
     return crypto.createHash('sha256').update(Buffer.concat([this.acc, tail])).digest('hex');
   }
+}
+
+// --- The card hash ---
+
+/**
+ * A card's record key. A card is a *view* of one file, which is what the
+ * record's second key half already means — one root under two filters is two
+ * agreements — so the key rides there rather than needing a shape of its own.
+ * The rel stays a real path, so nothing that validates one has to learn about
+ * cards.
+ */
+export const SYNC_CARD_REL = '.wsh/apps.yaml';
+export function syncCardFp(key: string): string { return `card:${key}`; }
+
+/**
+ * Fold one card into a value the next sync can compare.
+ *
+ * Over the canonical value, not the file bytes: a card lands verbatim but is
+ * written back through a YAML document that may reflow — key order, quoting,
+ * indentation and comments all belong to the file rather than to the entry — so
+ * hashing the bytes would report "moved" on a merge that changed nothing about
+ * this card. Keys sorted, scalars normalised, and the encoding is
+ * self-delimiting so no two different values can produce one string.
+ *
+ * Kept identical to syncCardHash in abox's cmd/abox-cli/sync.go, for the reason
+ * the tree hash is: nothing depends on it for correctness, and holding the two
+ * up side by side is worth more than the freedom to diverge.
+ */
+export function syncCardHash(v: unknown): string {
+  return crypto.createHash('sha256').update(syncCanonical(v)).digest('hex');
+}
+
+function syncCanonical(v: unknown): string {
+  if (v === null || v === undefined) return '~';
+  if (typeof v === 'boolean') return v ? 'T' : 'F';
+  if (typeof v === 'string') return `$${Buffer.byteLength(v, 'utf8')}:${v}`;
+  if (typeof v === 'number') {
+    // An integral float is the same value as the integer, and YAML hands back
+    // either depending on how it was written.
+    return `#${Number.isInteger(v) ? v.toFixed(0) : String(v)}`;
+  }
+  if (Array.isArray(v)) return `[${v.map(syncCanonical).join('')}]`;
+  if (typeof v === 'object') {
+    const rec = v as Record<string, unknown>;
+    return `{${Object.keys(rec).sort().map(k => syncCanonical(k) + syncCanonical(rec[k])).join('')}}`;
+  }
+  // A shape a card cannot hold. Encoded rather than dropped, so two unlike
+  // values cannot hash the same.
+  return `?${String(v)}`;
 }
 
 /**

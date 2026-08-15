@@ -105,7 +105,7 @@ func TestSyncRecordsWhatAPushAgreed(t *testing.T) {
 	})
 
 	// The record lands under the pushing machine's own id.
-	recPath := filepath.Join(home, ".wsh", "push-state", syncReplica)
+	recPath := filepath.Join(home, ".wsh", "sync-state", syncReplica)
 	if _, err := os.Stat(recPath); err != nil {
 		t.Fatalf("no record written at %s: %v", recPath, err)
 	}
@@ -210,7 +210,7 @@ func TestSyncRecordsASingleFile(t *testing.T) {
 	}
 	// Recorded under the file's own path, not the directory that contains it —
 	// otherwise a dotfile push and a whole-box push would fight over one line.
-	data, err := os.ReadFile(filepath.Join(home, ".wsh", "push-state", syncReplica))
+	data, err := os.ReadFile(filepath.Join(home, ".wsh", "sync-state", syncReplica))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestSyncSurvivesADamagedRecord(t *testing.T) {
 		{name: "a.txt", mode: 0o644, body: []byte("alpha"), typ: tar.TypeReg, mtime: time.Now()},
 	})
 
-	recPath := filepath.Join(home, ".wsh", "push-state", syncReplica)
+	recPath := filepath.Join(home, ".wsh", "sync-state", syncReplica)
 	if err := os.WriteFile(recPath, []byte("{not json at all\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestSyncRecordsNothingForANonFinalChunk(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("apply: status %d, body=%v", code, resp)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".wsh", "push-state", syncReplica)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(home, ".wsh", "sync-state", syncReplica)); !os.IsNotExist(err) {
 		t.Error("a chunk with more to come recorded an agreement the push has not yet earned")
 	}
 	if got := syncState(t, srv, syncRoot(rel, local)); got != "no_record" {
@@ -332,7 +332,7 @@ func TestSyncRecordsNothingWithoutAReplica(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("apply: status %d, body=%v", code, resp)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".wsh", "push-state")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(home, ".wsh", "sync-state")); !os.IsNotExist(err) {
 		t.Error("a push that named no replica should leave no records behind")
 	}
 }

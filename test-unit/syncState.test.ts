@@ -13,7 +13,7 @@
 
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { SyncHash, syncClassify, syncValidReplica, type SyncRecord } from '../src/syncState';
+import { SYNC_CARD_REL, SyncHash, syncCardFp, syncCardHash, syncClassify, syncValidReplica, type SyncRecord } from '../src/syncState';
 
 const entry = (o: Partial<{ path: string; type: string; size: number; mtime_ns: number; target: string }>) => ({
   path: 'a.txt', type: 'file', size: 5, mtime_ns: 1_700_000_000_000_000_000, ...o,
@@ -98,5 +98,47 @@ describe('syncValidReplica', () => {
     for (const bad of ['', '../../etc/passwd', 'ABCDEF0123456789abcdef0123456789', 'short', 'g'.repeat(32), 42, null]) {
       assert.ok(!syncValidReplica(bad), String(bad));
     }
+  });
+});
+
+describe('syncCardHash — one value, canonically', () => {
+  it('does not depend on key order', () => {
+    // A card lands verbatim but is written back through a YAML document that
+    // may reflow, so the hash is over the value rather than over the bytes.
+    assert.equal(
+      syncCardHash({ command: './serve', title: 'My Notes', port: 8080 }),
+      syncCardHash({ title: 'My Notes', port: 8080, command: './serve' }),
+    );
+  });
+
+  it('reads an integral float as the integer it is', () => {
+    // YAML hands back either, depending on how it was written.
+    assert.equal(syncCardHash({ n: 8080 }), syncCardHash({ n: 8080.0 }));
+  });
+
+  it('keeps apart the shapes a naive join would flatten', () => {
+    const distinct = [
+      { a: '12' },
+      { a: 12 },
+      { a: '1', b: '2' },
+      { ab: '12' },
+      { a: ['1', '2'] },
+      { a: null },
+      { a: true },
+    ];
+    const seen = new Map<string, number>();
+    distinct.forEach((v, i) => {
+      const h = syncCardHash(v);
+      assert.equal(seen.has(h), false, `values ${seen.get(h)} and ${i} hashed the same`);
+      seen.set(h, i);
+    });
+  });
+
+  it('names a card record by the file it is a view of', () => {
+    // The rel stays a real path, so nothing that validates one has to learn
+    // about cards; the key rides in the fingerprint, which is already "which
+    // filtered view of this path".
+    assert.equal(SYNC_CARD_REL, '.wsh/apps.yaml');
+    assert.equal(syncCardFp('mynotes'), 'card:mynotes');
   });
 });
