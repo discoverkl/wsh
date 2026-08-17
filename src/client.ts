@@ -359,7 +359,13 @@ function buildWsQuery(): URLSearchParams {
   const query = new URLSearchParams();
   if (sessionId) query.set('session', sessionId);
   query.set('app', appName);
-  if (wtoken && !isViewer) query.set('wtoken', wtoken);
+  // The writer token is a credential, not a seat claim — `yield=1` is what
+  // declines the seat. Withholding the token instead makes the server see a pure
+  // viewer, whose only secret is the session ID, and view-only sharing is
+  // disabled for pty sessions: the join is rejected outright (4003) rather than
+  // landing as a viewer who can take over. So always send it and let yield say
+  // whether we want to type.
+  if (wtoken) query.set('wtoken', wtoken);
   if (isViewer) query.set('yield', '1');
   // Any connect after the first attach is a re-attach: "give me my session back,
   // don't create a new one". Keyed off attachment rather than the retry counter
