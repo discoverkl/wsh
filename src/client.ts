@@ -23,6 +23,10 @@ const term = new Terminal({
   scrollback: 10000,
   convertEol: false,
   macOptionIsMeta: true,
+  // Option+drag selects text even while the app has mouse tracking on
+  // (vim, tmux, htop, agent TUIs). The terminal here is a browser tab, so
+  // without it there is no way to copy out of such an app at all.
+  macOptionClickForcesSelection: true,
   rightClickSelectsWord: true,
   smoothScrollDuration: 100,
   theme: {
