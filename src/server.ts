@@ -6673,11 +6673,30 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
       socket.destroy();
       return;
     }
+    // In trust-proxy mode the gateway is the only legitimate source of a
+    // request, public app or not. makeTokenMiddleware enforces exactly that on
+    // every HTTP request — but this handler is bound straight to the server
+    // (localServer/networkServer .on('upgrade')), so no express middleware runs
+    // for an upgrade. Without this check a public app's WebSocket is reachable
+    // directly on the container's published port, carrying whatever identity
+    // headers the caller cares to invent, and the loop below copies every one
+    // of them into the app. That was harmless while X-WSH-User was display
+    // only; it stopped being harmless when X-Auth-User gave apps a name to
+    // authorize on.
+    //
+    // Refuse rather than strip the headers, so one rule covers both protocols:
+    // the same request over HTTP is already refused here.
+    if (TRUST_PROXY && !verifyProxySecret(req)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     // Non-public web apps require owner-level access. Trust the gateway's
     // verdict in trust-proxy mode; cookie check otherwise.
     if (wsSession.access !== 'public') {
       if (TRUST_PROXY) {
-        if (!verifyProxySecret(req) || !gatewayAllowed(req)) {
+        // The proxy secret is already proven above.
+        if (!gatewayAllowed(req)) {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
           socket.destroy();
           return;
