@@ -26,6 +26,17 @@ type cpCase struct {
 	Refuse  bool    `json:"refuse"`
 }
 
+// cpCard is one card as somebody writes one: the three fields that can name a
+// project, and the one project the whole rule must arrive at.
+type cpCard struct {
+	Why     string  `json:"why"`
+	Cwd     string  `json:"cwd"`
+	Command string  `json:"command"`
+	Project string  `json:"project"`
+	Want    *string `json:"want"`
+	Refuse  bool    `json:"refuse"`
+}
+
 func TestSyncEntityMatchesTheSharedFixture(t *testing.T) {
 	raw, err := os.ReadFile(commandProjectFixture)
 	if err != nil {
@@ -42,6 +53,7 @@ func TestSyncEntityMatchesTheSharedFixture(t *testing.T) {
 	var f struct {
 		Home  string   `json:"home"`
 		Cases []cpCase `json:"cases"`
+		Cards []cpCard `json:"cards"`
 	}
 	if err := json.Unmarshal(raw, &f); err != nil {
 		t.Fatal(err)
@@ -89,6 +101,60 @@ func TestSyncEntityMatchesTheSharedFixture(t *testing.T) {
 		want := "workspace/" + *tc.Want
 		if len(roots) != 1 || roots[0] != want {
 			t.Errorf("case %d %q: resolved %v, want [%s]", i, tc.Command, roots, want)
+		}
+	}
+
+	// And the whole rule over a whole card: which field is read, and in what
+	// order. The scan above is one string in and names out; this is the part
+	// that says `project` beats `cwd` beats `command` — the half a user
+	// experiences, and the half that used to differ from the push side for the
+	// most ordinary card there is, a cwd in the workspace with a command
+	// relative to it.
+	if len(f.Cards) == 0 {
+		t.Fatal("the shared fixture has no card cases — it grew a `cards` array; if it lost one, the two resolvers are unheld again")
+	}
+	for _, tc := range f.Cards {
+		entry := map[string]any{}
+		for k, v := range map[string]string{
+			"cwd":     strings.ReplaceAll(tc.Cwd, f.Home+"/workspace/", home+"/workspace/"),
+			"command": strings.ReplaceAll(tc.Command, f.Home+"/workspace/", home+"/workspace/"),
+			"project": tc.Project,
+		} {
+			// Only the fields the card was written with: a case about a card
+			// with no cwd is a card with no cwd, not one holding "".
+			if v != "" {
+				entry[k] = v
+			}
+		}
+		card, err := json.Marshal(map[string]any{"probe": entry})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wsh, "apps.yaml"), card, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		code, body := srv.getJSONRaw(t, "/api/sync/entity?name=probe")
+		if tc.Refuse {
+			if code != 409 {
+				t.Errorf("%s: status %d, want 409", tc.Why, code)
+			}
+			continue
+		}
+		if code != 200 {
+			t.Errorf("%s: status %d, want 200 (%v)", tc.Why, code, body)
+			continue
+		}
+		roots, _ := body["roots"].([]any)
+		if tc.Want == nil {
+			if len(roots) != 0 {
+				t.Errorf("%s: resolved %v, want none", tc.Why, roots)
+			}
+			continue
+		}
+		want := "workspace/" + *tc.Want
+		if len(roots) != 1 || roots[0] != want {
+			t.Errorf("%s: resolved %v, want [%s]", tc.Why, roots, want)
 		}
 	}
 }

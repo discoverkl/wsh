@@ -6098,24 +6098,66 @@ router.get('/api/sync/entity', (req: express.Request, res: express.Response) => 
     cards.push({ key: name, entry, hash: syncCardHash(entry) });
   }
 
-  // One project per card, from its `command` alone. Not `cwd`: a cwd is where a
-  // command runs — routinely ~/bin or $HOME — so treating it as a root means
-  // naming one app syncs an unrelated tree.
+  // One project per card, read from three of its fields, most specific first:
+  // `project` names it outright, else `cwd`, else a path scanned out of
+  // `command`. The mirror of pushAppProjects in abox/cmd/abox-cli/push_entity.go,
+  // held to the same fixture — see the `cards` array in command-projects.json.
+  //
+  // `cwd` used to be excluded here, on the grounds that it is "where a command
+  // runs — routinely ~/bin or $HOME — so treating it as a root means naming one
+  // app syncs an unrelated tree". That objection is about taking a cwd *as* a
+  // root, and it does not survive the filter every source already goes through:
+  // only <home>/workspace/<name> matches at all, so `cwd: ~/bin` names nothing
+  // now exactly as it named nothing then. What the exclusion cost was the
+  // ordinary app — a cwd in the workspace and a command relative to it — which
+  // resolved to no project and pulled as a card with no code behind it.
+  //
+  // One thing the push side has that this cannot: when a cwd and a command name
+  // different projects, push says so before it moves anything. The answer here
+  // is {cards, roots, skip} with nowhere to put a sentence, so a pull acts on
+  // the cwd silently. Worth a field one day; not worth inventing one for it now.
+  const scanProjects = (text: string): string[] => {
+    const found = new Set<string>();
+    for (const m of text.matchAll(syncCommandProjectRe())) found.add(m[1]);
+    return [...found];
+  };
+  const cardProjects = (key: string, entry: unknown): { names: string[]; field: string; error?: string } => {
+    const e = (entry ?? {}) as { project?: unknown; cwd?: unknown; command?: unknown };
+    if (typeof e.project === 'string') {
+      const declared = e.project.trim();
+      if (!declared) {
+        return { names: [], field: 'project', error: `app ${key} has an empty \`project\` — remove the key, or name a project in ~/workspace` };
+      }
+      // A bare name, the way a project entity takes one. A path would be a
+      // second spelling of the same fact, and the first thing anyone would try
+      // writing in it is the one thing it must not accept — a way out of the
+      // workspace, on input this box does not control.
+      if (declared !== path.basename(declared) || declared === '.' || declared === '..') {
+        return { names: [], field: 'project', error: `app ${key} has \`project: ${declared}\` — that must be a project name, not a path` };
+      }
+      return { names: [declared], field: 'project' };
+    }
+    if (typeof e.cwd === 'string' && e.cwd) {
+      const found = scanProjects(e.cwd);
+      if (found.length > 0) return { names: found, field: 'cwd' };
+    }
+    return { names: typeof e.command === 'string' ? scanProjects(e.command) : [], field: 'command' };
+  };
+
   const referenced = new Set<string>();
   for (const c of cards) {
-    const cmd = (c.entry as { command?: unknown }).command;
-    if (typeof cmd !== 'string') continue;
-    const found = new Set<string>();
-    for (const m of cmd.matchAll(syncCommandProjectRe())) {
-      found.add(m[1]);
+    const { names, field, error } = cardProjects(c.key, c.entry);
+    if (error) {
+      res.status(409).json({ error });
+      return;
     }
-    if (found.size > 1) {
+    if (names.length > 1) {
       res.status(409).json({
-        error: `app ${c.key} names more than one project (${[...found].join(', ')}) — taking the first would land half an app`,
+        error: `app ${c.key} names more than one project in its ${field} (${names.join(', ')}) — taking the first would land half an app`,
       });
       return;
     }
-    for (const p of found) referenced.add(p);
+    for (const p of names) referenced.add(p);
   }
 
   // Naming one app is one project, or none. `--all` is a *filtered* sync of
