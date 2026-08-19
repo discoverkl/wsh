@@ -204,10 +204,12 @@ Evaluated top-to-bottom; first match wins.
 
 **`--trust-proxy` mode** (for reverse-proxy deployments):
 
-Requires `WSH_PROXY_SECRET` env var. Every request must include a matching `X-WSH-Proxy-Secret` header. The proxy supplies two trusted claims:
+Requires `WSH_PROXY_SECRET` env var. Every request must include a matching `X-WSH-Proxy-Secret` header — HTTP requests and WebSocket upgrades alike, public apps included. The proxy supplies two trusted claims:
 
-- `X-WSH-User`: display-only username (used in banners, share-link labels). Carries no authority.
+- `X-WSH-User`: display-only username (used in banners, share-link labels, and `session.createdBy`). Carries no authority.
 - `X-Abox-Allowed: 0|1`: the proxy's verdict on whether this caller may access this box.
+
+**`X-WSH-*` stops at wsh.** Both are consumed here and stripped before a request reaches a web app (`appHeaders`). The secret is the key to the box — an app that logs its request headers would write it to disk, and a *public* app that echoes them would hand it to a stranger, who could then forge any identity back at wsh. The display name has no reason to travel either; an app that wants to know who spawned its session reads `WSH_ORIGIN_USER` from its environment. What apps do see is the gateway's own contract: `X-Auth-User` and the `X-Abox-*` verdict headers. The strip is a prefix match, so the next `X-WSH-*` header is private by default rather than by remembering.
 
 | Condition | Role |
 |---|---|
@@ -273,7 +275,9 @@ Apps must be proxy-aware and configure their own base URL using `$WSH_BASE_URL`.
 
 **Initial inner path.** The `path` config field sets the inner path a web app's iframe opens at (e.g. `path: /files/` for File Browser, whose `/` root doesn't render). It rides the `ready` message to the client; a one-shot `?to=<path>` URL param overrides it.
 
-Environment injected into web app processes: `WSH_PORT` (the port the app should listen on), `WSH_SESSION`, `WSH_BASE_URL`.
+Environment injected into web app processes: `WSH_PORT` (the port the app should listen on), `WSH_SESSION`, `WSH_BASE_URL`, and `WSH_ORIGIN_USER` (the `X-WSH-User` captured when the session was created, or empty).
+
+Headers a proxied request arrives with are the caller's, minus every `X-WSH-*` (see [Authentication & Access Control](#--trust-proxy-mode-for-reverse-proxy-deployments)). Under a gateway that means an app can read `X-Auth-User` for the SSO username and `X-Abox-Allowed` to tell an authorized user from a forwarded stranger.
 
 **Daemon web apps (`daemon: true`).** A `type:web` app with `daemon: true` is the way to run a persistent web server whose existence does **not** mark the box busy:
 

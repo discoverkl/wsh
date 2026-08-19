@@ -3788,6 +3788,27 @@ router.post('/api/sessions/:id/stdin', (req: express.Request, res: express.Respo
   req.on('end',   ()    => finish(200, { bytes }));
 });
 
+// Headers to hand a web app: everything the caller sent, minus wsh's own.
+//
+// X-WSH-* are wsh's inbound protocol — a credential (X-WSH-Proxy-Secret) and a
+// display name (X-WSH-User) that wsh itself consumes on its own endpoints. None
+// of it is part of an app's contract, and forwarding the secret was the whole
+// key to the box: an app that logs its request headers writes it to disk, and a
+// *public* app that echoes them hands it to a stranger, who can then forge any
+// identity to wsh. Apps get the gateway's contract instead — X-Auth-User plus
+// the X-Abox-* verdict headers.
+//
+// A prefix match rather than a list, so the next X-WSH-* header wsh invents is
+// private by default instead of by remembering.
+function appHeaders(h: http.IncomingHttpHeaders): http.IncomingHttpHeaders {
+  const out: http.IncomingHttpHeaders = {};
+  for (const [k, v] of Object.entries(h)) {
+    if (k.toLowerCase().startsWith('x-wsh-')) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 // HTTP reverse proxy for web apps — must be before express.json() to preserve request body
 function proxyHandler(req: express.Request, res: express.Response): void {
   const sessionId = req.params.sessionId;
@@ -3832,7 +3853,7 @@ function proxyHandler(req: express.Request, res: express.Response): void {
     port: session.port,
     path: targetPath,
     method: req.method,
-    headers: req.headers,
+    headers: appHeaders(req.headers),
   }, (proxyRes) => {
     proxyRes.on('data', (chunk: Buffer) => { session.bytesOut += chunk.length; });
     res.writeHead(proxyRes.statusCode!, proxyRes.headers);
@@ -6715,7 +6736,7 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
       const stableBase = BASE + '_a/' + (wsSession.app || wsSessionId);
       const targetPath = wsSession.stripPrefix ? wsSuffix : stableBase + wsSuffix;
       let upgradeReq = `${req.method} ${targetPath} HTTP/1.1\r\n`;
-      for (const [key, val] of Object.entries(req.headers)) {
+      for (const [key, val] of Object.entries(appHeaders(req.headers))) {
         if (val) {
           upgradeReq += `${key}: ${Array.isArray(val) ? val.join(', ') : val}\r\n`;
         }
