@@ -11,6 +11,7 @@ package wsh_test
 // │  ├ runnable                           │ good ~/cli → the wrapper decides (see below)      │
 // │  └ rechecked per request              │ ~/cli deleted mid-life → cli_missing again        │
 // │ TestPublicCLIBadArgs                  │ argv bounds are the caller's own fault            │
+// │ TestOnlyTheCLIRouteMakesCLISessions   │ nothing in the box can mint one                   │
 // └───────────────────────────────────────┴───────────────────────────────────────────────────┘
 //
 // Covers the ladder in front of the one program an unauthenticated caller may
@@ -178,5 +179,68 @@ func writeCLI(t *testing.T, path, body string, mode os.FileMode) {
 	// — but a stricter umask would silently turn this into the case above.
 	if err := os.Chmod(path, mode); err != nil {
 		t.Fatalf("chmod %s: %v", path, err)
+	}
+}
+
+// The four /api/cli/<sid>/… routes are unauthenticated, and cliOnly is the only
+// thing standing between a stranger and every other session on the box. It
+// admits a sid on one basis: that POST /api/cli created it.
+//
+// So "created it" has to be unforgeable from inside the box. It was not, for a
+// while: the flag rode on AppConfig, which is the apps.yaml schema, and
+// mergeApps() spreads parsed YAML into that type with no key whitelist. A
+// `cli: true` in a box's own apps.yaml — or in a POST /api/sessions body —
+// reached the same spawn, wrote the same marker, and handed that session's sid
+// to the anonymous routes. Owner-caused rather than a hole, but it made the
+// design's "nothing inside the box can repoint the public endpoint" true of the
+// route and false of the flag.
+//
+// It is a parameter now, so only the route can pass it. This is the test that
+// says so.
+func TestOnlyTheCLIRouteMakesCLISessions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// An app that asks to be a cli session, in the file a box owner controls.
+	if err := os.MkdirAll(filepath.Join(home, ".wsh"), 0o755); err != nil {
+		t.Fatalf("mkdir .wsh: %v", err)
+	}
+	apps := "sneaky:\n  command: sleep 30\n  type: job\n  cli: true\n  args: [\"--anything\"]\n"
+	if err := os.WriteFile(filepath.Join(home, ".wsh", "apps.yaml"), []byte(apps), 0o644); err != nil {
+		t.Fatalf("write apps.yaml: %v", err)
+	}
+
+	srv := startServer(t)
+
+	for _, c := range []struct {
+		what string
+		body map[string]any
+	}{
+		{"via apps.yaml", map[string]any{"app": "sneaky"}},
+		{"via the request body", map[string]any{
+			"type": "job", "command": "sleep 30", "cli": true, "args": []string{"--anything"},
+		}},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			status, body := srv.postJSONRaw(t, "/api/sessions", c.body)
+			if status != 200 {
+				t.Skipf("could not create the session to test with: %d %v", status, body)
+			}
+			id, _ := body["id"].(string)
+			if id == "" {
+				t.Fatalf("no session id: %v", body)
+			}
+			t.Cleanup(func() { srv.deleteJSONRaw(t, "/api/sessions/"+id) })
+
+			// The marker is what answers after the child exits, so its absence
+			// is the durable half of the claim.
+			if _, err := os.Stat(filepath.Join(home, ".wsh", "logs", id+".cli")); err == nil {
+				t.Errorf("a session created outside POST /api/cli wrote a .cli marker")
+			}
+			// And this is the half a stranger would actually use.
+			code, _ := srv.deleteJSONRaw(t, "/api/cli/"+id)
+			if code != 404 {
+				t.Errorf("DELETE /api/cli/%s answered %d — an ordinary session is addressable anonymously", id, code)
+			}
+		})
 	}
 }

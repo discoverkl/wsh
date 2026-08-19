@@ -1858,7 +1858,6 @@ function baseSession(appKey: string, appConfig: AppConfig, createdBy = ''): Sess
     createdBy,
     bytesIn: 0,
     bytesOut: 0,
-    cli: appConfig.cli === true,
   }) as Session;
 }
 
@@ -2096,7 +2095,25 @@ async function spawnWebSession(id: string, appKey: string, appConfig: AppConfig,
   return session;
 }
 
-function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, createdBy = ''): Session {
+/** The public-CLI shape of a job, which only POST /api/cli can supply.
+ *
+ *  Deliberately a parameter and not three fields on AppConfig. AppConfig is the
+ *  apps.yaml schema and mergeApps() spreads parsed YAML into it with no key
+ *  whitelist, so a `cli: true` in a box's own apps.yaml would reach this spawn
+ *  — writing the `<id>.cli` marker, and handing that session's sid to the four
+ *  unauthenticated /api/cli/<sid>/… routes. Owner-caused rather than a hole,
+ *  but it made "nothing inside the box can repoint the public endpoint" true of
+ *  the route and false of the flag. As a parameter the claim is structural. */
+interface CliJob {
+  /** argv handed to CLI_WRAPPER verbatim. Because there is no shell, `;`, `|`
+   *  and `$(…)` arrive as literal argument bytes. */
+  args: string[];
+  /** Drop the child's stderr instead of merging it into the job log — abox-cli's
+   *  `-q`, on a path with no shell to spell `2>/dev/null` in. */
+  quiet: boolean;
+}
+
+function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, createdBy = '', cli?: CliJob): Session {
   const session = baseSession(appKey, appConfig, createdBy);
   session.appType = 'job';
 
@@ -2107,10 +2124,13 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
   fs.mkdirSync(JOB_LOG_DIR, { recursive: true });
   const logFd = fs.openSync(path.join(JOB_LOG_DIR, `${id}.log`), 'w');
 
-  // Durable proof this id was a cli session, written beside .log and .exit and
-  // aged out with them. cliOnly still has to answer after the child exits and
-  // the Session leaves the map — that is when exec polls for the exit code.
-  if (appConfig.cli) {
+  // Both halves of "this id is a cli session", set together. The flag answers
+  // while the session is in the map; the marker beside .log and .exit answers
+  // afterwards, and is aged out with them — cliOnly still has to reply after
+  // the child exits and the Session is gone, which is when exec polls for the
+  // exit code.
+  if (cli) {
+    session.cli = true;
     try { fs.writeFileSync(path.join(JOB_LOG_DIR, `${id}.cli`), ''); } catch {}
   }
 
@@ -2139,8 +2159,8 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
   // spawn to fall back to and none to reach here.
   let child: ChildProcess;
   try {
-    child = appConfig.cli
-      ? spawn(CLI_WRAPPER, appConfig.args ?? [], spawnOpts)
+    child = cli
+      ? spawn(CLI_WRAPPER, cli.args, spawnOpts)
       : spawn('/bin/sh', ['-c', appConfig.command], spawnOpts);
   } catch (err) {
     // spawn() throws synchronously for ENOEXEC — a file with no #! line.
@@ -2186,7 +2206,7 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
   // `quiet` is abox-cli's -q on the cli path, where there is no shell to spell
   // 2>/dev/null in. Drained rather than left unread: an unread pipe fills at
   // 64KB and blocks the child forever.
-  if (appConfig.quiet) child.stderr!.resume();
+  if (cli?.quiet) child.stderr!.resume();
   else child.stderr!.on('data', appendOutput);
 
   child.on('close', (code, signal) => {
@@ -2208,7 +2228,11 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
     unregisterSession(id, session, 'process-exit');
   });
 
-  console.log(`[session ${id}] job spawned: ${appConfig.command}`);
+  // The argv goes here and nowhere else. The session title is the bare word
+  // `cli` because GET /api/boxes/<box>/sessions is readable by every
+  // authenticated user on the fleet — but the box's own owner still has to be
+  // able to debug what a caller sent, and this log is theirs.
+  console.log(`[session ${id}] job spawned: ${cli ? `${CLI_BIN} ${JSON.stringify(cli.args)}` : appConfig.command}`);
   return session;
 }
 
@@ -2434,15 +2458,6 @@ interface AppConfig {
   top?: number;
   skill?: string;
   slashPrefix?: boolean;
-  /** Public-CLI job: spawn CLI_WRAPPER with `args` as argv and no shell at
-   *  all. `command` is display metadata on this path and is never executed. */
-  cli?: boolean;
-  /** cli only — argv handed to CLI_BIN verbatim. Because there is no shell,
-   *  `;`, `|` and `$(…)` arrive as literal argument bytes. */
-  args?: string[];
-  /** cli only — drop the child's stderr instead of merging it into the job
-   *  log (abox-cli's `-q`). The shell path spells this `2>/dev/null`. */
-  quiet?: boolean;
   type?: 'pty' | 'web' | 'job';
   /** type:web only — idle TTL after the last viewer leaves (e.g. "30m", "2h").
    *  Deliberately not honored for pty: a TUI session holds a live terminal and
@@ -3531,14 +3546,19 @@ const cliOnly: express.RequestHandler = (req, res, next) => {
  *  public CLI is usually not whoever can fix the box, so abox-cli renders every
  *  `cli_` code as the same plain sentence. The code is for support and scripts;
  *  the log line is for the box's owner. */
+//  `status` is 404 for "this box publishes no CLI" and 500 for "this box is
+//  misconfigured" — a wrapper the image never installed is not an absent
+//  resource. It lives in the table rather than being derived from the code's
+//  spelling, so adding a code forces the choice instead of inheriting one, and
+//  renaming one cannot silently change an HTTP status.
 const CLI_SETUP_ERRORS = {
-  cli_missing:         `${CLI_BIN} does not exist`,
-  cli_not_a_file:      `${CLI_BIN} is not a regular file`,
-  cli_not_executable:  `${CLI_BIN} is not executable`,
-  cli_not_runnable:    `${CLI_BIN} has no #! line`,
-  cli_wrapper_missing: `${CLI_WRAPPER} is not installed`,
-  cli_wrapper_broken:  `${CLI_WRAPPER} is present but not usable`,
-  cli_spawn_failed:    `${CLI_BIN} could not be started`,
+  cli_missing:         { status: 404, log: `${CLI_BIN} does not exist` },
+  cli_not_a_file:      { status: 404, log: `${CLI_BIN} is not a regular file` },
+  cli_not_executable:  { status: 404, log: `${CLI_BIN} is not executable` },
+  cli_not_runnable:    { status: 404, log: `${CLI_BIN} has no #! line` },
+  cli_wrapper_missing: { status: 500, log: `${CLI_WRAPPER} is not installed` },
+  cli_wrapper_broken:  { status: 500, log: `${CLI_WRAPPER} is present but not usable` },
+  cli_spawn_failed:    { status: 500, log: `${CLI_BIN} could not be started` },
 } as const;
 
 type CliSetupError = keyof typeof CLI_SETUP_ERRORS;
@@ -3546,17 +3566,15 @@ type CliSetupError = keyof typeof CLI_SETUP_ERRORS;
 /** Refuse a cli request the box cannot serve: reason to the log, code to the
  *  caller. `detail` carries the underlying errno when there is one. */
 function refuseCli(res: express.Response, code: CliSetupError, detail = ''): void {
-  console.error(`[cli] ${CLI_SETUP_ERRORS[code]}${detail ? `: ${detail}` : ''}`);
-  // 404 for "this box publishes no CLI", 500 for "this box is misconfigured" —
-  // a missing wrapper is the image's omission, not an absent resource. abox-cli
-  // reads the `error` code and never the status, so this is for whoever reads
-  // the box's own access log.
-  const server = code.startsWith('cli_wrapper_') || code === 'cli_spawn_failed';
-  res.status(server ? 500 : 404).json({ error: code, box: BOX_NAME });
+  const { status, log } = CLI_SETUP_ERRORS[code];
+  console.error(`[cli] ${log}${detail ? `: ${detail}` : ''}`);
+  res.status(status).json({ error: code, box: BOX_NAME });
 }
 
-/** What the box got wrong about a file it was asked to run. */
-type RunnableFault = 'missing' | 'not_a_file' | 'not_executable' | 'not_runnable';
+/** How CLI_BIN can fail to be a program. The same four checks answer for
+ *  CLI_WRAPPER, whose caller narrows them to its own two codes — past "this
+ *  image never shipped one" there is nothing an owner does differently. */
+type RunnableFault = 'cli_missing' | 'cli_not_a_file' | 'cli_not_executable' | 'cli_not_runnable';
 
 /** Everything spawn() needs to be true of a file, checked before it is spawned:
  *  it exists, it is a regular file, it carries the executable bit, and it opens
@@ -3575,12 +3593,12 @@ type RunnableFault = 'missing' | 'not_a_file' | 'not_executable' | 'not_runnable
 function checkRunnable(p: string): { fault: RunnableFault; detail: string } | null {
   let st: fs.Stats;
   try { st = fs.statSync(p); }
-  catch (err) { return { fault: 'missing', detail: errorMessage(err) }; }
+  catch (err) { return { fault: 'cli_missing', detail: errorMessage(err) }; }
   // A directory passes X_OK, so isFile() is what actually rules out "there is
   // something at that path, but it is not a program".
-  if (!st.isFile()) return { fault: 'not_a_file', detail: '' };
+  if (!st.isFile()) return { fault: 'cli_not_a_file', detail: '' };
   try { fs.accessSync(p, fs.constants.X_OK); }
-  catch (err) { return { fault: 'not_executable', detail: errorMessage(err) }; }
+  catch (err) { return { fault: 'cli_not_executable', detail: errorMessage(err) }; }
 
   let fd = -1;
   try {
@@ -3589,39 +3607,20 @@ function checkRunnable(p: string): { fault: RunnableFault; detail: string } | nu
     const n = fs.readSync(fd, head, 0, 2, 0);
     const magic = n === 2 && ((head[0] === 0x23 && head[1] === 0x21) ||   // #!
                               (head[0] === 0x7f && head[1] === 0x45));    // \x7fELF
-    if (!magic) return { fault: 'not_runnable', detail: '' };
+    if (!magic) return { fault: 'cli_not_runnable', detail: '' };
   } catch (err) {
-    return { fault: 'not_runnable', detail: errorMessage(err) };
+    return { fault: 'cli_not_runnable', detail: errorMessage(err) };
   } finally {
     if (fd >= 0) { try { fs.closeSync(fd); } catch {} }
   }
   return null;
 }
 
-/** Which refusal each fault becomes for CLI_BIN. They are told apart because
- *  the box owner is who fixes them and each has a different fix.
- *
- *  CLI_WRAPPER gets no such table: past "this image never shipped one" there is
- *  nothing an owner does differently, so the rest is one cli_wrapper_broken. */
-const CLI_BIN_REFUSAL: Record<RunnableFault, CliSetupError> = {
-  missing:        'cli_missing',
-  not_a_file:     'cli_not_a_file',
-  not_executable: 'cli_not_executable',
-  not_runnable:   'cli_not_runnable',
-};
-
 /** Bounds on the public argv. execve enforces its own ARG_MAX further down, but
  *  refusing early keeps an anonymous caller from making the box do the work of
  *  building a session first. Not rate limiting — see the design's known limits. */
 const CLI_MAX_ARGS = 64;
 const CLI_MAX_ARGS_BYTES = 16 * 1024;
-
-/** Session title for a cli job. The bare word, never the argv:
- *  GET /api/boxes/<box>/sessions is readable by every authenticated user on the
- *  fleet, so a title built from arguments would publish a stranger's input to
- *  all of it. The box's own owner still has the argv — in the job log, which is
- *  where debugging happens. */
-const CLI_TITLE = 'cli';
 
 router.get('/api/sessions', (req: express.Request, res: express.Response) => {
   // An idle daemon (no viewers) is hidden so it doesn't mark the box busy —
@@ -6749,35 +6748,39 @@ router.post('/api/cli', (req: express.Request, res: express.Response) => {
   // and the one its owner can act on; a missing wrapper is an image problem
   // that, checked first, would mask it on every box at once.
   const binFault = checkRunnable(CLI_BIN);
-  if (binFault) { refuseCli(res, CLI_BIN_REFUSAL[binFault.fault], binFault.detail); return; }
+  if (binFault) { refuseCli(res, binFault.fault, binFault.detail); return; }
 
   const wrapperFault = checkRunnable(CLI_WRAPPER);
   if (wrapperFault) {
-    refuseCli(res, wrapperFault.fault === 'missing' ? 'cli_wrapper_missing' : 'cli_wrapper_broken',
+    refuseCli(res, wrapperFault.fault === 'cli_missing' ? 'cli_wrapper_missing' : 'cli_wrapper_broken',
               wrapperFault.detail);
     return;
   }
 
   const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
   const cfg: AppConfig = {
-    command: CLI_BIN,  // display only: ps and the session title read it, the spawn does not
+    command: CLI_BIN,  // display only: ps reads it, the spawn does not
     type: 'job',
-    title: CLI_TITLE,
-    cli: true,
-    args: args as string[],
-    ...(req.body?.quiet ? { quiet: true } : {}),
+    // The bare word, never the argv: GET /api/boxes/<box>/sessions is readable
+    // by every authenticated user on the fleet, so a title built from arguments
+    // would publish a stranger's input to all of it. The owner still gets the
+    // argv, in the box log — see the job-spawned line in spawnJobSession.
+    title: 'cli',
   };
 
   try {
-    spawnJobSession(id, 'cli', cfg, '');
+    spawnJobSession(id, 'cli', cfg, '', { args: args as string[], quiet: !!req.body?.quiet });
   } catch (err) {
     // Every way spawn() throws was ruled out a few lines up, so reaching here
     // means the wrapper changed between the check and the spawn. Kept as the
     // backstop it is: an uncaught throw would answer 500 with a stack trace,
     // and the asynchronous shape — child.on('error') in spawnJobSession — would
     // otherwise be rethrown and take every session on the box with it.
-    const code = (err as NodeJS.ErrnoException).code;
-    refuseCli(res, code === 'ENOEXEC' ? 'cli_not_runnable' : 'cli_spawn_failed', errorMessage(err));
+    //
+    // Always cli_spawn_failed. The only file spawned here is the wrapper, whose
+    // #! was just read; naming ENOEXEC would log "CLI_BIN has no #! line" for a
+    // fault that is the image's.
+    refuseCli(res, 'cli_spawn_failed', errorMessage(err));
     return;
   }
 
