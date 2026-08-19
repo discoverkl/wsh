@@ -1,4 +1,4 @@
-import { exec, execSync, spawn, ChildProcess } from 'child_process';
+import { exec, execSync, spawn, ChildProcess, SpawnOptions } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import http from 'http';
@@ -57,6 +57,10 @@ const PORT_FILE = path.join(os.homedir(), '.wsh', 'port');
 
 /** Directory for persisted job scrollback logs. */
 const JOB_LOG_DIR = path.join(os.homedir(), '.wsh', 'logs');
+/** The only program the public CLI endpoint will ever run. A constant, not an
+ *  apps.yaml entry: no file inside the box can repoint the public endpoint at
+ *  something else. */
+const CLI_BIN = '/root/cli';
 const JOB_LOG_MAX = 200; // keep at most 200 log files
 
 /** Directory for pasted image uploads (Ctrl+V in the browser terminal). */
@@ -1540,6 +1544,10 @@ interface SessionFields {
    *  remains null for pty/web sessions. Closed/ended when the child exits or
    *  when a client stdin POST finishes. */
   stdin: Writable | null;
+  /** type:job — created by POST /api/cli, so the /api/cli/<sid>/… routes may
+   *  address it. Mirrored on disk as `<id>.cli` because a job outlives its
+   *  Session object; see isCliSession. */
+  cli?: boolean;
   port?: number;
   ready?: boolean;
   timeoutMs?: number;
@@ -1726,6 +1734,7 @@ function rotateJobLogs(): void {
           for (const old of withMtime.slice(JOB_LOG_MAX)) {
             fs.unlink(old.path, () => {});
             fs.unlink(old.path.replace(/\.log$/, '.exit'), () => {});
+            fs.unlink(old.path.replace(/\.log$/, '.cli'), () => {});
           }
         }
       });
@@ -1853,6 +1862,7 @@ function baseSession(appKey: string, appConfig: AppConfig, createdBy = ''): Sess
     createdBy,
     bytesIn: 0,
     bytesOut: 0,
+    cli: appConfig.cli === true,
   }) as Session;
 }
 
@@ -2101,6 +2111,13 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
   fs.mkdirSync(JOB_LOG_DIR, { recursive: true });
   const logFd = fs.openSync(path.join(JOB_LOG_DIR, `${id}.log`), 'w');
 
+  // Durable proof this id was a cli session, written beside .log and .exit and
+  // aged out with them. cliOnly still has to answer after the child exits and
+  // the Session leaves the map — that is when exec polls for the exit code.
+  if (appConfig.cli) {
+    try { fs.writeFileSync(path.join(JOB_LOG_DIR, `${id}.cli`), ''); } catch {}
+  }
+
   const env = {
     ...baseEnv(),
     ...(appConfig.env ?? {}),
@@ -2108,11 +2125,39 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
     WSH_ORIGIN_USER: session.createdBy || '',
   };
 
-  const child = spawn('/bin/sh', ['-c', appConfig.command], {
+  const spawnOpts: SpawnOptions = {
     detached: true,
     env: env as Record<string, string>,
     cwd: resolveCwd(appConfig),
     stdio: ['pipe', 'pipe', 'pipe'],
+  };
+
+  // The one branch. A cli job is exec'd directly — argv is an array and there
+  // is no shell — which is the whole reason an unauthenticated caller may
+  // supply those args. Never give this path a shell.
+  let child: ChildProcess;
+  try {
+    child = appConfig.cli
+      ? spawn(CLI_BIN, appConfig.args ?? [], spawnOpts)
+      : spawn('/bin/sh', ['-c', appConfig.command], spawnOpts);
+  } catch (err) {
+    // spawn() throws synchronously for ENOEXEC — a /root/cli with no #! line.
+    // The session is already in the map and the log fd already open, so undo
+    // both before rethrowing; otherwise every such call leaks a dead session
+    // and a descriptor, and on the public path a stranger sets the pace.
+    try { fs.closeSync(logFd); } catch {}
+    unregisterSession(id, session, 'spawn-failed');
+    throw err;
+  }
+
+  // ENOENT and EACCES arrive asynchronously instead, and an 'error' event with
+  // no listener is rethrown — it would take down wsh and every session on the
+  // box with it. Nothing needed this before: /bin/sh always exists. /root/cli
+  // need not, and a caller with no token decides when to ask for it.
+  let spawnError: NodeJS.ErrnoException | null = null;
+  child.on('error', (err) => {
+    spawnError = err as NodeJS.ErrnoException;
+    console.error(`[session ${id}] spawn failed: ${errorMessage(err)}`);
   });
 
   session.child = child;
@@ -2136,7 +2181,11 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
   };
 
   child.stdout!.on('data', appendOutput);
-  child.stderr!.on('data', appendOutput);
+  // `quiet` is abox-cli's -q on the cli path, where there is no shell to spell
+  // 2>/dev/null in. Drained rather than left unread: an unread pipe fills at
+  // 64KB and blocks the child forever.
+  if (appConfig.quiet) child.stderr!.resume();
+  else child.stderr!.on('data', appendOutput);
 
   child.on('close', (code, signal) => {
     console.log(`[session ${id}] job exited (code ${code}, signal ${signal})`);
@@ -2144,7 +2193,10 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
     // POSIX convention: signal-killed processes exit with 128 + signal number.
     // Node passes code=null in that case; without this, callers see -1 (which
     // bash wraps to 255) and lose all signal info.
-    const exitVal = code ?? (signal ? 128 + (os.constants.signals[signal] ?? 0) : -1);
+    // A child that never started closes with a negative libuv errno (-2 for
+    // ENOENT, -13 for EACCES). Report 127 instead — the shell's own answer for
+    // "could not run it" — so the caller sees one code whichever layer noticed.
+    const exitVal = spawnError ? 127 : (code ?? (signal ? 128 + (os.constants.signals[signal] ?? 0) : -1));
     session.exitCode = exitVal;
     session.child = null;
     try { fs.closeSync(logFd); } catch {}
@@ -2342,6 +2394,10 @@ function normalizeBase(raw: string): string {
 }
 
 const BASE = normalizeBase(values.base!);
+/** This box's name, as the gateway spells it in the URL prefix ("/mybox/").
+ *  Empty when wsh runs with no base path. Reported in cli errors so support
+ *  can tell which box refused without the caller having to know. */
+const BOX_NAME = BASE.replace(/^\/+|\/+$/g, '');
 const SITE_TITLE = values.title!;
 const SITE_TAGLINE = values.tagline!;
 
@@ -2376,6 +2432,15 @@ interface AppConfig {
   top?: number;
   skill?: string;
   slashPrefix?: boolean;
+  /** Public-CLI job: spawn CLI_BIN with `args` as argv and no shell at all.
+   *  `command` is display metadata on this path and is never executed. */
+  cli?: boolean;
+  /** cli only — argv handed to CLI_BIN verbatim. Because there is no shell,
+   *  `;`, `|` and `$(…)` arrive as literal argument bytes. */
+  args?: string[];
+  /** cli only — drop the child's stderr instead of merging it into the job
+   *  log (abox-cli's `-q`). The shell path spells this `2>/dev/null`. */
+  quiet?: boolean;
   type?: 'pty' | 'web' | 'job';
   /** type:web only — idle TTL after the last viewer leaves (e.g. "30m", "2h").
    *  Deliberately not honored for pty: a TUI session holds a live terminal and
@@ -3400,6 +3465,80 @@ router.post('/api/workspace/delete', express.json(), (req: express.Request, res:
   }
 });
 
+// --- Public CLI ---------------------------------------------------------
+//
+// POST /api/cli runs CLI_BIN with a caller-supplied argv and nothing else. The
+// gateway exempts this whole prefix from token auth, so every request here is
+// from a stranger. Two things make that safe: the spawn takes an argv array and
+// no shell (see spawnJobSession), and the sub-routes below can only ever name a
+// session this endpoint created (see cliOnly).
+
+/** True when sid names a session POST /api/cli created.
+ *
+ *  Two sources, because a job outlives its Session object: the map answers
+ *  while the child is alive, the `<id>.cli` marker answers afterwards — across
+ *  a wsh restart too — exactly as `.log` and `.exit` already do for output and
+ *  exit status. Without the marker, exec's exit-code poll would 404 the moment
+ *  the job it just watched finished.
+ *
+ *  The id-shape check comes first and is load-bearing: it is what stops a
+ *  crafted sid from walking out of JOB_LOG_DIR with `../`. */
+function isCliSession(id: string): boolean {
+  if (!isSessionId(id)) return false;
+  if (sessions.get(id)?.cli) return true;
+  return fs.existsSync(path.join(JOB_LOG_DIR, `${id}.cli`));
+}
+
+/** The guard on every /api/cli/<sid>/… route.
+ *
+ *  wsh owns this check because wsh is the only layer that knows which sessions
+ *  are cli sessions — the gateway exempts the prefix wholesale and cannot tell
+ *  one sid from another. 404 rather than 403: to a caller holding no token, a
+ *  session they may not address and a session that does not exist are the same
+ *  thing, and distinguishing them would confirm the id. */
+const cliOnly: express.RequestHandler = (req, res, next) => {
+  if (!isCliSession(req.params.id)) {
+    res.status(404).json({ error: 'session not found' });
+    return;
+  }
+  next();
+};
+
+/** How the box can fail to run CLI_BIN: the machine-readable code, and the line
+ *  written to the box log. The caller never sees these words — whoever runs a
+ *  public CLI is usually not whoever can fix the box, so abox-cli renders every
+ *  `cli_` code as the same plain sentence. The code is for support and scripts;
+ *  the log line is for the box's owner. */
+const CLI_SETUP_ERRORS = {
+  cli_missing:        `${CLI_BIN} does not exist`,
+  cli_not_a_file:     `${CLI_BIN} is not a regular file`,
+  cli_not_executable: `${CLI_BIN} is not executable`,
+  cli_not_runnable:   `${CLI_BIN} has no #! line`,
+  cli_spawn_failed:   `${CLI_BIN} could not be started`,
+} as const;
+
+type CliSetupError = keyof typeof CLI_SETUP_ERRORS;
+
+/** Refuse a cli request the box cannot serve: reason to the log, code to the
+ *  caller. `detail` carries the underlying errno when there is one. */
+function refuseCli(res: express.Response, code: CliSetupError, detail = ''): void {
+  console.error(`[cli] ${CLI_SETUP_ERRORS[code]}${detail ? `: ${detail}` : ''}`);
+  res.status(code === 'cli_spawn_failed' ? 500 : 404).json({ error: code, box: BOX_NAME });
+}
+
+/** Bounds on the public argv. execve enforces its own ARG_MAX further down, but
+ *  refusing early keeps an anonymous caller from making the box do the work of
+ *  building a session first. Not rate limiting — see the design's known limits. */
+const CLI_MAX_ARGS = 64;
+const CLI_MAX_ARGS_BYTES = 16 * 1024;
+
+/** Session title for a cli job: the same rune-safe 60-char cut exec uses, so a
+ *  multibyte argument can't be sliced into invalid UTF-8. */
+function cliTitle(args: string[]): string {
+  const runes = [...['cli', ...args].join(' ')];
+  return runes.length > 60 ? runes.slice(0, 60).join('') : runes.join('');
+}
+
 router.get('/api/sessions', (req: express.Request, res: express.Response) => {
   // An idle daemon (no viewers) is hidden so it doesn't mark the box busy —
   // every busy/idle consumer reads this list. It reappears while actively
@@ -3483,7 +3622,7 @@ router.get('/api/sessions/:id/logs', (req: express.Request, res: express.Respons
   res.status(404).json({ error: 'session not found' });
 });
 
-router.get('/api/sessions/:id/stream', (req: express.Request, res: express.Response) => {
+const sessionStreamHandler = (req: express.Request, res: express.Response) => {
   const id = req.params.id;
   const session = sessions.get(id);
 
@@ -3648,9 +3787,15 @@ router.get('/api/sessions/:id/stream', (req: express.Request, res: express.Respo
     tick();
   }
   req.on('close', cleanup);
-});
+};
+// Stream, stdin, exit and kill are shared verbatim with /api/cli: same frames,
+// same replay-on-connect, same exit-code file, so abox-cli's attach loop works
+// on either path unchanged. The guard is the only difference between them, and
+// registering one handler twice is what keeps the two families from drifting.
+router.get('/api/sessions/:id/stream', sessionStreamHandler);
+router.get('/api/cli/:id/stream', cliOnly, sessionStreamHandler);
 
-router.get('/api/sessions/:id/exit', (req: express.Request, res: express.Response) => {
+const sessionExitHandler = (req: express.Request, res: express.Response) => {
   // Job exit code from disk. Durable: works any time after the job ends, and
   // survives wsh-server restarts. 404 distinguishes "still running" or "never
   // existed" from "ended with code N".
@@ -3677,7 +3822,9 @@ router.get('/api/sessions/:id/exit', (req: express.Request, res: express.Respons
   const code = parseInt(raw.trim(), 10);
   if (Number.isNaN(code)) { res.status(500).json({ error: 'corrupt exit file' }); return; }
   res.json({ code });
-});
+};
+router.get('/api/sessions/:id/exit', sessionExitHandler);
+router.get('/api/cli/:id/exit', cliOnly, sessionExitHandler);
 
 // --- Events ---
 
@@ -3740,20 +3887,22 @@ router.get('/api/events', (req: express.Request, res: express.Response) => {
   req.on('close', () => { unsub(); clearInterval(hb); });
 });
 
-router.delete('/api/sessions/:id', (req: express.Request, res: express.Response) => {
+const sessionKillHandler = (req: express.Request, res: express.Response) => {
   const session = sessions.get(req.params.id);
   if (!session) { res.status(404).json({ error: 'session not found' }); return; }
   if (session.child) killProcessGroup(session.child);
   else if (session.pty) session.pty.kill('SIGHUP');
   res.json({ ok: true });
-});
+};
+router.delete('/api/sessions/:id', sessionKillHandler);
+router.delete('/api/cli/:id', cliOnly, sessionKillHandler);
 
 // Stream the request body into the job child's stdin. Pipes chunked bytes through
 // without buffering, mirroring /api/push/apply's req.pipe pattern. Closing the
 // request body cleanly closes the child's stdin (the child sees EOF). 410 if the
 // session isn't a job or stdin is already closed (child exited / earlier POST
 // already ended the pipe — stdin is one-shot per job).
-router.post('/api/sessions/:id/stdin', (req: express.Request, res: express.Response) => {
+const sessionStdinHandler = (req: express.Request, res: express.Response) => {
   const session = sessions.get(req.params.id);
   if (!session) { res.status(404).json({ error: 'session not found' }); return; }
   if (session.appType !== 'job') {
@@ -3786,7 +3935,9 @@ router.post('/api/sessions/:id/stdin', (req: express.Request, res: express.Respo
   stdin.once('error', () => finish(410, { error: 'stdin closed', bytes }));
   req.on('error', (err) => finish(400, { error: errorMessage(err), bytes }));
   req.on('end',   ()    => finish(200, { bytes }));
-});
+};
+router.post('/api/sessions/:id/stdin', sessionStdinHandler);
+router.post('/api/cli/:id/stdin', cliOnly, sessionStdinHandler);
 
 // Headers to hand a web app: everything the caller sent, minus wsh's own.
 //
@@ -6482,6 +6633,66 @@ router.post('/api/paste-image',
     res.json({ path: full });
     if (Math.random() < 0.05) sweepPaste().catch(() => {});
   });
+
+// Create a public CLI session: CLI_BIN, this argv, no shell, no token.
+//
+// Deliberately not a flag on POST /api/sessions. That route reads a `command`
+// string and hands it to /bin/sh; a boolean asking it not to would put the
+// public and the shell-interpreted paths one typo apart. A separate route means
+// the gateway can exempt a prefix rather than inspect a body — which it cannot
+// do anyway, since auth runs before the JSON parser.
+router.post('/api/cli', (req: express.Request, res: express.Response) => {
+  const args: unknown = req.body?.args ?? [];
+  if (!Array.isArray(args) || args.some(a => typeof a !== 'string')) {
+    res.status(400).json({ error: 'bad_args', detail: 'args must be an array of strings' });
+    return;
+  }
+  if (args.length > CLI_MAX_ARGS) {
+    res.status(400).json({ error: 'bad_args', detail: `too many arguments (max ${CLI_MAX_ARGS})` });
+    return;
+  }
+  const bytes = (args as string[]).reduce((n, a) => n + Buffer.byteLength(a), 0);
+  if (bytes > CLI_MAX_ARGS_BYTES) {
+    res.status(400).json({ error: 'bad_args', detail: `arguments too long (max ${CLI_MAX_ARGS_BYTES} bytes)` });
+    return;
+  }
+
+  // Check CLI_BIN before creating anything, so a box with no /root/cli refuses
+  // the request outright instead of handing back a session that dies the moment
+  // the caller attaches to it.
+  let st: fs.Stats;
+  try { st = fs.statSync(CLI_BIN); }
+  catch (err) { refuseCli(res, 'cli_missing', errorMessage(err)); return; }
+  // A directory passes X_OK, so isFile() is what actually rules out "there is
+  // something at that path, but it is not a program".
+  if (!st.isFile()) { refuseCli(res, 'cli_not_a_file'); return; }
+  try { fs.accessSync(CLI_BIN, fs.constants.X_OK); }
+  catch (err) { refuseCli(res, 'cli_not_executable', errorMessage(err)); return; }
+
+  const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
+  const cfg: AppConfig = {
+    command: CLI_BIN,  // display only: ps and the session title read it, the spawn does not
+    type: 'job',
+    title: cliTitle(args as string[]),
+    cli: true,
+    args: args as string[],
+    ...(req.body?.quiet ? { quiet: true } : {}),
+  };
+
+  try {
+    spawnJobSession(id, 'cli', cfg, '');
+  } catch (err) {
+    // ENOEXEC is the one that lands here: a /root/cli with no #! line, which
+    // spawn() reports by throwing. ENOENT and EACCES are asynchronous and were
+    // ruled out above anyway; if one still races in, child.on('error') catches
+    // it and the job ends 127.
+    const code = (err as NodeJS.ErrnoException).code;
+    refuseCli(res, code === 'ENOEXEC' ? 'cli_not_runnable' : 'cli_spawn_failed', errorMessage(err));
+    return;
+  }
+
+  res.json({ id });
+});
 
 router.post('/api/sessions', async (req: express.Request, res: express.Response) => {
   console.log(`[api] POST /api/sessions body=${JSON.stringify(req.body)}`);
