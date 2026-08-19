@@ -57,10 +57,6 @@ const PORT_FILE = path.join(os.homedir(), '.wsh', 'port');
 
 /** Directory for persisted job scrollback logs. */
 const JOB_LOG_DIR = path.join(os.homedir(), '.wsh', 'logs');
-/** The only program the public CLI endpoint will ever run. A constant, not an
- *  apps.yaml entry: no file inside the box can repoint the public endpoint at
- *  something else. */
-const CLI_BIN = '/root/cli';
 const JOB_LOG_MAX = 200; // keep at most 200 log files
 
 /** Directory for pasted image uploads (Ctrl+V in the browser terminal). */
@@ -2135,13 +2131,19 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
   // The one branch. A cli job is exec'd directly — argv is an array and there
   // is no shell — which is the whole reason an unauthenticated caller may
   // supply those args. Never give this path a shell.
+  //
+  // Always CLI_WRAPPER, never CLI_BIN itself. The wrapper is where the image
+  // drops the credentials wsh's own environment carries, and the argv reaching
+  // this line was typed by someone holding no token. POST /api/cli refuses the
+  // request when the wrapper is missing or unusable, so there is no unwrapped
+  // spawn to fall back to and none to reach here.
   let child: ChildProcess;
   try {
     child = appConfig.cli
-      ? spawn(CLI_BIN, appConfig.args ?? [], spawnOpts)
+      ? spawn(CLI_WRAPPER, appConfig.args ?? [], spawnOpts)
       : spawn('/bin/sh', ['-c', appConfig.command], spawnOpts);
   } catch (err) {
-    // spawn() throws synchronously for ENOEXEC — a /root/cli with no #! line.
+    // spawn() throws synchronously for ENOEXEC — a file with no #! line.
     // The session is already in the map and the log fd already open, so undo
     // both before rethrowing; otherwise every such call leaks a dead session
     // and a descriptor, and on the public path a stranger sets the pace.
@@ -2432,8 +2434,8 @@ interface AppConfig {
   top?: number;
   skill?: string;
   slashPrefix?: boolean;
-  /** Public-CLI job: spawn CLI_BIN with `args` as argv and no shell at all.
-   *  `command` is display metadata on this path and is never executed. */
+  /** Public-CLI job: spawn CLI_WRAPPER with `args` as argv and no shell at
+   *  all. `command` is display metadata on this path and is never executed. */
   cli?: boolean;
   /** cli only — argv handed to CLI_BIN verbatim. Because there is no shell,
    *  `;`, `|` and `$(…)` arrive as literal argument bytes. */
@@ -3473,6 +3475,26 @@ router.post('/api/workspace/delete', express.json(), (req: express.Request, res:
 // no shell (see spawnJobSession), and the sub-routes below can only ever name a
 // session this endpoint created (see cliOnly).
 
+/** The only program this endpoint will ever run, and the wrapper it is always
+ *  run through. Constants rather than apps.yaml entries: nothing inside the box
+ *  can repoint the public endpoint at a second program.
+ *
+ *  `~/cli`, not a literal /root/cli — wsh does not assume it runs as root, or
+ *  inside an abox image at all. In a box it resolves to /root/cli, which is
+ *  what public-cli.md calls it throughout.
+ *
+ *  CLI_WRAPPER is the image's environment policy. wsh's environment carries
+ *  credentials, this argv comes from a stranger, and the image is where those
+ *  variable names are already written down — so wsh names a hook in its own
+ *  config directory and never learns what any of them mean.
+ *
+ *  It is required, and there is no fallback to an unwrapped spawn. That is what
+ *  makes the feature fail closed: shipping this wsh cannot by itself turn boxes
+ *  into anonymously executable endpoints, because a deployment has to install
+ *  the policy before the endpoint answers at all. */
+const CLI_BIN = path.join(os.homedir(), 'cli');
+const CLI_WRAPPER = path.join(SYSTEM_CONFIG_DIR, 'cli-run');
+
 /** True when sid names a session POST /api/cli created.
  *
  *  Two sources, because a job outlives its Session object: the map answers
@@ -3510,11 +3532,13 @@ const cliOnly: express.RequestHandler = (req, res, next) => {
  *  `cli_` code as the same plain sentence. The code is for support and scripts;
  *  the log line is for the box's owner. */
 const CLI_SETUP_ERRORS = {
-  cli_missing:        `${CLI_BIN} does not exist`,
-  cli_not_a_file:     `${CLI_BIN} is not a regular file`,
-  cli_not_executable: `${CLI_BIN} is not executable`,
-  cli_not_runnable:   `${CLI_BIN} has no #! line`,
-  cli_spawn_failed:   `${CLI_BIN} could not be started`,
+  cli_missing:         `${CLI_BIN} does not exist`,
+  cli_not_a_file:      `${CLI_BIN} is not a regular file`,
+  cli_not_executable:  `${CLI_BIN} is not executable`,
+  cli_not_runnable:    `${CLI_BIN} has no #! line`,
+  cli_wrapper_missing: `${CLI_WRAPPER} is not installed`,
+  cli_wrapper_broken:  `${CLI_WRAPPER} is present but not usable`,
+  cli_spawn_failed:    `${CLI_BIN} could not be started`,
 } as const;
 
 type CliSetupError = keyof typeof CLI_SETUP_ERRORS;
@@ -3523,8 +3547,68 @@ type CliSetupError = keyof typeof CLI_SETUP_ERRORS;
  *  caller. `detail` carries the underlying errno when there is one. */
 function refuseCli(res: express.Response, code: CliSetupError, detail = ''): void {
   console.error(`[cli] ${CLI_SETUP_ERRORS[code]}${detail ? `: ${detail}` : ''}`);
-  res.status(code === 'cli_spawn_failed' ? 500 : 404).json({ error: code, box: BOX_NAME });
+  // 404 for "this box publishes no CLI", 500 for "this box is misconfigured" —
+  // a missing wrapper is the image's omission, not an absent resource. abox-cli
+  // reads the `error` code and never the status, so this is for whoever reads
+  // the box's own access log.
+  const server = code.startsWith('cli_wrapper_') || code === 'cli_spawn_failed';
+  res.status(server ? 500 : 404).json({ error: code, box: BOX_NAME });
 }
+
+/** What the box got wrong about a file it was asked to run. */
+type RunnableFault = 'missing' | 'not_a_file' | 'not_executable' | 'not_runnable';
+
+/** Everything spawn() needs to be true of a file, checked before it is spawned:
+ *  it exists, it is a regular file, it carries the executable bit, and it opens
+ *  with two bytes the kernel will accept — `#!` or `\x7fELF`. Null when the file
+ *  is runnable, otherwise which of those failed.
+ *
+ *  Per call, never cached: an owner may rewrite the wrapper from ~/.abox/setup.sh
+ *  and the next request should honour it without wsh being restarted.
+ *
+ *  The two-byte read is not redundant with X_OK. A regular executable file with
+ *  neither magic is rejected by execve, and while wsh spawned CLI_BIN directly
+ *  that arrived as a synchronous ENOEXEC this endpoint could still catch. Behind
+ *  the wrapper the kernel is satisfied by /bin/sh, so the failure moves inside
+ *  it: sh writes its own complaint, naming the path, into a stranger's output
+ *  and exits 126. Reading the bytes keeps it a refusal with a code. */
+function checkRunnable(p: string): { fault: RunnableFault; detail: string } | null {
+  let st: fs.Stats;
+  try { st = fs.statSync(p); }
+  catch (err) { return { fault: 'missing', detail: errorMessage(err) }; }
+  // A directory passes X_OK, so isFile() is what actually rules out "there is
+  // something at that path, but it is not a program".
+  if (!st.isFile()) return { fault: 'not_a_file', detail: '' };
+  try { fs.accessSync(p, fs.constants.X_OK); }
+  catch (err) { return { fault: 'not_executable', detail: errorMessage(err) }; }
+
+  let fd = -1;
+  try {
+    fd = fs.openSync(p, 'r');
+    const head = Buffer.alloc(2);
+    const n = fs.readSync(fd, head, 0, 2, 0);
+    const magic = n === 2 && ((head[0] === 0x23 && head[1] === 0x21) ||   // #!
+                              (head[0] === 0x7f && head[1] === 0x45));    // \x7fELF
+    if (!magic) return { fault: 'not_runnable', detail: '' };
+  } catch (err) {
+    return { fault: 'not_runnable', detail: errorMessage(err) };
+  } finally {
+    if (fd >= 0) { try { fs.closeSync(fd); } catch {} }
+  }
+  return null;
+}
+
+/** Which refusal each fault becomes for CLI_BIN. They are told apart because
+ *  the box owner is who fixes them and each has a different fix.
+ *
+ *  CLI_WRAPPER gets no such table: past "this image never shipped one" there is
+ *  nothing an owner does differently, so the rest is one cli_wrapper_broken. */
+const CLI_BIN_REFUSAL: Record<RunnableFault, CliSetupError> = {
+  missing:        'cli_missing',
+  not_a_file:     'cli_not_a_file',
+  not_executable: 'cli_not_executable',
+  not_runnable:   'cli_not_runnable',
+};
 
 /** Bounds on the public argv. execve enforces its own ARG_MAX further down, but
  *  refusing early keeps an anonymous caller from making the box do the work of
@@ -3532,12 +3616,12 @@ function refuseCli(res: express.Response, code: CliSetupError, detail = ''): voi
 const CLI_MAX_ARGS = 64;
 const CLI_MAX_ARGS_BYTES = 16 * 1024;
 
-/** Session title for a cli job: the same rune-safe 60-char cut exec uses, so a
- *  multibyte argument can't be sliced into invalid UTF-8. */
-function cliTitle(args: string[]): string {
-  const runes = [...['cli', ...args].join(' ')];
-  return runes.length > 60 ? runes.slice(0, 60).join('') : runes.join('');
-}
+/** Session title for a cli job. The bare word, never the argv:
+ *  GET /api/boxes/<box>/sessions is readable by every authenticated user on the
+ *  fleet, so a title built from arguments would publish a stranger's input to
+ *  all of it. The box's own owner still has the argv — in the job log, which is
+ *  where debugging happens. */
+const CLI_TITLE = 'cli';
 
 router.get('/api/sessions', (req: express.Request, res: express.Response) => {
   // An idle daemon (no viewers) is hidden so it doesn't mark the box busy —
@@ -6657,23 +6741,28 @@ router.post('/api/cli', (req: express.Request, res: express.Response) => {
     return;
   }
 
-  // Check CLI_BIN before creating anything, so a box with no /root/cli refuses
-  // the request outright instead of handing back a session that dies the moment
-  // the caller attaches to it.
-  let st: fs.Stats;
-  try { st = fs.statSync(CLI_BIN); }
-  catch (err) { refuseCli(res, 'cli_missing', errorMessage(err)); return; }
-  // A directory passes X_OK, so isFile() is what actually rules out "there is
-  // something at that path, but it is not a program".
-  if (!st.isFile()) { refuseCli(res, 'cli_not_a_file'); return; }
-  try { fs.accessSync(CLI_BIN, fs.constants.X_OK); }
-  catch (err) { refuseCli(res, 'cli_not_executable', errorMessage(err)); return; }
+  // Check both files before creating anything, so a box that cannot run the CLI
+  // refuses outright instead of handing back a session that dies the moment the
+  // caller attaches to it.
+  //
+  // ~/cli first. "Nobody published a CLI on this box" is the ordinary failure
+  // and the one its owner can act on; a missing wrapper is an image problem
+  // that, checked first, would mask it on every box at once.
+  const binFault = checkRunnable(CLI_BIN);
+  if (binFault) { refuseCli(res, CLI_BIN_REFUSAL[binFault.fault], binFault.detail); return; }
+
+  const wrapperFault = checkRunnable(CLI_WRAPPER);
+  if (wrapperFault) {
+    refuseCli(res, wrapperFault.fault === 'missing' ? 'cli_wrapper_missing' : 'cli_wrapper_broken',
+              wrapperFault.detail);
+    return;
+  }
 
   const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
   const cfg: AppConfig = {
     command: CLI_BIN,  // display only: ps and the session title read it, the spawn does not
     type: 'job',
-    title: cliTitle(args as string[]),
+    title: CLI_TITLE,
     cli: true,
     args: args as string[],
     ...(req.body?.quiet ? { quiet: true } : {}),
@@ -6682,10 +6771,11 @@ router.post('/api/cli', (req: express.Request, res: express.Response) => {
   try {
     spawnJobSession(id, 'cli', cfg, '');
   } catch (err) {
-    // ENOEXEC is the one that lands here: a /root/cli with no #! line, which
-    // spawn() reports by throwing. ENOENT and EACCES are asynchronous and were
-    // ruled out above anyway; if one still races in, child.on('error') catches
-    // it and the job ends 127.
+    // Every way spawn() throws was ruled out a few lines up, so reaching here
+    // means the wrapper changed between the check and the spawn. Kept as the
+    // backstop it is: an uncaught throw would answer 500 with a stack trace,
+    // and the asynchronous shape — child.on('error') in spawnJobSession — would
+    // otherwise be rethrown and take every session on the box with it.
     const code = (err as NodeJS.ErrnoException).code;
     refuseCli(res, code === 'ENOEXEC' ? 'cli_not_runnable' : 'cli_spawn_failed', errorMessage(err));
     return;
