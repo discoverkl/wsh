@@ -1547,7 +1547,14 @@ interface SessionFields {
   port?: number;
   ready?: boolean;
   timeoutMs?: number;
+  /** Access as configured when this session spawned — a snapshot, and only the
+   *  fallback for a session no app entry describes. Every access decision goes
+   *  through liveAccess(), which asks the catalog what the rule is now. */
   access?: 'public' | 'private';
+  /** Spawned from a raw `command`, not an apps.yaml entry — so `app` is a
+   *  display label (defaulting to "bash"), not a catalog key, and must not be
+   *  looked up as one. See liveAccess(). */
+  adHoc?: boolean;
   stripPrefix?: boolean;
   /** type:web — configured initial inner path for the iframe (AppConfig.path). */
   webPath?: string;
@@ -2616,7 +2623,51 @@ function extractSkillDefaults(...configs: (Record<string, unknown> | null)[]): P
   return defaults;
 }
 
+/** Stat signature of the apps file a config dir resolves to, or '' when it has
+ *  none. Same yaml-then-json preference loadConfigFile() applies, so the stamp
+ *  always describes the file that would actually be read. */
+function configStamp(dir: string): string {
+  for (const name of ['apps.yaml', 'apps.json']) {
+    try {
+      const st = fs.statSync(path.join(dir, name), { bigint: true });
+      return `${name}:${st.mtimeNs}:${st.size}:${st.ino}`;
+    } catch { /* absent — try the next candidate */ }
+  }
+  return '';
+}
+
+let appsStamp: string | null = null;
+let appsMemo: Record<string, AppConfig> | null = null;
+let appsMemoWarnings: string[] = [];
+
+/** The app catalog, re-parsed only when a config file actually changed.
+ *
+ * This sits on the request path — every proxied asset consults it to decide
+ * access — so parsing two YAML files per hit was real cost for an answer that
+ * changes maybe twice a day. Two stats settle it instead, and the parse runs
+ * only when mtime, size or inode says the file is not the one already parsed.
+ *
+ * Deliberately a stat rather than an fs.watch: watch events go missing often
+ * enough on overlayfs and network mounts, and a missed event here would hand
+ * out a stale access verdict — the exact failure this cache exists to avoid.
+ *
+ * The map is rebuilt per call so a caller may add or drop keys, but the
+ * AppConfig values are shared. They are read-only to every caller — the merge
+ * sites all rebuild with a spread — which is what makes sharing them safe.
+ */
 function loadApps(warnings?: string[]): Record<string, AppConfig> {
+  const stamp = configStamp(SYSTEM_CONFIG_DIR) + '\0' + configStamp(path.join(os.homedir(), '.wsh'));
+  if (!appsMemo || stamp !== appsStamp) {
+    const collected: string[] = [];
+    appsMemo = parseApps(collected);
+    appsMemoWarnings = collected;
+    appsStamp = stamp;
+  }
+  if (warnings) warnings.push(...appsMemoWarnings);
+  return { ...appsMemo };
+}
+
+function parseApps(warnings: string[]): Record<string, AppConfig> {
   const apps = { ...DEFAULT_APPS };
   const system = loadConfigFile(SYSTEM_CONFIG_DIR, warnings);
   const user = loadConfigFile(path.join(os.homedir(), '.wsh'), warnings);
@@ -2637,7 +2688,7 @@ function loadApps(warnings?: string[]): Record<string, AppConfig> {
   // command may arrive from different layers), so it can't be done in mergeApps.
   // Same for `timeout` on a non-web app: `type` and `timeout` can land from
   // different layers, so the resolved config is the only place to judge it.
-  if (warnings) {
+  {
     for (const [key, app] of Object.entries(apps)) {
       if (isPublicPtyConfig(app)) {
         warnings.push(`App "${key}" is public + PTY — anyone the gateway forwards can run its command with full keyboard input. Make sure it's sandboxed; never expose a shell.`);
@@ -2952,7 +3003,28 @@ function isPublicPtyConfig(app: AppConfig | undefined): boolean {
 
 /** A live public pty session (per-visitor, writer-joinable). */
 function isPublicPtySession(s: Session): boolean {
-  return s.appType === 'pty' && s.access === 'public';
+  return s.appType === 'pty' && liveAccess(s) === 'public';
+}
+
+/** The access rule a session is governed by *now* — not the one it booted under.
+ *
+ * `session.access` is stamped once at spawn, so a running app kept serving under
+ * whatever was configured when it started: a grant made while it ran never
+ * arrived, and neither did a revocation, until someone restarted the app. The
+ * catalog entry is the authority, so ask it on every check — loadApps() is
+ * stat-guarded, so that costs two stats, not two YAML parses.
+ *
+ * An entry answers by omission too: dropping `access` from it means private, and
+ * a snapshot reading 'public' must not out-vote that. An entry that has gone
+ * missing entirely reads the same way — private — which fails closed and matches
+ * what /_a/<app> already does, since it 404s the moment the entry disappears.
+ *
+ * Only a session with no catalog identity keeps its snapshot: an ad-hoc
+ * `command` session, whose label is not a key into anything.
+ */
+function liveAccess(s: Session): 'public' | 'private' | undefined {
+  if (s.adHoc || !s.app) return s.access;
+  return loadApps()[s.app]?.access;
 }
 
 function makeTokenMiddleware(tok: string): express.RequestHandler {
@@ -4100,7 +4172,10 @@ function proxyHandler(req: express.Request, res: express.Response): void {
   }
   // Non-public web apps require owner-level access. In trust-proxy mode the
   // gateway has already evaluated identity + ACL — we just honor its verdict.
-  if (session.access !== 'public') {
+  //
+  // liveAccess, not session.access: this handler is where /_a/<app> ends up, so
+  // a snapshot here would quietly overrule the live check that route just made.
+  if (liveAccess(session) !== 'public') {
     if (TRUST_PROXY) {
       if (!verifyProxySecret(req) || !gatewayAllowed(req)) {
         res.status(401).send('Unauthorized');
@@ -6992,6 +7067,13 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
     }
   }
 
+  // An ad-hoc session's label is not a catalog key — it defaults to "bash" —
+  // so mark it, or liveAccess() would read some unrelated app's access for it.
+  if (adHocCommand) {
+    const spawned = sessions.get(id);
+    if (spawned) spawned.adHoc = true;
+  }
+
   const base = CUSTOM_URL ?? clientOrigin ?? networkBase ?? `http://localhost:${PORT}`;
   const urlPath = skillName ? 'skill' : sessionLabel;
   res.json({ id, url: `${base}${BASE}${urlPath}#${id}` });
@@ -7113,8 +7195,9 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
       return;
     }
     // Non-public web apps require owner-level access. Trust the gateway's
-    // verdict in trust-proxy mode; cookie check otherwise.
-    if (wsSession.access !== 'public') {
+    // verdict in trust-proxy mode; cookie check otherwise. Read live, so a
+    // socket cannot be opened under an access rule that no longer applies.
+    if (liveAccess(wsSession) !== 'public') {
       if (TRUST_PROXY) {
         // The proxy secret is already proven above.
         if (!gatewayAllowed(req)) {
