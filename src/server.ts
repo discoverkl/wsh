@@ -3555,7 +3555,6 @@ const CLI_SETUP_ERRORS = {
   cli_missing:         { status: 404, log: `${CLI_BIN} does not exist` },
   cli_not_a_file:      { status: 404, log: `${CLI_BIN} is not a regular file` },
   cli_not_executable:  { status: 404, log: `${CLI_BIN} is not executable` },
-  cli_not_runnable:    { status: 404, log: `${CLI_BIN} has no #! line` },
   cli_wrapper_missing: { status: 500, log: `${CLI_WRAPPER} is not installed` },
   cli_wrapper_broken:  { status: 500, log: `${CLI_WRAPPER} is present but not usable` },
   cli_spawn_failed:    { status: 500, log: `${CLI_BIN} could not be started` },
@@ -3571,25 +3570,23 @@ function refuseCli(res: express.Response, code: CliSetupError, detail = ''): voi
   res.status(status).json({ error: code, box: BOX_NAME });
 }
 
-/** How CLI_BIN can fail to be a program. The same four checks answer for
- *  CLI_WRAPPER, whose caller narrows them to its own two codes — past "this
- *  image never shipped one" there is nothing an owner does differently. */
-type RunnableFault = 'cli_missing' | 'cli_not_a_file' | 'cli_not_executable' | 'cli_not_runnable';
+/** How a file can fail to be a program, in the three ways that hold no matter
+ *  who runs it. CLI_WRAPPER's caller narrows these to its own two codes — past
+ *  "this image never shipped one" there is nothing an owner does differently. */
+type RunnableFault = 'cli_missing' | 'cli_not_a_file' | 'cli_not_executable';
 
-/** Everything spawn() needs to be true of a file, checked before it is spawned:
- *  it exists, it is a regular file, it carries the executable bit, and it opens
- *  with two bytes the kernel will accept — `#!` or `\x7fELF`. Null when the file
- *  is runnable, otherwise which of those failed.
+/** What has to be true of a file before it is spawned: it exists, it is a
+ *  regular file, and it carries the executable bit. Null when all three hold.
  *
- *  Per call, never cached: an owner may rewrite the wrapper from ~/.abox/setup.sh
- *  and the next request should honour it without wsh being restarted.
+ *  Per call, never cached: an owner may rewrite either file from
+ *  ~/.abox/setup.sh, and the next request should honour it without a restart.
  *
- *  The two-byte read is not redundant with X_OK. A regular executable file with
- *  neither magic is rejected by execve, and while wsh spawned CLI_BIN directly
- *  that arrived as a synchronous ENOEXEC this endpoint could still catch. Behind
- *  the wrapper the kernel is satisfied by /bin/sh, so the failure moves inside
- *  it: sh writes its own complaint, naming the path, into a stranger's output
- *  and exits 126. Reading the bytes keeps it a refusal with a code. */
+ *  Deliberately no check on the file's first bytes. A shebang is not required
+ *  of ~/cli — `printenv` with the executable bit is a working CLI, exactly as
+ *  it is from a shell prompt — because ~/cli is reached through sh's `exec`,
+ *  and sh answers ENOEXEC by rerunning the file as a shell script. Only the
+ *  kernel needs magic, and the only file the kernel is handed here is the
+ *  wrapper; see execMagic. Guessing on ~/cli's behalf refused CLIs that work. */
 function checkRunnable(p: string): { fault: RunnableFault; detail: string } | null {
   let st: fs.Stats;
   try { st = fs.statSync(p); }
@@ -3599,21 +3596,29 @@ function checkRunnable(p: string): { fault: RunnableFault; detail: string } | nu
   if (!st.isFile()) return { fault: 'cli_not_a_file', detail: '' };
   try { fs.accessSync(p, fs.constants.X_OK); }
   catch (err) { return { fault: 'cli_not_executable', detail: errorMessage(err) }; }
+  return null;
+}
 
+/** True when a file opens with two bytes execve accepts — `#!` or `\x7fELF`.
+ *
+ *  Asked of CLI_WRAPPER only. wsh hands that path straight to spawn(), so the
+ *  kernel is the thing deciding, and the kernel has no fallback: a wrapper with
+ *  neither magic is ENOEXEC, thrown synchronously, and the request should say
+ *  the image is broken rather than surface a stack trace. ~/cli is not asked,
+ *  because it never reaches execve except through sh, which does have one. */
+function execMagic(p: string): boolean {
   let fd = -1;
   try {
     fd = fs.openSync(p, 'r');
     const head = Buffer.alloc(2);
     const n = fs.readSync(fd, head, 0, 2, 0);
-    const magic = n === 2 && ((head[0] === 0x23 && head[1] === 0x21) ||   // #!
-                              (head[0] === 0x7f && head[1] === 0x45));    // \x7fELF
-    if (!magic) return { fault: 'cli_not_runnable', detail: '' };
-  } catch (err) {
-    return { fault: 'cli_not_runnable', detail: errorMessage(err) };
+    return n === 2 && ((head[0] === 0x23 && head[1] === 0x21) ||   // #!
+                       (head[0] === 0x7f && head[1] === 0x45));    // \x7fELF
+  } catch {
+    return false;
   } finally {
     if (fd >= 0) { try { fs.closeSync(fd); } catch {} }
   }
-  return null;
 }
 
 /** Bounds on the public argv. execve enforces its own ARG_MAX further down, but
@@ -6747,6 +6752,9 @@ router.post('/api/cli', (req: express.Request, res: express.Response) => {
   // ~/cli first. "Nobody published a CLI on this box" is the ordinary failure
   // and the one its owner can act on; a missing wrapper is an image problem
   // that, checked first, would mask it on every box at once.
+  //
+  // Only what is true of any file, though. Whether the contents will run is
+  // sh's judgement to make, not this endpoint's — see checkRunnable.
   const binFault = checkRunnable(CLI_BIN);
   if (binFault) { refuseCli(res, binFault.fault, binFault.detail); return; }
 
@@ -6756,6 +6764,10 @@ router.post('/api/cli', (req: express.Request, res: express.Response) => {
               wrapperFault.detail);
     return;
   }
+  // The wrapper alone needs magic bytes: it is the file spawn() hands to the
+  // kernel, and ENOEXEC there is a synchronous throw. What it goes on to exec
+  // is sh's problem, and sh is more forgiving than the kernel.
+  if (!execMagic(CLI_WRAPPER)) { refuseCli(res, 'cli_wrapper_broken', 'no #! or ELF header'); return; }
 
   const id = crypto.randomInt(0, 2176782336).toString(36).padStart(6, '0');
   const cfg: AppConfig = {

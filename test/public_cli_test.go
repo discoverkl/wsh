@@ -7,7 +7,7 @@ package wsh_test
 // │  ├ missing                            │ no ~/cli → cli_missing                            │
 // │  ├ directory                          │ ~/cli is a directory → cli_not_a_file             │
 // │  ├ not executable                     │ ~/cli without the x bit → cli_not_executable      │
-// │  ├ no shebang                         │ executable, no #! and no ELF → cli_not_runnable   │
+// │  ├ no shebang is fine                 │ `printenv` + x bit is a working CLI               │
 // │  ├ runnable                           │ good ~/cli → the wrapper decides (see below)      │
 // │  └ rechecked per request              │ ~/cli deleted mid-life → cli_missing again        │
 // │ TestPublicCLIBadArgs                  │ argv bounds are the caller's own fault            │
@@ -89,15 +89,26 @@ func TestPublicCLIPrecheck(t *testing.T) {
 		}
 	})
 
-	t.Run("no shebang", func(t *testing.T) {
-		// The two-byte read earns its keep here. Behind the wrapper the kernel is
-		// satisfied by /bin/sh, so without this check the request would succeed
-		// and sh would report the failure into a stranger's output at exit 126.
+	t.Run("no shebang is fine", func(t *testing.T) {
+		// A shebang is not required, and refusing one is a real bug we shipped:
+		// a box owner whose /root/cli was the single line `printenv` got told the
+		// service was unavailable.
+		//
+		// ~/cli is reached through the wrapper's `exec "$HOME/cli"`, which is
+		// sh's builtin, and sh answers ENOEXEC by rerunning the file as a shell
+		// script — the same reason `./cli` works at a prompt. Only the kernel
+		// demands magic bytes, and the only file it is handed here is the
+		// wrapper.
 		writeCLI(t, cli, "echo hello\n", 0o755)
 		defer os.Remove(cli)
-		if _, code := cliRefusal(t, srv); code != "cli_not_runnable" {
-			t.Fatalf("no #!: got %q, want cli_not_runnable", code)
+
+		status, body := srv.postJSONRaw(t, "/api/cli", map[string]any{"args": []string{}})
+		if code, _ := body["error"].(string); code == "cli_not_runnable" || code == "cli_not_a_file" {
+			t.Fatalf("a shebang-less script was refused as unrunnable: %d %v", status, body)
 		}
+		// Where it lands past that is the wrapper's business, asserted below;
+		// what matters here is that the file's first bytes did not decide it.
+		assertWrapperVerdict(t, status, body)
 	})
 
 	t.Run("runnable", func(t *testing.T) {
@@ -105,25 +116,7 @@ func TestPublicCLIPrecheck(t *testing.T) {
 		defer os.Remove(cli)
 
 		status, body := srv.postJSONRaw(t, "/api/cli", map[string]any{"args": []string{}})
-		if wrapperInstalled() {
-			if status != 200 {
-				t.Fatalf("wrapper installed but POST /api/cli refused: %d %v", status, body)
-			}
-			id, _ := body["id"].(string)
-			if len(id) != 6 {
-				t.Fatalf("session id %q is not 6 characters", id)
-			}
-			return
-		}
-		// No wrapper: refused, and refused as the image's omission rather than
-		// the owner's. wsh never spawns ~/cli unwrapped, which is the whole
-		// reason shipping wsh alone cannot open a box to anonymous callers.
-		if status != 500 {
-			t.Fatalf("no wrapper: status %d, want 500 (%v)", status, body)
-		}
-		if code, _ := body["error"].(string); code != "cli_wrapper_missing" {
-			t.Fatalf("no wrapper: got %q, want cli_wrapper_missing", code)
-		}
+		assertWrapperVerdict(t, status, body)
 	})
 
 	t.Run("rechecked per request", func(t *testing.T) {
@@ -242,5 +235,35 @@ func TestOnlyTheCLIRouteMakesCLISessions(t *testing.T) {
 				t.Errorf("DELETE /api/cli/%s answered %d — an ordinary session is addressable anonymously", id, code)
 			}
 		})
+	}
+}
+
+// assertWrapperVerdict checks the half of the outcome that CLI_WRAPPER decides,
+// for a ~/cli that is already known to be fine.
+//
+// CLI_WRAPPER is /etc/wsh/cli-run, a fixed system path a test cannot create —
+// the same limit apps_merge_test.go records for the system apps.yaml layer. So
+// this asserts the rule rather than one outcome: a box that has the wrapper
+// runs the CLI, and a machine that does not refuses with cli_wrapper_missing.
+// Off a box that is the fail-closed path; inside one it is the happy path.
+func assertWrapperVerdict(t *testing.T, status int, body map[string]any) {
+	t.Helper()
+	if wrapperInstalled() {
+		if status != 200 {
+			t.Fatalf("wrapper installed but POST /api/cli refused: %d %v", status, body)
+		}
+		if id, _ := body["id"].(string); len(id) != 6 {
+			t.Fatalf("session id %q is not 6 characters", id)
+		}
+		return
+	}
+	// No wrapper: refused as the image's omission rather than the owner's. wsh
+	// never spawns ~/cli unwrapped, which is the whole reason shipping wsh alone
+	// cannot open a box to anonymous callers.
+	if status != 500 {
+		t.Fatalf("no wrapper: status %d, want 500 (%v)", status, body)
+	}
+	if code, _ := body["error"].(string); code != "cli_wrapper_missing" {
+		t.Fatalf("no wrapper: got %q, want cli_wrapper_missing", code)
 	}
 }
