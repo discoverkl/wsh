@@ -2688,17 +2688,17 @@ function parseApps(warnings: string[]): Record<string, AppConfig> {
   // command may arrive from different layers), so it can't be done in mergeApps.
   // Same for `timeout` on a non-web app: `type` and `timeout` can land from
   // different layers, so the resolved config is the only place to judge it.
-  {
-    for (const [key, app] of Object.entries(apps)) {
-      if (isPublicPtyConfig(app)) {
-        warnings.push(`App "${key}" is public + PTY — anyone the gateway forwards can run its command with full keyboard input. Make sure it's sandboxed; never expose a shell.`);
-      }
-      const type = app.type ?? 'pty';
-      if (app.timeout && type !== 'web') {
-        warnings.push(type === 'job'
-          ? `App "${key}" sets "timeout: ${app.timeout}", which applies to type: web only — it is ignored here. A job runs until its command exits and is never idle-reaped.`
-          : `App "${key}" sets "timeout: ${app.timeout}", which applies to type: web only — it is ignored here. A TUI session always idle-reaps ${SESSION_TTL / 60000} minutes after the last viewer leaves; pin the session to keep it alive longer.`);
-      }
+  // Collected on every parse, not only when a caller asked: loadApps() replays
+  // them from the memo, so they have to survive the parse that produced them.
+  for (const [key, app] of Object.entries(apps)) {
+    if (isPublicPtyConfig(app)) {
+      warnings.push(`App "${key}" is public + PTY — anyone the gateway forwards can run its command with full keyboard input. Make sure it's sandboxed; never expose a shell.`);
+    }
+    const type = app.type ?? 'pty';
+    if (app.timeout && type !== 'web') {
+      warnings.push(type === 'job'
+        ? `App "${key}" sets "timeout: ${app.timeout}", which applies to type: web only — it is ignored here. A job runs until its command exits and is never idle-reaped.`
+        : `App "${key}" sets "timeout: ${app.timeout}", which applies to type: web only — it is ignored here. A TUI session always idle-reaps ${SESSION_TTL / 60000} minutes after the last viewer leaves; pin the session to keep it alive longer.`);
     }
   }
   // Sort: topped (by value asc), normal, hidden
