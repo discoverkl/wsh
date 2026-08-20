@@ -1692,6 +1692,26 @@ function stripEphemeralSequences(buf: Buffer): Buffer {
   return stripped.length === str.length ? buf : Buffer.from(stripped, 'utf8');
 }
 
+/** True when the caller asked for the job's bytes rather than SSE frames.
+ *
+ *  The frame is `data: {"text": "..."}` — a JSON *string*, so it carries text
+ *  and not bytes. Everything outside UTF-8 dies on the way through it: the
+ *  decode below substitutes U+FFFD for each invalid byte (1 byte becomes 3),
+ *  JSON.stringify then escapes control bytes as \u00XX (1 byte becomes 6), and
+ *  stripEphemeralSequences deletes whatever looked like an ANSI escape. A
+ *  15 MB executable came back 23 MB and unusable, which is what prompted this.
+ *
+ *  Raw mode answers with the log bytes and nothing else: no framing, no decode,
+ *  no strip. The exit code is not in the frame on either path — clients read it
+ *  from GET <sid>/exit — so nothing is lost by dropping the envelope.
+ *
+ *  An exact match is required: a browser sending a wildcard Accept must keep
+ *  getting frames. That is why this does not go through req.accepts(), which
+ *  resolves a wildcard to the first type offered. */
+function wantsRawStream(req: express.Request): boolean {
+  return (req.get('accept') || '').includes('application/octet-stream');
+}
+
 // Returns the index of the first byte of any trailing incomplete UTF-8
 // codepoint, or buf.length if the buffer ends on a complete codepoint.
 // Used to defer split codepoints to the next chunk so toString('utf8')
@@ -3773,7 +3793,12 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
     try { fs.writeFileSync(exitPath, '-1'); } catch {}
   }
 
-  res.setHeader('Content-Type', 'text/event-stream');
+  // Byte-exact passthrough when asked for; frames otherwise. The gateway keys
+  // its keepalive injection off text/event-stream (addSSEKeepalive), so this
+  // header is also what stops `:keepalive` comments being spliced into a
+  // binary stream on the way back.
+  const raw = wantsRawStream(req);
+  res.setHeader('Content-Type', raw ? 'application/octet-stream' : 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
@@ -3789,7 +3814,14 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
   catch {
     // No log yet (brand-new job in the millisecond before first write). Close
     // cleanly with an empty body — the client can retry.
-    if (!res.destroyed) { res.write('data: [DONE]\n\n'); res.end(); }
+    //
+    // Empty means empty on the raw path: [DONE] is a frame, and writing one
+    // here would put 15 bytes the child never wrote at the front of somebody's
+    // file. Nothing else in this branch emits outside flush()/tryFinish().
+    if (!res.destroyed) {
+      if (!raw) res.write('data: [DONE]\n\n');
+      res.end();
+    }
     return;
   }
 
@@ -3815,10 +3847,15 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
     catch (err) { console.error(`[session ${id}] stream read failed:`, err); return false; }
     offset += want;
     if (res.destroyed) return true;
-    const raw = utf8Pending.length ? Buffer.concat([utf8Pending, buf]) : buf;
-    const safeEnd = utf8SafeEnd(raw);
-    utf8Pending = raw.subarray(safeEnd);
-    const decodable = raw.subarray(0, safeEnd);
+    // Raw: the bytes on disk are already exactly what the child wrote, so the
+    // whole decode/strip/encode path is skipped rather than made lossless.
+    // Nothing is held back either — utf8Pending exists to keep a split
+    // codepoint out of a decode that no longer happens.
+    if (raw) { res.write(buf); return true; }
+    const pend = utf8Pending.length ? Buffer.concat([utf8Pending, buf]) : buf;
+    const safeEnd = utf8SafeEnd(pend);
+    utf8Pending = pend.subarray(safeEnd);
+    const decodable = pend.subarray(0, safeEnd);
     if (decodable.length === 0) return true;  // nothing emittable; keep tail for next tick
     const text = stripEphemeralSequences(decodable).toString('utf8');
     if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
@@ -3834,7 +3871,12 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
     try { exitContents = fs.readFileSync(exitPath, 'utf8'); }
     catch { return false; }
     flush(); // drain any bytes appended after the .exit file was written
-    if (!res.destroyed) {
+    if (!res.destroyed && raw) {
+      // No exit frame and no [DONE]: end-of-body is the only terminator a raw
+      // stream can have without putting a byte into it that the child did not
+      // write. The client polls <sid>/exit, which it does on both paths.
+      res.end();
+    } else if (!res.destroyed) {
       // Job ended; any bytes still in utf8Pending are genuinely truncated
       // (mid-codepoint at EOF). Emit them so toString can substitute U+FFFD —
       // that's the right answer for a malformed log.
