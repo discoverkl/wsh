@@ -1525,6 +1525,10 @@ interface SessionFields {
   writer: WebSocket | null;
   peers: Map<WebSocket, Role>; // every connected WS → its original role
   cleanupTimer: ReturnType<typeof setTimeout> | null;
+  /** type:job only — finalize this session (set exit code, kill the process
+   *  group, close the log, unregister). Held on the session so the reconciler
+   *  can finish a job whose 'exit'/'close' events never arrived. Idempotent. */
+  finalizeJob?: (exitVal: number, reason: string, truncated?: boolean) => void;
   pinned: boolean;
   title: string;
   app: string;
@@ -2140,11 +2144,50 @@ interface CliJob {
   quiet: boolean;
 }
 
+/** Grace after 'exit' for 'close' to drain stdio before finalizing anyway. */
+const JOB_DRAIN_GRACE_MS = 5_000;
+
+/** How often to re-derive job liveness from the OS. Matches the other sweeps. */
+const JOB_RECONCILE_MS = 60_000;
+
+/** Recorded when a job's process is found gone without 'exit' or 'close' ever
+ *  firing, so no exit status was observed. Deliberately distinct from both 0
+ *  and a real non-zero code: run history must not claim a success that was
+ *  never reported, nor invent a failure the job never returned. */
+const JOB_EXIT_UNKNOWN = -2;
+
+// The third path to finalizing a job, and the only one that is not an event.
+// Both handlers in spawnJobSession are notifications, and the failure this
+// guards is a notification that never comes — so once a minute, re-derive the
+// fact from the OS instead of trusting that we were told. A job whose pid no
+// longer exists is over, whatever we did or did not observe. Cheap: jobs are
+// few, and kill(pid, 0) is an existence check that sends no signal.
+//
+// Without this, one missed event pins a box as busy forever, which is what made
+// idle detection — and therefore safe upgrading — unreliable.
+setInterval(() => {
+  for (const [id, session] of sessions) {
+    if (session.appType !== 'job' || session.exitCode !== null) continue;
+    const pid = session.child?.pid;
+    if (pid == null) continue;
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ESRCH') continue;
+      console.log(`[session ${id}] pid ${pid} gone with no exit event — reconciling`);
+      session.finalizeJob?.(JOB_EXIT_UNKNOWN, 'process-gone', true);
+    }
+  }
+}, JOB_RECONCILE_MS).unref();
+
 function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, createdBy = '', cli?: CliJob): Session {
   const session = baseSession(appKey, appConfig, createdBy);
   session.appType = 'job';
 
-  // Jobs have no idle TTL — the child's 'close' handler is the only path to deletion.
+  // Jobs have no idle TTL. Deletion goes through finalizeJob below, reached from
+  // 'close', from 'exit' after a drain grace, or from the reconciler above —
+  // three paths because for a long time there was one, and a single missed
+  // event left the session (and its box) stuck forever.
   sessions.set(id, session);
 
   // Open log file for incremental writes
@@ -2236,23 +2279,75 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
   if (cli?.quiet) child.stderr!.resume();
   else child.stderr!.on('data', appendOutput);
 
-  child.on('close', (code, signal) => {
-    console.log(`[session ${id}] job exited (code ${code}, signal ${signal})`);
+  // POSIX convention: signal-killed processes exit with 128 + signal number.
+  // Node passes code=null in that case; without this, callers see -1 (which
+  // bash wraps to 255) and lose all signal info.
+  // A child that never started closes with a negative libuv errno (-2 for
+  // ENOENT, -13 for EACCES). Report 127 instead — the shell's own answer for
+  // "could not run it" — so the caller sees one code whichever layer noticed.
+  const exitValOf = (code: number | null, signal: NodeJS.Signals | null): number =>
+    spawnError ? 127 : (code ?? (signal ? 128 + (os.constants.signals[signal] ?? 0) : -1));
+
+  // Reachable from three independent signals below, and safe to reach twice.
+  let finalized = false;
+  const finalizeJob = (exitVal: number, reason: string, truncated = false) => {
+    if (finalized) return;
+    finalized = true;
+    console.log(`[session ${id}] job exited (code ${exitVal}, ${reason})`);
     void recordClosedWithTokens(id, session);
-    // POSIX convention: signal-killed processes exit with 128 + signal number.
-    // Node passes code=null in that case; without this, callers see -1 (which
-    // bash wraps to 255) and lose all signal info.
-    // A child that never started closes with a negative libuv errno (-2 for
-    // ENOENT, -13 for EACCES). Report 127 instead — the shell's own answer for
-    // "could not run it" — so the caller sees one code whichever layer noticed.
-    const exitVal = spawnError ? 127 : (code ?? (signal ? 128 + (os.constants.signals[signal] ?? 0) : -1));
     session.exitCode = exitVal;
+
+    // Kill the group on *every* finalize, not only the stuck path. detached:true
+    // made the child a group leader, so this reaches what it forked and left
+    // behind — and only that. A process that deliberately daemonized called
+    // setsid() and owns its own group, so it is not in this one and survives:
+    // verified on a box where three orphaned `bash -s` sat in the dead child's
+    // PGID while an adb fork-server in its own group was untouched. @reboot
+    // daemons live under tmux, likewise their own session, likewise unaffected.
+    //
+    // This is not tidiness. An orphan holding the inherited stdout is precisely
+    // what suppresses 'close', so leaving the group alive re-creates the state
+    // this function exists to end.
+    if (session.child) killProcessGroup(session.child);
     session.child = null;
+
     try { fs.closeSync(logFd); } catch {}
+    if (truncated) {
+      // Finalized without a drain, so the log is short by whatever the orphan
+      // still held. Say so in the log rather than let a partial capture read as
+      // a complete one.
+      try {
+        fs.appendFileSync(path.join(JOB_LOG_DIR, `${id}.log`),
+          '\n[wsh: output truncated — process exited but stdio stayed open]\n');
+      } catch {}
+    }
     try { fs.writeFileSync(path.join(JOB_LOG_DIR, `${id}.exit`), String(exitVal)); } catch {}
     rotateJobLogs();
     if (session.cleanupTimer !== null) clearTimeout(session.cleanupTimer);
-    unregisterSession(id, session, 'process-exit');
+    unregisterSession(id, session, reason);
+  };
+  // Exposed so the reconciler can finalize a session whose events never came.
+  session.finalizeJob = finalizeJob;
+
+  // 1. 'close' — process exited *and* stdio drained. The normal path, and the
+  //    only one that guarantees a complete log, so it stays preferred.
+  child.on('close', (code, signal) => finalizeJob(exitValOf(code, signal), 'process-exit'));
+
+  // 2. 'exit' — the process is gone. 'close' additionally waits on the stdio
+  //    pipes, and a grandchild that inherited stdout holds those open for as
+  //    long as it lives, so 'close' can then never arrive. Not hypothetical:
+  //    it left sessions alive 40h+ past their process, and because a job has no
+  //    idle TTL, an immortal session makes its box permanently "busy" and so
+  //    permanently un-upgradable. Give 'close' a grace to drain the common
+  //    case, then finalize on the authority of the process being dead.
+  child.on('exit', (code, signal) => {
+    if (finalized) return;
+    const exitVal = exitValOf(code, signal);
+    setTimeout(() => {
+      if (finalized) return;
+      console.log(`[session ${id}] exited but stdio open after ${JOB_DRAIN_GRACE_MS}ms — finalizing`);
+      finalizeJob(exitVal, 'process-exit', true);
+    }, JOB_DRAIN_GRACE_MS).unref();
   });
 
   // The argv goes here and nowhere else. The session title is the bare word
