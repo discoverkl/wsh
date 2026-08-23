@@ -173,66 +173,12 @@ func TestPushPostfixNonExecutableIsInert(t *testing.T) {
 	}
 }
 
-// The real shipped script, driven through a real push: an office-flavoured
-// traecli.yaml landing on a prod box comes out pointing at prod endpoints, with
-// everything else in the file untouched.
-func TestPushPostfixShippedScriptNormalizesEndpoints(t *testing.T) {
-	script, err := os.ReadFile(filepath.Join("..", "..", "abox", "img", "shared", "bin", "abox-push-postfix"))
-	if err != nil {
-		t.Skipf("shipped hook not available: %v", err)
-	}
-	home := t.TempDir()
-	hookDir := t.TempDir()
-	hook := filepath.Join(hookDir, "abox-push-postfix")
-	// Redirect the variant probe at a file we control; everything else is the
-	// script exactly as it ships.
-	variantFile := filepath.Join(hookDir, "config_variant")
-	if err := os.WriteFile(variantFile, []byte("prod\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	patched := strings.ReplaceAll(string(script), "/etc/abox/config_variant", variantFile)
-	if err := os.WriteFile(hook, []byte(patched), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", home)
-	t.Setenv("ABOX_PUSH_POSTFIX_HOOK", hook)
-	srv := startServer(t)
-
-	const body = `models:
-  - name: mine
-    open_ai:
-      api_key: SECRET-KEY-KEEP-ME
-      base_url: https://api.internal.example/api/modelhub/online
-`
-	resp := pushOneFile(t, srv, home, ".", ".trae/traecli.yaml", body)
-
-	pf, ok := resp["postfix"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected a postfix result, got %v", resp["postfix"])
-	}
-	if numField(pf, "code") != 0 {
-		t.Fatalf("hook failed: %v", pf)
-	}
-	if out, _ := pf["output"].(string); !strings.Contains(out, "normalized ~/.trae/traecli.yaml") {
-		t.Errorf("hook should report what it fixed, got %q", out)
-	}
-
-	got, err := os.ReadFile(filepath.Join(home, ".trae", "traecli.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(got), "api.internal.example") {
-		t.Errorf("endpoint not normalized to prod:\n%s", got)
-	}
-	if strings.Contains(string(got), "internal.example") {
-		t.Errorf("nonprod host survived:\n%s", got)
-	}
-	// The point of carrying the file instead of denying it: the user's own
-	// content has to survive the trip.
-	if !strings.Contains(string(got), "SECRET-KEY-KEEP-ME") || !strings.Contains(string(got), "name: mine") {
-		t.Errorf("user content was lost:\n%s", got)
-	}
-}
+// Deliberately no test here of a *particular* repair. wsh's contract is the
+// one the tests above pin: run the hook, hand it the written paths, pass its
+// output back. What any given hook rewrites is the image's business, and the
+// test that asserted one lived here by accident — it read the script out of a
+// sibling private repo and hard-coded that vendor's internal hostnames into
+// this public one. It has moved to the repo that owns the script.
 
 // The gate. Replicating a box is what lands one box's env-bound config on
 // another; a push of some subdirectory does not, and must not pay for the hook.
