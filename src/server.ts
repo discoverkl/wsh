@@ -481,6 +481,9 @@ python3:
     '  --notify                Show a toast on the catalog page when ready',
     '  --id-only               Print only the session ID (no URL). Implicit for --type job.',
     '  --banner                Prepend "$ cd <cwd> && <cmd>" line to job output (off by default)',
+    '  -i, --interactive       Attach a writable stdin to a job, like docker exec -i.',
+    '                          Without it the job reads EOF immediately; with it, write to',
+    '                          POST /api/sessions/<id>/stdin.',
     '', 'Examples:',
     '  wsh new                              # open default shell (bash)',
     '  wsh new htop                         # open a registered app by name',
@@ -559,6 +562,13 @@ python3:
   // --no-banner accepted for backwards compatibility (now the default — silently consumed).
   while (subArgs.includes('--no-banner')) subArgs.splice(subArgs.indexOf('--no-banner'), 1);
 
+  // -i / --interactive, spelled as docker's. Without it a job's stdin is
+  // /dev/null and the child reads EOF; with it the child gets a pipe this
+  // server can write to via POST /api/sessions/<id>/stdin.
+  const interactive = subArgs.includes('-i') || subArgs.includes('--interactive');
+  while (subArgs.includes('-i')) subArgs.splice(subArgs.indexOf('-i'), 1);
+  while (subArgs.includes('--interactive')) subArgs.splice(subArgs.indexOf('--interactive'), 1);
+
   const notifyIdx = subArgs.indexOf('--notify');
   const notify = notifyIdx !== -1;
   if (notifyIdx !== -1) subArgs.splice(notifyIdx, 1);
@@ -608,6 +618,11 @@ python3:
   if (commandFlag) payload.command = commandFlag;
   if (titleFlag) payload.title = titleFlag;
   if (banner) payload.banner = true;
+  // Always sent, both ways. The server reads an absent field as "legacy caller,
+  // keep the pipe" so a laptop's older abox-cli keeps working; saying false out
+  // loud is what opts cron and user scripts — every job that reaches wsh through
+  // this CLI — out of the pipe that used to wedge them.
+  payload.interactive = interactive;
   const jsonData = JSON.stringify(payload);
   let lastErr: any;
   for (const scheme of ['http', 'https'] as const) {
@@ -2211,11 +2226,19 @@ function spawnJobSession(id: string, appKey: string, appConfig: AppConfig, creat
     WSH_ORIGIN_USER: session.createdBy || '',
   };
 
+  // 'ignore' gives the child /dev/null, so a read returns EOF at once. 'pipe'
+  // gives it a pipe whose only writer is this server — and if the caller never
+  // POSTs to /stdin, that read never returns at all. The child is not at fault
+  // there: handed an open stdin it is right to wait, and only EOF can tell it
+  // otherwise. So the pipe is created solely for a caller that said it would
+  // write. Costs measured before this: agent CLIs parked on read(0) for 74h,
+  // each pinning its box as busy and, for cron, silently suppressing every
+  // later fire of the same job.
   const spawnOpts: SpawnOptions = {
     detached: true,
     env: env as Record<string, string>,
     cwd: resolveCwd(appConfig),
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: [appConfig.interactive ? 'pipe' : 'ignore', 'pipe', 'pipe'],
   };
 
   // The one branch. A cli job is exec'd directly — argv is an array and there
@@ -2571,6 +2594,13 @@ if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
 interface AppConfig {
   command: string;
   inlineCommand?: string;
+  /** type:job — attach a writable stdin, `docker exec -i`. Off by default, and
+   *  that default is the point: a job's stdin is a pipe only this server can
+   *  write to, so leaving one open for a caller who never writes gives the
+   *  child no data and no EOF, and it blocks on read() forever. Jobs are the
+   *  non-interactive session type (no tty), so the docker default fits them
+   *  better than ssh's: opt in when you will actually write. */
+  interactive?: boolean;
   env?: Record<string, string>;
   cwd?: string;
   title?: string;
@@ -4206,7 +4236,16 @@ const sessionStdinHandler = (req: express.Request, res: express.Response) => {
     res.status(410).json({ error: 'stdin not supported for this session type' }); return;
   }
   const stdin = session.stdin;
-  if (!stdin || stdin.writableEnded || stdin.destroyed) {
+  if (!stdin) {
+    // Never asked for, rather than used up. Distinguished because the fixes are
+    // opposite: this one is answered at spawn time and only by the creator, and
+    // a caller told "closed" would reasonably retry instead of declaring.
+    res.status(410).json({
+      error: 'stdin not attached: create the session with interactive:true (wsh new -i) to write to it',
+    });
+    return;
+  }
+  if (stdin.writableEnded || stdin.destroyed) {
     res.status(410).json({ error: 'stdin closed' }); return;
   }
 
@@ -7032,6 +7071,26 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
   // Banner defaults off for jobs. `banner: true` opts back in.
   // Legacy `noBanner` is silently consumed (it was the default-on inverter; now redundant).
   const adHocBanner = !!req.body?.banner;
+  // `docker exec -i`, tri-state on purpose:
+  //
+  //   true      caller will write — attach the pipe
+  //   false     caller will not — /dev/null, so the child reads EOF
+  //   absent    caller predates the field — attach the pipe, as before
+  //
+  // The third case is a compatibility shim, not the destination. abox-cli also
+  // runs on laptops and updates on its own schedule, so a wsh that read absent
+  // as false would silently stop `echo hi | bx cat` from working against an
+  // updated box, for anyone who had not upgraded yet. Absent therefore keeps
+  // the old behaviour, and the callers that actually wedge — cron and user
+  // scripts, which reach here through `wsh new` — are fixed by having that CLI
+  // always send the field explicitly. Once shipped abox-cli versions all send
+  // it, absent can become false and this comment can go.
+  //
+  // Getting it wrong stays loud either way: POST /api/sessions/<id>/stdin
+  // answers 410 naming the flag when the session has no pipe.
+  const adHocInteractive = req.body?.interactive === undefined
+    ? true
+    : !!req.body.interactive;
   const snapshot = (req.body?.snapshot as string) || '';
   const targetApp = (req.body?.targetApp as string) || '';
   const targetSession = (req.body?.targetSession as string) || '';
@@ -7048,6 +7107,7 @@ router.post('/api/sessions', async (req: express.Request, res: express.Response)
       ...(cwdOverride ? { cwd: cwdOverride } : {}),
       ...(Object.keys(envOverride).length ? { env: envOverride } : {}),
       ...(adHocBanner ? { banner: true } : {}),
+      interactive: adHocInteractive,
     };
     sessionLabel = appKey || adHocType || 'pty';
   } else if (skillName) {
