@@ -249,6 +249,28 @@ Keys starting with `_` are reserved (e.g. `_skills`).
 
 **Ordering**: `top: N` (positive integer) promotes an app to the top of its section (skills/apps independently), sorted by value ascending. `hidden: true` pushes to the bottom. `top: 0` explicitly overrides a system-level `top`. Catalog display order: topped → normal → hidden.
 
+**Hidden apps and the “All apps” card.** A hidden app is collapsed, not dropped:
+the catalog carries one expander card at the end of the APPS grid — *All apps*,
+with the count — and opening it reveals every hidden card on the page. Skills
+included, deliberately: the card lives in APPS but a hidden *project* card has no
+control of its own, and one that nothing can reveal is one nobody can reach.
+
+Revealed cards are drawn at full strength, with no badge and no dimming. Having
+asked to see them, being told again which ones they are says nothing; what marks
+the boundary is the expander itself, dashed and unfilled so it reads as a control
+among apps rather than an app. A second copy closes the run at its far end, so a
+long expansion collapses from whichever end you are looking at.
+
+Clicking a card there only opens it. Unhiding is a separate, deliberate act
+through the card’s gear popover, whose Hide button reads **Unhide** on a hidden
+card — running an app is not a claim about wanting it on the catalog forever, and
+a catalog that rearranged itself behind every click would be one nobody could
+keep tidy. Search reaches hidden apps either way, expanded or not.
+
+This is what makes a mostly-hidden system layer usable: an image can ship its
+whole app inventory with `hidden: true` and leave the catalog showing only what
+that box is *for*, without the rest becoming unreachable.
+
 **Default app**: `default: true` on one app makes it the box's landing page — the catalog root (`/`) issues a `302` to `${BASE}${appKey}` instead of rendering the catalog. Works for any **pty or web** app (not skills or jobs — jobs have no UI to land on); the redirect just serves the app shell (`index.html`), which spawns a PTY into xterm.js or a web app into the iframe as usual. Reach the catalog itself with `/?catalog` (any value; presence is all that matters). The app shell carries a grid-icon "Back to Catalog" link (`#catalog-btn`) in its titlebar pointing at `${BASE}?catalog`, so it never bounces straight back to the default app. Resolution (`defaultAppKey()` in `server.ts`) walks apps in catalog order and returns the first `default: true` app the requester can actually reach — under `--trust-proxy`, a non-allowed viewer is only redirected to a public-joinable default, otherwise they get the (filtered) catalog. Exposed as `default` in `/api/apps`; cards flagged default show a green **Default** badge.
 
 **Merging one entry (`POST /api/apps/:key`).** Writes a whole app definition into the user layer — the receiving half of `abox-cli push app`, which carries a card and the files behind it from one box to another. Unlike the toggles below it replaces the entry rather than setting a field, and it writes through `parseDocument` so the rest of the file — including comments — survives; a push promises to touch the one key it names. It refuses `_`-prefixed reserved keys, keys the system layer already defines (those arrive with the image on both boxes, and the user layer merges last, so a copy could only disagree and would win), and keys not usable as both a URL segment and a YAML key. Because `loadApps()` re-reads from disk on every request, a merged card is live on the next catalog load with nothing to reload. The push client is told the box can do this by `accept_entities` in the `/api/push/plan2` reply, and refuses the whole operation when it is absent rather than landing files whose card will never arrive.
@@ -366,7 +388,7 @@ All RPC is `eval` — the server delivers JavaScript to connected browser client
 
 ## Skills
 
-Skills are apps with a `skill` field whose command template references `$SKILL` and `$INPUT` env vars. The `_skills` reserved key provides shared defaults (command, cwd) for all skill apps. Two card types: **skill cards** (launch a named skill via `/$SKILL <input>`, `slashPrefix: true` default) and **project cards** (open an assistant scoped to a project directory, `slashPrefix: false`, input sent as plain text).
+Skills are apps with a `skill` field whose command template references `$SKILL` and `$INPUT` env vars. The `_skills` reserved key provides shared defaults (command, cwd) for all skill apps. They render in the catalog's **Agent Cards** section — one card shape, two knobs: `slashPrefix` (`true` default launches a named skill via `/$SKILL <input>`; `false` sends the input to the agent as plain text) and `cwd` (scopes the agent to a directory).
 
 **Inline mini-terminal**: Skill cards embed a lightweight inline terminal (MiniTerminal). Text selection is disabled; the "Open in Tab" button is visually emphasized. When the skill input is empty and a mini-terminal is active, certain keys are forwarded directly to the PTY: digits `1`–`9`, `Backspace`, and `Arrow Up/Down`.
 
