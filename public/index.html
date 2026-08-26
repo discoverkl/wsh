@@ -956,6 +956,11 @@
       height: 100dvh;
     }
 
+    /* Headless (client.ts, from role + ?headless): the app is the page. #window
+       is already 100vw/100dvh under .compact, so dropping the bar is the whole
+       change. */
+    html.headless #titlebar { display: none; }
+
     #pinned-toast {
       position: absolute;
       top: 46px;

@@ -397,6 +397,14 @@ let appType: 'pty' | 'web' = 'pty';
 let sessionCwd = '';
 let serverBase = '';
 let showingLogs = false;
+
+/** `?headless=1` drops the titlebar, `?headless=0` forces it back; with neither,
+ *  a web app shows it to owners only — a visitor forwarded to a public app can't
+ *  use a single button on it. Per-URL state: no storage, no stripping. */
+const headlessParam: boolean | null = (() => {
+  const v = new URLSearchParams(location.search).get('headless');
+  return v === null ? null : v !== '0' && v !== 'false';
+})();
 /** True once the iframe has painted — later `load` events are in-app navigation. */
 let iframeLoaded = false;
 /** The app instance (server PID : child PID) the iframe is pointed at. A change
@@ -572,14 +580,23 @@ function connect(): void {
           }
           ws.send(JSON.stringify({ type: 'origin', origin: location.origin }));
           applyRole(msg.role, msg.credential);
+          // A pty keeps its bar regardless: the terminal is the session, not a site.
+          document.documentElement.classList.toggle('headless', appType === 'web' && (headlessParam ?? !isOwner));
           const desktop = document.getElementById('desktop')!;
           if (desktop.hasAttribute('hidden')) {
             if (appType === 'web') {
               document.documentElement.classList.add('web', 'compact');
               document.getElementById('web-container')!.removeAttribute('hidden');
               document.getElementById('clear-btn')!.setAttribute('hidden', '');
-              document.getElementById('logs-btn')!.removeAttribute('hidden');
-              document.querySelectorAll('.agent-wrap').forEach(el => el.removeAttribute('hidden'));
+              // Both read the app's server output, which is owner-only now; the
+              // catalog and a second session are owner errands too.
+              if (isOwner) {
+                document.getElementById('logs-btn')!.removeAttribute('hidden');
+                document.querySelectorAll('.agent-wrap').forEach(el => el.removeAttribute('hidden'));
+              } else {
+                document.getElementById('catalog-btn')!.setAttribute('hidden', '');
+                document.getElementById('new-session')!.setAttribute('hidden', '');
+              }
               document.getElementById('share-btn')!.setAttribute('hidden', '');
               document.getElementById('shortcut-bar')!.classList.add('hidden');
               document.getElementById('input-toggle')!.setAttribute('hidden', '');

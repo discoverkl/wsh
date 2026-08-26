@@ -1659,10 +1659,18 @@ function killProcessGroup(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM
   }
 }
 
+/** Peers cleared to read a session's process output. All of them on a pty
+ *  session, where the output is the session. On a web session the bytes are the
+ *  server log — launch banner, cwd, whatever the app prints — and `access:
+ *  public` seats strangers in `peers`, so only an owner credential joins.
+ *  Decided once in sendAttach, so replay and live output cannot disagree. */
+const logReaders = new WeakSet<WebSocket>();
+
 function broadcast(session: Session, data: string | Buffer, opts?: { binary?: boolean }): void {
   const binary = opts?.binary === true;
   for (const ws of session.peers.keys()) {
     if (ws.readyState !== WebSocket.OPEN) continue;
+    if (binary && !logReaders.has(ws)) continue; // binary frames are process output
     if (binary) ws.send(data, { binary: true });
     else ws.send(data);
   }
@@ -3965,6 +3973,7 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
       },
     } as unknown as WebSocket;
 
+    logReaders.add(fakeWs); // the SSE log endpoint — already gated on Allowed=1
     session.peers.set(fakeWs, 'viewer');
 
     req.on('close', () => {
@@ -7298,7 +7307,10 @@ function sendRoleMessage(ws: WebSocket, sessionId: string, session: Session, rol
  *  Single path so the `replay` mode announced in the role message can't drift
  *  from the bytes actually sent after it. */
 function sendAttach(ws: WebSocket, sessionId: string, session: Session, role: Role, credential: Role, since: number): void {
-  const { mode, buf } = replayFrom(session, since);
+  // A web app's scrollback is its server log: owner credentials only, here and
+  // in every later broadcast.
+  if (session.appType !== 'web' || credential === 'owner') logReaders.add(ws);
+  const { mode, buf } = logReaders.has(ws) ? replayFrom(session, since) : { mode: 'none' as ReplayMode, buf: null };
   sendRoleMessage(ws, sessionId, session, role, credential, buf ? mode : 'none');
   if (session.appType === 'web' && session.ready) ws.send(readyMessage(session));
   if (buf) ws.send(buf, { binary: true });

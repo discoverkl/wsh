@@ -223,7 +223,7 @@ The proxy decides who's allowed; wsh just honors the decision. From wsh's view, 
 
 **Public-app exception.** Apps marked `access: public` in `apps.yaml` (e.g. web `tetris`) are reachable by anyone the proxy forwarded, regardless of `X-Abox-Allowed`. Both web and pty apps may be public:
 - `/_a/<key>` HTTP and WebSocket (web only): forwarded; auto-spawn allowed.
-- Parent chrome `/<box>/<appName>`: the `/terminal` WebSocket admits non-allowed callers. For a public **web** app they join as viewers and the role message tells the client to load the iframe. For a public **pty** app there is no iframe — each visitor spawns their **own** per-visitor PTY and is granted **writer** (type/resize/clear) over it, so the app is actually usable. Never owner: that would disclose other sessions via `pinnedOther` and allow pin/keep-alive. `close`/`pin` stay owner-only.
+- Parent chrome `/<box>/<appName>`: the `/terminal` WebSocket admits non-allowed callers. For a public **web** app they join as viewers and the role message tells the client to load the iframe — the iframe and nothing else: the session's process output is withheld from them (see [Web App Proxy](#web-app-proxy)). For a public **pty** app there is no iframe — each visitor spawns their **own** per-visitor PTY and is granted **writer** (type/resize/clear) over it, so the app is actually usable. Never owner: that would disclose other sessions via `pinnedOther` and allow pin/keep-alive. `close`/`pin` stay owner-only.
 - `/api/apps`: non-allowed callers see only public apps — web *and* pty (Skills and private apps hidden).
 - All other `/api/*` endpoints (rpc, share, sessions, paste-image, events): require `Allowed=1`. The pty writer role is per-session WS state only; it grants no HTTP-API authority.
 
@@ -313,6 +313,33 @@ myserver:
 The web-app lifecycle is otherwise identical: the health check polls `$WSH_PORT` (→ forwarded to `8080`), so if the upstream isn't up yet the probe simply retries and startup ordering self-heals. `wsh` resolves on the child's PATH via `~/.local/bin`, and `wsh goto` is a self-contained subcommand (no HTTP server) usable standalone as a loopback TCP forwarder.
 
 **Initial focus.** After the iframe fires `load`, the host calls `iframe.focus()` and then re-focuses the first `[autofocus]` element inside the iframe (same-origin only). Web apps that want a specific input focused on load should use the `autofocus` attribute — a JS `.focus()` call from inside the iframe alone is unreliable, because the host's subsequent `iframe.focus()` can reset the active element to the iframe itself.
+
+**Process output is owner-credentialed.** For a pty session the output *is* the
+session, and every peer is there to watch it. For a **web** session the bytes are
+the app's server log — the launch banner names the cwd and the resolved command,
+and the app prints whatever it prints — while what a peer came for is the iframe.
+So `sendAttach` puts only owner-credentialed peers on `logReaders` (plus the SSE
+log feed, which its endpoint already gated on `Allowed=1`); everyone else is told
+`replay: 'none'` and handed nothing, and `broadcast`'s binary path — the live
+counterpart of that replay — skips them too. Deciding once, at attach, is what
+stops the replay and the live stream from disagreeing. `access: public` publishes
+the app, not the process behind it.
+
+**Headless (no titlebar).** The page drops the titlebar entirely — the iframe
+becomes the whole viewport — when the viewer is not owner-credentialed, which
+under `--trust-proxy` means anyone the gateway forwarded to a public app. Nothing
+on that bar was theirs to use: close and pin are owner-only, the grid icon leads
+to a catalog they can't reach, and the log view is empty by construction. Two URL
+overrides: `?headless=1` drops the bar for an owner too — the link an author
+hands out for an app that should read as an ordinary website — and `?headless=0`
+forces it back. Per-URL state, nothing stored and nothing stripped, so a reload
+lands where the link said. pty apps ignore it: a terminal is the session, not a
+site someone is visiting.
+
+Surviving a headless page: the disconnect banner and its Retry, `api.toast()`,
+and the startup loading card. Lost to a non-owner even when the bar *is* showing
+(`?headless=0`): View Logs, the snapshot agent avatar, Back to Catalog, New
+Session. Close stays visible and disabled, as before.
 
 ## Image Paste
 
