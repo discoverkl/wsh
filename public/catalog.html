@@ -1680,23 +1680,24 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
     return document.querySelectorAll('#skills-content > .skill-card[data-hidden="1"], #apps-content > .card-swipe-wrap[data-hidden="1"]');
   }
 
-  function buildMoreCard(total, tail) {
+  function buildMoreCard(total) {
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'card more-card visible';
     btn.setAttribute('aria-expanded', showingHidden ? 'true' : 'false');
-    var expanded = showingHidden || tail;
     btn.innerHTML =
-      '<span class="more-icon">' + (expanded ? chevronUpSvg : gridSvg) + '</span>' +
-      '<span class="more-label">' + (expanded ? 'Show fewer' : 'All apps') + '</span>' +
-      (expanded ? '' : '<span class="more-count">' + total + ' more</span>');
+      '<span class="more-icon">' + (showingHidden ? chevronUpSvg : gridSvg) + '</span>' +
+      '<span class="more-label">' + (showingHidden ? 'Show fewer' : 'All apps') + '</span>' +
+      (showingHidden ? '' : '<span class="more-count">' + total + ' more</span>');
     return btn;
   }
 
-  /** Place the expander cards: one closing the run of shown apps, and while
-   *  expanded a second closing the run below it, so a long expansion can be
-   *  collapsed from the end you are actually looking at. Rebuilt rather than
-   *  patched — hide, unhide, add and remove all move the boundary. */
+  /** Place the expander: always the last card in the grid. Collapsed that is
+   *  the end of the run of shown apps; expanded it is the end of everything,
+   *  which is also where you are once you have scrolled the expansion. It
+   *  moves rather than duplicating — a second card reading "Show fewer" says
+   *  the same thing twice. Rebuilt rather than patched, because hide, unhide,
+   *  add and remove all move the boundary it sits on. */
   function syncMoreCards() {
     var content = document.getElementById('apps-content');
     if (!content) return;
@@ -1712,10 +1713,9 @@ import { wrapCard as swipeWrapCard, init as swipeInit } from './swipe-cards.js';
       (kids[j].dataset.hidden === '1' ? hid : shown).push(kids[j]);
     }
     shown.concat(hid).forEach(function(el) { content.appendChild(el); });
-    var head = buildMoreCard(total, false);
-    if (hid.length) content.insertBefore(head, hid[0]);
-    else content.appendChild(head);
-    if (showingHidden) content.appendChild(buildMoreCard(total, true));
+    var card = buildMoreCard(total);
+    if (showingHidden || !hid.length) content.appendChild(card);
+    else content.insertBefore(card, hid[0]);
   }
 
   function setShowingHidden(on) {

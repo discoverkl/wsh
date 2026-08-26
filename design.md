@@ -258,8 +258,11 @@ control of its own, and one that nothing can reveal is one nobody can reach.
 Revealed cards are drawn at full strength, with no badge and no dimming. Having
 asked to see them, being told again which ones they are says nothing; what marks
 the boundary is the expander itself, dashed and unfilled so it reads as a control
-among apps rather than an app. A second copy closes the run at its far end, so a
-long expansion collapses from whichever end you are looking at.
+among apps rather than an app. There is exactly one, and it is always the last
+card in the grid — collapsed that is the end of the shown apps, expanded it is
+the end of everything, which is also where you are once you have scrolled the
+expansion. It moves rather than duplicating: two cards both reading *Show fewer*
+say the same thing twice.
 
 Clicking a card there only opens it. Unhiding is a separate, deliberate act
 through the card’s gear popover, whose Hide button reads **Unhide** on a hidden
