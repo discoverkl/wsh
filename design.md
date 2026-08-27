@@ -17,6 +17,8 @@ Both PTY and web app processes are spawned via `/bin/sh -c` (not `$SHELL`). The 
 
 **Hash passthrough**: The hash supports a compound format `#{sessionId}/{appHash}` — everything after the first `/` is relayed to/from web app iframes (bidirectional sync via direct `location.hash` set for same-origin, `postMessage` with `{ type: 'wsh:hash', hash }` for cross-origin). Existing `#sessionId` URLs (no `/`) are unaffected.
 
+**Path mirroring**: The parent URL is `{BASE}{appName}[/{innerPath}]`. A web app's iframe navigations are mirrored *up* into that subpath (`setupPathSync` patches the iframe's `history` methods, with a `pagehide` fallback for `location.href` assignments), and read back *down* on load — so refresh, bookmark and share keep the user's position. Always `replaceState`, so in-app steps never land in the parent's history and Back still means "leave the app". Orthogonal to the hash channel: path belongs to the app's router, fragment to its in-page state. Both rebuild the parent URL from known parts and would otherwise drop wsh's own query, which is why `keepQuery` re-attaches `?headless`.
+
 ## Message Protocol
 
 **Client -> Server:**
@@ -298,7 +300,7 @@ Apps must be proxy-aware and configure their own base URL using `$WSH_BASE_URL`.
 
 `stripPrefix: true` is available for simple apps that use relative paths (SPAs, static file servers).
 
-**Initial inner path.** The `path` config field sets the inner path a web app's iframe opens at (e.g. `path: /files/` for File Browser, whose `/` root doesn't render). It rides the `ready` message to the client; a one-shot `?to=<path>` URL param overrides it.
+**Initial inner path.** Precedence: the parent URL's subpath (whatever path mirroring last wrote) > the `path` config field (e.g. `path: /files/` for File Browser, whose `/` root doesn't render, delivered on the `ready` message) > `/`. `?to=<path>` is deprecated: on load it is rewritten into subpath form and deleted, leaving the subpath as the one channel.
 
 Environment injected into web app processes: `WSH_PORT` (the port the app should listen on), `WSH_SESSION`, `WSH_BASE_URL`, and `WSH_ORIGIN_USER` (the `X-WSH-User` captured when the session was created, or empty).
 
@@ -357,9 +359,12 @@ on that bar was theirs to use: close and pin are owner-only, the grid icon leads
 to a catalog they can't reach, and the log view is empty by construction. Two URL
 overrides: `?headless=1` drops the bar for an owner too — the link an author
 hands out for an app that should read as an ordinary website — and `?headless=0`
-forces it back. Per-URL state, nothing stored and nothing stripped, so a reload
-lands where the link said. pty apps ignore it: a terminal is the session, not a
-site someone is visiting.
+forces it back. Per-URL state — nothing is stored — so the address bar has to
+carry it, and `keepQuery` re-attaches it to every parent-URL rewrite: the hash
+sync, and the mirror that copies the iframe's inner path back up. Those rebuild
+the URL from `location.pathname`, so without it the app's first navigation would
+drop the parameter and the next refresh would put the bar back. pty apps ignore
+it: a terminal is the session, not a site someone is visiting.
 
 Surviving a headless page: the disconnect banner and its Retry, `api.toast()`,
 and the startup loading card. Lost to a non-owner even when the bar *is* showing

@@ -77,6 +77,28 @@ fetch('./').then(r => {
 // Check if a session ID is already in the URL before parsing (used below).
 const hadSession = location.hash.length > 1;
 
+/** `?headless=1` drops the titlebar, `?headless=0` forces it back; with neither,
+ *  a web app shows it to owners only — a visitor forwarded to a public app can't
+ *  use a single button on it. Per-URL state: no storage, so the address bar has
+ *  to keep it, which is what `keepQuery` below is for. Read at load, before the
+ *  first rewrite, since after that the URL no longer carries the answer. */
+const headlessParam: boolean | null = (() => {
+  const v = new URLSearchParams(location.search).get('headless');
+  return v === null ? null : v !== '0' && v !== 'false';
+})();
+
+/** Re-attach wsh's own query to a parent URL being rewritten. Every rewrite
+ *  below rebuilds the URL from `location.pathname` — dropping the search, or in
+ *  the iframe-mirror's case replacing it with the app's — and `?headless` has
+ *  nowhere else to live: losing it puts the titlebar back on the next refresh.
+ *  Appends rather than re-serializes, so an app's own query survives verbatim. */
+function keepQuery(search: string): string {
+  if (headlessParam === null) return search;
+  if (new URLSearchParams(search).has('headless')) return search;
+  const kept = `headless=${headlessParam ? '1' : '0'}`;
+  return search ? `${search}&${kept}` : `?${kept}`;
+}
+
 // Compound hash format: #sessionId/app/hash/here?wt=token
 // The first segment (before the first /) is the session ID.
 // Everything after it is the app hash, passed through to web app iframes.
@@ -100,7 +122,7 @@ function getSessionParams(): { sessionId: string | null; wtoken: string | null }
   // into getAppHash() or become visible to embedded web apps. The full
   // pathname is included because `<base href>` makes a hash-only URL like
   // `#abc` resolve against BASE (stripping the appName segment).
-  history.replaceState(null, '', `${location.pathname}#${id}${appHash ? '/' + appHash : ''}`);
+  history.replaceState(null, '', `${location.pathname}${keepQuery('')}#${id}${appHash ? '/' + appHash : ''}`);
   return { sessionId: id, wtoken: params?.get('wt') ?? null };
 }
 
@@ -154,10 +176,10 @@ function getAppHash(): string {
  *  URL like `#abc` resolve against BASE (stripping the appName subpath). */
 function setParentHash(appHash: string): void {
   if (appType === 'web') {
-    history.replaceState(null, '', appHash ? `${location.pathname}#${appHash}` : location.pathname);
+    history.replaceState(null, '', `${location.pathname}${keepQuery(location.search)}${appHash ? '#' + appHash : ''}`);
   } else {
     const newHash = appHash ? `${sessionId}/${appHash}` : (sessionId || '');
-    history.replaceState(null, '', `${location.pathname}#${newHash}`);
+    history.replaceState(null, '', `${location.pathname}${keepQuery(location.search)}#${newHash}`);
   }
 }
 
@@ -221,7 +243,7 @@ function readIframeInnerPath(iframe: HTMLIFrameElement): { path: string; search:
 function mirrorIframePathToParent(iframe: HTMLIFrameElement): void {
   const r = readIframeInnerPath(iframe);
   if (!r) return;
-  const newParent = baseUrl.pathname + appName + r.path + r.search + location.hash;
+  const newParent = baseUrl.pathname + appName + r.path + keepQuery(r.search) + location.hash;
   const current = location.pathname + location.search + location.hash;
   if (newParent !== current) history.replaceState(null, '', newParent);
 }
@@ -397,14 +419,6 @@ let appType: 'pty' | 'web' = 'pty';
 let sessionCwd = '';
 let serverBase = '';
 let showingLogs = false;
-
-/** `?headless=1` drops the titlebar, `?headless=0` forces it back; with neither,
- *  a web app shows it to owners only — a visitor forwarded to a public app can't
- *  use a single button on it. Per-URL state: no storage, no stripping. */
-const headlessParam: boolean | null = (() => {
-  const v = new URLSearchParams(location.search).get('headless');
-  return v === null ? null : v !== '0' && v !== 'false';
-})();
 /** True once the iframe has painted — later `load` events are in-app navigation. */
 let iframeLoaded = false;
 /** The app instance (server PID : child PID) the iframe is pointed at. A change
@@ -719,7 +733,7 @@ function connect(): void {
         window.close();
         // window.close() may be blocked if tab wasn't opened via script — fall through
       }
-      history.replaceState(null, '', location.pathname);
+      history.replaceState(null, '', location.pathname + keepQuery(''));
       if (appType === 'web') {
         document.getElementById('web-container')!.setAttribute('hidden', '');
         document.getElementById('terminal-container')!.removeAttribute('hidden');
