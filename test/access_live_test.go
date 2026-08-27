@@ -10,7 +10,9 @@ package wsh_test
 // │  ├ revoke reaches a running app        │ public→private, no restart, /_a/<app> closes         │
 // │  ├ revoke reaches the session route    │ …and /_p/<id> closes, which the app route never did  │
 // │  ├ owner is unaffected                 │ an allowed caller gets in under either setting       │
-// │  └ catalog follows a same-size edit    │ guards the stat stamp: mtime moves, byte count doesn't│
+// │  ├ catalog follows a same-size edit    │ guards the stat stamp: mtime moves, byte count doesn't│
+// │  ├ a stranger sees a hidden public app │ `hidden` is the owner's page, not the access decision │
+// │  └ the owner still sees it hidden      │ …and their own arrangement survives the exemption    │
 // └────────────────────────────────────────┴──────────────────────────────────────────────────────┘
 //
 // Every check here needs a caller the server does not treat as loopback: both
@@ -62,15 +64,30 @@ type accessBox struct {
 // an operator editing apps.json would. Returns once the bytes are on disk.
 func (b *accessBox) writeApp(t *testing.T, access, title string) {
 	t.Helper()
+	b.writeAppEntry(t, access, title, false)
+}
+
+// writeAppHidden is writeApp for an app its owner has taken off their own
+// catalog — the case a forwarded stranger must still be shown, since `hidden`
+// arranges the owner's page and says nothing about who may reach the app.
+func (b *accessBox) writeAppHidden(t *testing.T, access, title string) {
+	t.Helper()
+	b.writeAppEntry(t, access, title, true)
+}
+
+func (b *accessBox) writeAppEntry(t *testing.T, access, title string, hidden bool) {
+	t.Helper()
 	home := filepath.Dir(filepath.Dir(b.cfg))
-	cfg := map[string]any{
-		"demo": map[string]any{
-			"command": "node " + filepath.Join(home, "app.js"),
-			"type":    "web",
-			"title":   title,
-			"access":  access,
-		},
+	entry := map[string]any{
+		"command": "node " + filepath.Join(home, "app.js"),
+		"type":    "web",
+		"title":   title,
+		"access":  access,
 	}
+	if hidden {
+		entry["hidden"] = true
+	}
+	cfg := map[string]any{"demo": entry}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatalf("marshal apps.json: %v", err)
@@ -113,9 +130,18 @@ func (b *accessBox) try(path string, owner bool) (int, error) {
 
 func (b *accessBox) getJSONAs(t *testing.T, path string) map[string]any {
 	t.Helper()
+	return b.getJSON(t, path, true)
+}
+
+// getJSON reads a JSON endpoint as the owner (owner=true) or as a forwarded
+// stranger, who carries the proxy secret but no Allowed verdict.
+func (b *accessBox) getJSON(t *testing.T, path string, owner bool) map[string]any {
+	t.Helper()
 	req, _ := http.NewRequest("GET", fmt.Sprintf("http://%s:%d%s", b.ip, b.port, path), nil)
 	req.Header.Set("X-WSH-Proxy-Secret", liveAccessSecret)
-	req.Header.Set("X-Abox-Allowed", "1")
+	if owner {
+		req.Header.Set("X-Abox-Allowed", "1")
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", path, err)
@@ -293,6 +319,52 @@ func TestLiveAccess(t *testing.T) {
 			t.Errorf("title after same-size edit = %q, want BBBB", got)
 		}
 	})
+
+	t.Run("a stranger sees a hidden public app", func(t *testing.T) {
+		// An image that ships its apps hidden — which is how a box comes to
+		// open on the two things it is for — would otherwise hand a forwarded
+		// stranger a catalog whose entire content is the "All apps" expander.
+		// `hidden` was never the access decision: `access` is, and the filter
+		// enforcing it has already run by the time `hidden` is read.
+		box.writeAppHidden(t, "public", "Demo")
+		row := appRow(t, box, false)
+		if row == nil {
+			t.Fatalf("demo missing from a stranger's catalog")
+		}
+		if v, ok := row["hidden"]; ok {
+			t.Errorf("demo.hidden = %v for a stranger, want absent", v)
+		}
+		if raw, _ := row["_raw"].(map[string]any); raw != nil {
+			if v, ok := raw["hidden"]; ok {
+				t.Errorf("demo._raw.hidden = %v for a stranger, want absent "+
+					"(a card's config popover lists every key it finds)", v)
+			}
+		}
+	})
+
+	t.Run("the owner still sees it hidden", func(t *testing.T) {
+		row := appRow(t, box, true)
+		if row == nil {
+			t.Fatalf("demo missing from the owner's catalog")
+		}
+		if row["hidden"] != true {
+			t.Errorf("demo.hidden = %v for the owner, want true", row["hidden"])
+		}
+	})
+}
+
+// appRow is the demo card as one side or the other is served it, or nil when
+// the catalog does not carry it at all.
+func appRow(t *testing.T, box *accessBox, owner bool) map[string]any {
+	t.Helper()
+	apps, _ := box.getJSON(t, "/api/apps", owner)["apps"].([]any)
+	for _, a := range apps {
+		row, _ := a.(map[string]any)
+		if row["key"] == "demo" {
+			return row
+		}
+	}
+	return nil
 }
 
 func appTitle(t *testing.T, box *accessBox) string {

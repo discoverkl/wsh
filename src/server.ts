@@ -3308,6 +3308,14 @@ router.get('/api/apps', (req: express.Request, res: express.Response) => {
     if (allowed) return true;
     return isPublicJoinable(app);
   });
+  // `hidden` is the owner's arrangement of the owner's catalog, and a forwarded
+  // stranger is not looking at that page. It was never an access control —
+  // `access` is, and the filter above has already narrowed this list to what
+  // they may reach — so dropping the flag here exposes nothing new. What it
+  // avoids is a catalog whose entire content is an expander card, which is what
+  // a stranger gets on an image that ships its apps hidden. With nothing hidden
+  // left in the payload the client draws no expander at all, so they also can't
+  // collapse their own page down to nothing.
   const list = entries.map(([key, app]) => ({
     key,
     title: app.title ?? path.basename(app.command.split(/\s/)[0]),
@@ -3318,11 +3326,13 @@ router.get('/api/apps', (req: express.Request, res: express.Response) => {
     slashPrefix: app.slashPrefix ?? true,
     type: app.type ?? 'pty',
     access: app.access ?? null,
-    hidden: app.hidden ? true : undefined,
+    hidden: allowed && app.hidden ? true : undefined,
     top: typeof app.top === 'number' && app.top > 0 ? app.top : undefined,
     default: app.default ? true : undefined,
     tips: Array.isArray(app.tips) && app.tips.length ? app.tips : undefined,
-    _raw: app,
+    // Same reasoning, and the card's config popover renders every key it finds:
+    // left in, `hidden: true` would be listed on a card plainly on display.
+    _raw: allowed ? app : { ...app, hidden: undefined },
   }));
   res.json({ apps: list, ...(warnings.length ? { warnings } : {}) });
 });
