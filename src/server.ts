@@ -28,6 +28,7 @@ import { loadPushIgnoreDir, compilePushIgnore, pushIgnored, PushIgnoreRule, PUSH
 import { SYNC_CARD_REL, SyncHash, syncCardFp, syncCardHash, syncClassify, syncFind, syncValidReplica, syncWrite } from './syncState';
 import { PUSH_TRASH_DIR, pushTrashDisplace, pushTrashRecordSize, pushTrashStamp, pushTrashSweep } from './pushTrash';
 import { runPushPostfix, PUSH_POSTFIX_HOOK as PUSH_POSTFIX_DEFAULT_HOOK } from './pushPostfix';
+import { chunkSafeEnd, stripEphemeralSequences } from './streamChunk';
 
 // --- Error handling ---
 
@@ -1683,49 +1684,6 @@ function broadcastClose(session: Session, code: number, reason: string): void {
 }
 
 
-// Strip ephemeral terminal queries/responses from scrollback data.
-// These should not be replayed — replaying stale queries causes xterm.js to
-// generate responses that flow back to PTY stdin as garbage (the originating
-// program is long gone, so bash echoes the responses as visible text).
-//
-// Every query xterm.js responds to is listed here, plus responses that were
-// already echoed as garbage and baked into the scrollback.
-//
-// Queries:
-//   CSI c  / CSI > c / CSI = c    — DA1/DA2/DA3 (device attributes)
-//   CSI 5 n / CSI 6 n / CSI ? 6 n — DSR (device status / cursor position)
-//   CSI ? Ps $ p / CSI Ps $ p     — DECRQM (request mode)
-//   CSI 14 t / 16 t / 18 t        — window/cell size queries
-//   DCS $ q ... ST                — DECRQSS (request status string)
-//   OSC 4;N;? / 10;? / 11;? / 12;? — color queries
-// Responses:
-//   CSI row ; col R / CSI ? row ; col R — CPR
-//   CSI ? ... c                         — DA response
-//   CSI Ps ; Ps $ y / CSI ? Ps ; Ps $ y — DECRPM (mode report)
-//   CSI 8 ; rows ; cols t               — text area size response
-//   DCS 0/1 $ r ... ST                  — DECRQSS response
-const ephemeralRe = new RegExp([
-  '\\x1b\\[\\??[>= ]?[\\d;]*c',           // DA query + response
-  '\\x1b\\[\\??\\d*n',                     // DSR query (5n, 6n, ?6n)
-  '\\x1b\\[\\??\\d+;\\d+R',               // CPR response (row;colR, ?row;colR)
-  '\\x1b\\[\\??\\d+\\$p',                 // DECRQM query (?Ps$p, Ps$p)
-  '\\x1b\\[\\??\\d+;\\d+\\$y',            // DECRPM response (?Ps;Ps$y, Ps;Ps$y)
-  '\\x1b\\[(?:14|16|18)t',                // window/cell size queries
-  '\\x1b\\[8;\\d+;\\d+t',                 // text area size response
-  '\\x1bP\\$q[^\\x1b]*\\x1b\\\\',         // DECRQSS query (DCS$q...ST)
-  '\\x1bP[01]\\$r[^\\x1b]*\\x1b\\\\',     // DECRQSS response (DCS 0/1 $r...ST)
-  '\\x1b\\](?:1[012]|4;\\d+);\\?(?:\\x07|\\x1b\\\\)', // OSC color queries
-].join('|'), 'g');
-function stripEphemeralSequences(buf: Buffer): Buffer {
-  // Byte-level pre-check: skip the UTF-8 decode entirely when there are no
-  // escape characters. indexOf is C++-implemented; toString allocates a string
-  // the size of the buffer, which dominates for large logs without escapes.
-  if (buf.indexOf(0x1b) === -1) return buf;
-  const str = buf.toString('utf8');
-  const stripped = str.replace(ephemeralRe, '');
-  return stripped.length === str.length ? buf : Buffer.from(stripped, 'utf8');
-}
-
 /** True when the caller asked for the job's bytes rather than SSE frames.
  *
  *  The frame is `data: {"text": "..."}` — a JSON *string*, so it carries text
@@ -1746,34 +1704,33 @@ function wantsRawStream(req: express.Request): boolean {
   return (req.get('accept') || '').includes('application/octet-stream');
 }
 
-// Returns the index of the first byte of any trailing incomplete UTF-8
-// codepoint, or buf.length if the buffer ends on a complete codepoint.
-// Used to defer split codepoints to the next chunk so toString('utf8')
-// doesn't emit U+FFFD across read boundaries.
-function utf8SafeEnd(buf: Buffer): number {
-  // A 4-byte codepoint can have at most 3 trailing continuation bytes pending.
-  for (let back = 1; back <= 3 && buf.length - back >= 0; back++) {
-    const b = buf[buf.length - back];
-    if ((b & 0xc0) === 0x80) continue;        // continuation byte; keep walking
-    if ((b & 0x80) === 0x00) return buf.length; // ASCII; whole buffer is safe
-    const need =
-      (b & 0xe0) === 0xc0 ? 2 :
-      (b & 0xf0) === 0xe0 ? 3 :
-      (b & 0xf8) === 0xf0 ? 4 : 0;
-    if (need === 0) return buf.length;        // invalid lead; let toString replace
-    return back === need ? buf.length : buf.length - back;
-  }
-  return buf.length;
-}
-
-/** Keep only the most recent JOB_LOG_MAX files. */
+/** Keep only the most recent JOB_LOG_MAX files, among jobs that have ENDED.
+ *
+ *  A still-running job is never a rotation candidate. Ranking by mtime without
+ *  that exemption picked exactly the wrong victims: mtime is the time of the
+ *  job's last OUTPUT, so a long-running silent job — an agent waiting on a
+ *  model call, a `sleep`, a build that has gone quiet — looks older than
+ *  anything chatty and sorts to the front of the delete list. Unlinking its log
+ *  out from under it leaves a job that is alive and unfollowable: `/stream`
+ *  answers 2xx with an empty body (the fd it holds is gone), `/exit` correctly
+ *  says "still running", and a client has nothing to read and nothing to wait
+ *  for. Clients now degrade gracefully there, but the honest fix is not to
+ *  create the state.
+ *
+ *  The cap therefore bounds retained history rather than total files. Live jobs
+ *  are bounded by what the user is actually running, and their logs stop being
+ *  exempt the moment they finish — the next finalizeJob rotates them normally.
+ */
 function rotateJobLogs(): void {
   fs.readdir(JOB_LOG_DIR, (err, files) => {
     if (err || files.length <= JOB_LOG_MAX) return;
-    const logFiles = files.filter(f => f.endsWith('.log')).map(f => ({
-      name: f,
-      path: path.join(JOB_LOG_DIR, f),
-    }));
+    const logFiles = files.filter(f => f.endsWith('.log'))
+      .filter(f => !sessions.has(path.basename(f, '.log')))
+      .map(f => ({
+        name: f,
+        path: path.join(JOB_LOG_DIR, f),
+      }));
+    if (logFiles.length <= JOB_LOG_MAX) return;
     let pending = logFiles.length;
     const withMtime: { path: string; mtime: number }[] = [];
     for (const lf of logFiles) {
@@ -4069,7 +4026,12 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
     // codepoint out of a decode that no longer happens.
     if (raw) { res.write(buf); return true; }
     const pend = utf8Pending.length ? Buffer.concat([utf8Pending, buf]) : buf;
-    const safeEnd = utf8SafeEnd(pend);
+    // Two ways a chunk boundary can fall somewhere it must not: mid-codepoint,
+    // where toString would substitute U+FFFD, and mid-escape-sequence, where
+    // stripEphemeralSequences would fail to match a sequence it strips when the
+    // same bytes arrive whole. One pending buffer carries both, so tryFinish's
+    // end-of-job flush already drains whichever is left.
+    const safeEnd = chunkSafeEnd(pend);
     utf8Pending = pend.subarray(safeEnd);
     const decodable = pend.subarray(0, safeEnd);
     if (decodable.length === 0) return true;  // nothing emittable; keep tail for next tick
