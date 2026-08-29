@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // allByteValues is the payload that separates the two paths: 0x00-0x7f is
@@ -153,6 +154,86 @@ func TestWildcardAcceptStillGetsFrames(t *testing.T) {
 		if !strings.Contains(string(body), "data: ") {
 			t.Errorf("Accept %q: no frames in the body", accept)
 		}
+	}
+}
+
+// awaitJobExit blocks until /exit reports a code, which is the state the length
+// header is about: the child is gone, the log is closed, and nothing can append.
+func awaitJobExit(t *testing.T, srv *server, id string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(srv.url("/api/sessions/" + id + "/exit"))
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("job %s never recorded an exit code", id)
+}
+
+// A finished job's raw stream declares its length, which is the only way a
+// client can tell a complete download from one an intermediary ended early.
+//
+// The framed path ends with `data: [DONE]` — positive proof the box decided the
+// stream was over. Raw cannot carry a marker, because any byte in it is a byte
+// the child never wrote, so without a declared length a body that stops half
+// way is indistinguishable from one that finished. Content-Length lives in the
+// envelope rather than the bytes, costs nothing, and makes an HTTP client fail
+// a short read on its own.
+func TestFinishedRawStreamDeclaresItsLength(t *testing.T) {
+	srv := startServer(t)
+	payload := []byte("hello\n")
+	id := catJob(t, srv, payload)
+	awaitJobExit(t, srv, id)
+
+	req, err := http.NewRequest(http.MethodGet, srv.url("/api/sessions/"+id+"/stream"), nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET stream: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if resp.ContentLength != int64(len(payload)) {
+		t.Errorf("Content-Length = %d, want %d", resp.ContentLength, len(payload))
+	}
+	if string(body) != string(payload) {
+		t.Errorf("body = %q, want %q", body, payload)
+	}
+}
+
+// The framed path must NOT gain a length: it stays chunked so the gateway can
+// interleave `:keepalive` comments into it, and a declared length would make
+// that injection a protocol error rather than a heartbeat.
+func TestFinishedFramedStreamStaysUnsized(t *testing.T) {
+	srv := startServer(t)
+	id := catJob(t, srv, []byte("hello\n"))
+	awaitJobExit(t, srv, id)
+
+	req, err := http.NewRequest(http.MethodGet, srv.url("/api/sessions/"+id+"/stream"), nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET stream: %v", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.ContentLength != -1 {
+		t.Errorf("framed Content-Length = %d, want unset (chunked)", resp.ContentLength)
 	}
 }
 

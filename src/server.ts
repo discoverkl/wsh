@@ -3974,6 +3974,32 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
   res.setHeader('Content-Type', raw ? 'application/octet-stream' : 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('X-Accel-Buffering', 'no');
+
+  // Declare the length when the log can no longer change, so a raw stream can
+  // be told apart from a truncated one.
+  //
+  // The framed path ends with `data: [DONE]`, which is positive proof the box
+  // decided the stream was over. Raw has no such marker and cannot have one —
+  // any byte in it is a byte the child did not write — so a body that stops
+  // half way and a body that finishes are identical on the wire, and a client
+  // downloading a large finished log has no way to notice an intermediary
+  // ending it early. Content-Length is the marker that costs nothing: it lives
+  // in the envelope rather than in the bytes, and an HTTP client already treats
+  // a short body against it as an error (Go returns io.ErrUnexpectedEOF), which
+  // is exactly the "go back for the rest" signal abox-cli acts on.
+  //
+  // Only safe once nothing can append. `session` gone from the map plus a .exit
+  // on disk means the child is finished AND drained — child.on('close') writes
+  // .exit before evicting, and tryFinish's post-.exit flush has no writer left
+  // to race. While the job is live the size is unknown, but so is the answer to
+  // "is it done", and a client seeing "still running" from /exit reconnects
+  // anyway — so the ambiguity only exists where it does not matter.
+  if (raw && !session) {
+    try {
+      const size = fs.statSync(logPath).size;
+      if (fs.existsSync(exitPath)) res.setHeader('Content-Length', String(size));
+    } catch { /* no log yet; the empty-body branch below handles it */ }
+  }
   res.flushHeaders();
 
   // Tail the disk log; finish when the .exit file appears. Disk is the source
