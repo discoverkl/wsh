@@ -1704,6 +1704,52 @@ function wantsRawStream(req: express.Request): boolean {
   return (req.get('accept') || '').includes('application/octet-stream');
 }
 
+/** The framed-raw job stream: byte-exact output that can still carry a heartbeat.
+ *
+ *  Raw and SSE each solve half the problem and neither solves both. Raw is
+ *  byte-exact but can carry nothing of ours — any byte in it is a byte the child
+ *  did not write — so it has no keepalive and no completion marker, and an idle
+ *  load balancer cuts a quiet raw stream roughly every 60s. SSE has both, but
+ *  carries JSON strings, so binary comes back mangled and inflated.
+ *
+ *  Framing gives raw an envelope. The payload bytes are still exactly what the
+ *  child wrote and reassemble to it verbatim; the header is out-of-band, which
+ *  is what makes room for a keepalive frame and an end marker without putting a
+ *  byte inside the data.
+ *
+ *      frame := type:u8  length:u32be  payload[length]
+ *
+ *  Length is always explicit, so an unknown type is skippable rather than fatal
+ *  and the format can grow without another negotiation. It is also what lets a
+ *  client tell a mangled stream from a valid one: an intermediary that rewrites
+ *  or filters the body fails the type/length check on the first frame instead of
+ *  handing somebody corrupted output.
+ *
+ *  HTTP/2 PING would have been the cheaper answer — a connection-level heartbeat
+ *  costing no body bytes at all — but the load balancers in front of this fleet
+ *  offer only http/1.1 over ALPN, so there is no h2 hop to ping on. Measured
+ *  2026-08-30 against both fleet names.
+ */
+const RAW_FRAMED_MIME = 'application/vnd.abox.raw-framed';
+const FRAME_DATA = 0x00;
+const FRAME_KEEPALIVE = 0x01;
+const FRAME_END = 0x02;
+/** Idle gap before a keepalive frame goes out. Matches the SSE injector's 15s,
+ *  which sits comfortably under the ~60s idle timeout that cuts these streams. */
+const RAW_FRAMED_KEEPALIVE_MS = 15_000;
+
+function wantsRawFramed(req: express.Request): boolean {
+  return (req.get('accept') || '').includes(RAW_FRAMED_MIME);
+}
+
+function frameOf(type: number, payload?: Buffer): Buffer {
+  const len = payload ? payload.length : 0;
+  const head = Buffer.allocUnsafe(5);
+  head.writeUInt8(type, 0);
+  head.writeUInt32BE(len, 1);
+  return len ? Buffer.concat([head, payload as Buffer]) : head;
+}
+
 /** Keep only the most recent JOB_LOG_MAX files, among jobs that have ENDED.
  *
  *  A still-running job is never a rotation candidate. Ranking by mtime without
@@ -3970,8 +4016,22 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
   // its keepalive injection off text/event-stream (addSSEKeepalive), so this
   // header is also what stops `:keepalive` comments being spliced into a
   // binary stream on the way back.
-  const raw = wantsRawStream(req);
-  res.setHeader('Content-Type', raw ? 'application/octet-stream' : 'text/event-stream');
+  const framed = wantsRawFramed(req);
+  const raw = framed || wantsRawStream(req);
+  res.setHeader('Content-Type', framed ? RAW_FRAMED_MIME : raw ? 'application/octet-stream' : 'text/event-stream');
+
+  // Resume. The client counts the child's bytes, so `from` is an offset into the
+  // log rather than into the framing or the decoded text — which is why it is
+  // offered on the raw shapes only: on SSE the client's count is escape-stripped
+  // text, a different length from what is on disk, and an offset in one unit
+  // applied to the other would silently skip real output.
+  //
+  // Echoed back so a client can tell a box that honoured it from one that never
+  // heard of it: an older wsh ignores the query entirely and replays from zero,
+  // which is correct but expensive, and the client needs to know which it got
+  // before deciding whether to skip locally.
+  const from = raw ? Math.max(0, Number(req.query.from ?? 0) || 0) : 0;
+  if (from > 0) res.setHeader('X-Abox-Stream-From', String(from));
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('X-Accel-Buffering', 'no');
 
@@ -3994,10 +4054,12 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
   // to race. While the job is live the size is unknown, but so is the answer to
   // "is it done", and a client seeing "still running" from /exit reconnects
   // anyway — so the ambiguity only exists where it does not matter.
-  if (raw && !session) {
+  if (raw && !framed && !session) {
     try {
       const size = fs.statSync(logPath).size;
-      if (fs.existsSync(exitPath)) res.setHeader('Content-Length', String(size));
+      // What is left to send, not what the log holds — a resumed stream is
+      // short by exactly the bytes the client already has.
+      if (fs.existsSync(exitPath)) res.setHeader('Content-Length', String(Math.max(0, size - from)));
     } catch { /* no log yet; the empty-body branch below handles it */ }
   }
   res.flushHeaders();
@@ -4019,13 +4081,15 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
     // file. Nothing else in this branch emits outside flush()/tryFinish().
     if (!res.destroyed) {
       if (!raw) res.write('data: [DONE]\n\n');
+      else if (framed) res.write(frameOf(FRAME_END));
       res.end();
     }
     return;
   }
 
   const MAX_READ_PER_TICK = 1 << 20; // 1 MiB cap protects against a job dumping gigabytes between ticks
-  let offset = 0;
+  let offset = from;
+  let lastWrite = Date.now();
   let timer: NodeJS.Timeout | null = null;
   // Carries any incomplete trailing UTF-8 codepoint from one tick to the next
   // so toString('utf8') doesn't replace split bytes with U+FFFD.
@@ -4050,7 +4114,7 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
     // whole decode/strip/encode path is skipped rather than made lossless.
     // Nothing is held back either — utf8Pending exists to keep a split
     // codepoint out of a decode that no longer happens.
-    if (raw) { res.write(buf); return true; }
+    if (raw) { res.write(framed ? frameOf(FRAME_DATA, buf) : buf); lastWrite = Date.now(); return true; }
     const pend = utf8Pending.length ? Buffer.concat([utf8Pending, buf]) : buf;
     // Two ways a chunk boundary can fall somewhere it must not: mid-codepoint,
     // where toString would substitute U+FFFD, and mid-escape-sequence, where
@@ -4076,9 +4140,11 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
     catch { return false; }
     flush(); // drain any bytes appended after the .exit file was written
     if (!res.destroyed && raw) {
-      // No exit frame and no [DONE]: end-of-body is the only terminator a raw
-      // stream can have without putting a byte into it that the child did not
-      // write. The client polls <sid>/exit, which it does on both paths.
+      // Plain raw has no terminator but end-of-body — any marker would be a byte
+      // the child did not write. Framed does: the envelope is ours, so an END
+      // frame says the box decided the stream was over, which is exactly the
+      // proof `data: [DONE]` gives the SSE path and plain raw has always lacked.
+      if (framed) res.write(frameOf(FRAME_END));
       res.end();
     } else if (!res.destroyed) {
       // Job ended; any bytes still in utf8Pending are genuinely truncated
@@ -4110,6 +4176,13 @@ const sessionStreamHandler = (req: express.Request, res: express.Response) => {
     }
     const grew = flush();
     if (!grew && tryFinish()) return;
+    // A quiet job still has to prove the path is alive, or an idle load balancer
+    // drops the connection and the client pays a reconnect. The tick is already
+    // running at 100ms, so this needs no timer of its own.
+    if (!grew && framed && Date.now() - lastWrite >= RAW_FRAMED_KEEPALIVE_MS) {
+      res.write(frameOf(FRAME_KEEPALIVE));
+      lastWrite = Date.now();
+    }
     let backlog = false;
     if (grew) {
       try { backlog = offset < fs.fstatSync(logFd).size; } catch {}
