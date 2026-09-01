@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,12 +25,25 @@ import (
 // the position as *received* (before the box's own deny filter removes
 // anything), and the box's entry count has to match what the client sent.
 
-// postNdjson sends a header line plus entries as gzipped NDJSON.
-func (s *server) postNdjson(t *testing.T, path string, header map[string]any, entries []map[string]any) (int, map[string]any) {
+// The header a manifest's codec travels under. Not Content-Encoding: that one
+// is the corner of HTTP every proxy between a CLI and a box believes it may act
+// on, so the codec is named privately and stays end to end. The box still reads
+// the standard header, and only reads it, for clients predating the rename —
+// see TestPushPlanV2StillReadsContentEncoding.
+const aboxCompression = "X-Abox-Compression"
+const aboxAcceptCompression = "X-Abox-Accept-Compression"
+
+// ndjsonBody encodes a header line plus entries, gzipped unless plain is set.
+func ndjsonBody(t *testing.T, header map[string]any, entries []map[string]any, plain bool) *bytes.Buffer {
 	t.Helper()
 	var raw bytes.Buffer
-	gz := gzip.NewWriter(&raw)
-	enc := json.NewEncoder(gz)
+	var w io.Writer = &raw
+	var gz *gzip.Writer
+	if !plain {
+		gz = gzip.NewWriter(&raw)
+		w = gz
+	}
+	enc := json.NewEncoder(w)
 	if err := enc.Encode(header); err != nil {
 		t.Fatalf("encode header: %v", err)
 	}
@@ -38,22 +52,50 @@ func (s *server) postNdjson(t *testing.T, path string, header map[string]any, en
 			t.Fatalf("encode entry: %v", err)
 		}
 	}
-	if err := gz.Close(); err != nil {
-		t.Fatalf("gzip close: %v", err)
+	if gz != nil {
+		if err := gz.Close(); err != nil {
+			t.Fatalf("gzip close: %v", err)
+		}
 	}
-	req, err := http.NewRequest(http.MethodPost, s.url(path), &raw)
+	return &raw
+}
+
+// postNdjsonWith sends a prepared body under the given request headers and
+// hands back the live response, for tests that care what came back and not only
+// what it decoded to.
+func (s *server) postNdjsonWith(t *testing.T, path string, body *bytes.Buffer, reqHeaders map[string]string) (*http.Response, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, s.url(path), body)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
-	req.Header.Set("Content-Encoding", "gzip")
-	resp, err := http.DefaultClient.Do(req)
+	for k, v := range reqHeaders {
+		req.Header.Set(k, v)
+	}
+	// No transparent decoding: what the box compressed it labelled itself, and
+	// a test that let net/http unwrap it could not tell the two apart.
+	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
 	}
 	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	return resp, raw
+}
+
+// postNdjson sends a header line plus entries as gzipped NDJSON, labelled the
+// way a current client labels it.
+func (s *server) postNdjson(t *testing.T, path string, header map[string]any, entries []map[string]any) (int, map[string]any) {
+	t.Helper()
+	resp, raw := s.postNdjsonWith(t, path, ndjsonBody(t, header, entries, false),
+		map[string]string{aboxCompression: "gzip"})
 	var out map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	_ = json.Unmarshal(raw, &out)
 	return resp.StatusCode, out
 }
 

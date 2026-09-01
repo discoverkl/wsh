@@ -4561,7 +4561,27 @@ function pushEntryRange(header: TarHeaders): { off: number; total: number } | nu
 // rather than assumed for a better reason than the types, though: a released
 // wsh bundles its own Node runtime, so what this file was compiled against says
 // nothing about what will actually be there.
-const zstdCapable = zlib as unknown as { createZstdDecompress?: () => NodeJS.ReadWriteStream };
+const zstdCapable = zlib as unknown as {
+  createZstdDecompress?: () => NodeJS.ReadWriteStream;
+  zstdCompress?: (buf: Buffer, cb: (err: Error | null, out: Buffer) => void) => void;
+};
+
+// How compression is named on the sync bodies, in both directions.
+//
+// Deliberately NOT Content-Encoding. A *request* body carrying that header is
+// the least-travelled corner of HTTP, and the proxies, load balancers and
+// gateways between a CLI and a box all feel entitled to decode it, re-encode it
+// or strip it — and cannot be talked out of it. Under a private name nothing in
+// the middle believes it has a job to do, and the codec stays ours end to end.
+// The same conclusion, for the same reason, as the migration tar, whose header
+// this is.
+//
+// The accept header travels the other way for the same reason: naming it
+// Accept-Encoding would invite a load balancer to compress the reply on our
+// behalf and label it Content-Encoding, which is the problem again with an
+// extra party in it.
+const ABOX_COMPRESSION_HEADER = 'x-abox-compression';
+const ABOX_ACCEPT_COMPRESSION_HEADER = 'x-abox-accept-compression';
 
 // Compressions this box will accept on an apply body, best first. Advertised in
 // the plan reply rather than negotiated by trial, because the alternative is
@@ -4572,16 +4592,65 @@ const PUSH_ACCEPT_ENCODING = [
   'gzip',
 ];
 
-/** Wrap a request body in the decompressor its Content-Encoding calls for. */
+// Compressions this box can produce for a reply. The same negotiation in the
+// opposite direction, and a separately probed list: a runtime can ship a
+// decoder without an encoder, and advertising one we do not have would cost a
+// plan rather than a header.
+const PUSH_REPLY_ENCODING = [
+  ...(typeof zstdCapable.zstdCompress === 'function' ? ['zstd'] : []),
+  'gzip',
+];
+
+/**
+ * Wrap a request body in the decompressor its codec calls for.
+ *
+ * X-Abox-Compression is what a current client sends. Content-Encoding is read
+ * as well and only read: a client predating the rename labels its manifest that
+ * way, and a box that stopped understanding it would fail those pushes on the
+ * first line. Nothing here ever emits it.
+ */
 function pushDecodeBody(req: express.Request): NodeJS.ReadableStream {
-  const encoding = String(req.headers['content-encoding'] ?? '').toLowerCase();
+  const named = req.headers[ABOX_COMPRESSION_HEADER] ?? req.headers['content-encoding'];
+  const encoding = String(named ?? '').toLowerCase();
   if (!encoding || encoding === 'identity') return req;
   let decoder: NodeJS.ReadWriteStream | null = null;
   if (encoding === 'gzip') decoder = zlib.createGunzip();
   else if (encoding === 'zstd' && zstdCapable.createZstdDecompress) decoder = zstdCapable.createZstdDecompress();
-  if (!decoder) throw new Error(`unsupported Content-Encoding: ${encoding}`);
+  if (!decoder) throw new Error(`unsupported compression: ${encoding}`);
   req.pipe(decoder);
   return decoder;
+}
+
+/**
+ * Answer with JSON, compressed when the caller offered a codec this box has.
+ *
+ * The plan replies are the one place this earns its keep. Push's answer is two
+ * bitmaps and stays small by construction, but a pull's `fetch` list has to
+ * name every file the client is missing — there is no manifest position to
+ * point at for a file the manifest never mentioned — so a first pull of a large
+ * box is tens of megabytes of JSON that compresses roughly tenfold.
+ *
+ * An encoder failure falls back to plain JSON rather than failing the request:
+ * the plan is already built and reserved, and it is far too expensive to throw
+ * away over a compressor.
+ */
+function pushSendJSON(req: express.Request, res: express.Response, body: unknown): void {
+  const offered = String(req.headers[ABOX_ACCEPT_COMPRESSION_HEADER] ?? '')
+    .toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+  const codec = PUSH_REPLY_ENCODING.find(c => offered.includes(c));
+  if (!codec) { res.json(body); return; }
+  // Not pretty-printed, unlike res.json under `json spaces`: this copy is read
+  // by a decompressor, and the indentation is pure payload.
+  const raw = Buffer.from(JSON.stringify(body), 'utf8');
+  const done = (err: Error | null, out: Buffer): void => {
+    if (err) { res.json(body); return; }
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader(ABOX_COMPRESSION_HEADER, codec);
+    res.setHeader('Content-Length', String(out.length));
+    res.end(out);
+  };
+  if (codec === 'zstd' && zstdCapable.zstdCompress) zstdCapable.zstdCompress(raw, done);
+  else zlib.gzip(raw, done);
 }
 // A plan outlives its own diff by long enough to upload everything it named.
 // The 5-minute floor covers a small push; past that the allowance scales with
@@ -5904,7 +5973,7 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
     // changes neither side, so there is no new agreement to remember.
     if (!dryRun) pushRegisterPlan(built, target, hdr.rel, deletes, deny, hdr.file, intent, trash);
     sent = true;
-    res.json({
+    pushSendJSON(req, res, {
       plan_id:       dryRun ? '' : built.planId,
       target,
       // Echoed so the client can prove the bitmaps line up with the manifest it
@@ -5949,7 +6018,15 @@ router.post('/api/push/plan2', async (req: express.Request, res: express.Respons
       // because the derived record needs its accumulator — but that hash is for
       // the record, not for an answer nobody asked for.
       locked: pushBoxLocked(),
+      // What an apply body may be compressed with. Two fields naming one list:
+      // `accept_encoding` is what a client predating the header rename reads
+      // and labels Content-Encoding, `accept_compression` is what a current one
+      // reads and labels X-Abox-Compression. A client that sees only the first
+      // must send its tar uncompressed — this box would understand the bytes,
+      // but the one in the middle is why the name changed, and a client cannot
+      // tell from here which box it reached.
       accept_encoding: PUSH_ACCEPT_ENCODING,
+      accept_compression: PUSH_ACCEPT_ENCODING,
       // This box folds ranged slices back into whole files. A client that sees
       // no such field must send each file in one request, because that is what
       // every box did before this and what an old one would do with a slice:
@@ -6485,7 +6562,7 @@ router.post('/api/pull/plan2', async (req: express.Request, res: express.Respons
       sentinel,
     });
     sent = true;
-    res.json({
+    pushSendJSON(req, res, {
       plan_id:        planId,
       target,
       manifest_count: built.manifestCount,
