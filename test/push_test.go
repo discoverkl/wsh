@@ -34,7 +34,7 @@ func (s *server) postTar(t *testing.T, path string, body io.Reader, sentinel str
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/x-tar")
+	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Abox-Push-Sentinel", sentinel)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

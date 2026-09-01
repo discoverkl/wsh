@@ -6663,7 +6663,12 @@ router.get('/api/pull/fetch', async (req: express.Request, res: express.Response
     return;
   }
 
-  res.setHeader('Content-Type', 'application/x-tar');
+  // octet-stream rather than a tar type: this body is compressed whenever the
+  // caller offered a codec, and the header that says so is ours, so a reader
+  // that trusted a tar type would be reading a frame. Naming a format the wire
+  // may not be carrying only invites something in the middle to act on it, and
+  // nothing on either side parses this anyway.
+  res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('X-Abox-Pull-Sentinel', plan.sentinel);
   res.setHeader('X-Abox-Pull-Total', String(plan.fetch.length));
 

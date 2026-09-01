@@ -60,7 +60,7 @@ func postEncodedTar(t *testing.T, srv *server, path string, tarBody *bytes.Buffe
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/x-tar")
+	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Abox-Push-Sentinel", sentinel)
 	if encoding != "" {
 		req.Header.Set(aboxCompression, encoding)
@@ -271,7 +271,7 @@ func TestPushApplyStillReadsContentEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/x-tar")
+	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Abox-Push-Sentinel", "sent")
 	req.Header.Set("Content-Encoding", "gzip")
 	resp, err := http.DefaultClient.Do(req)
