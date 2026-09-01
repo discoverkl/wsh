@@ -4564,6 +4564,7 @@ function pushEntryRange(header: TarHeaders): { off: number; total: number } | nu
 const zstdCapable = zlib as unknown as {
   createZstdDecompress?: () => NodeJS.ReadWriteStream;
   zstdCompress?: (buf: Buffer, cb: (err: Error | null, out: Buffer) => void) => void;
+  createZstdCompress?: () => NodeJS.ReadWriteStream;
 };
 
 // How compression is named on the sync bodies, in both directions.
@@ -4601,6 +4602,20 @@ const PUSH_REPLY_ENCODING = [
   'gzip',
 ];
 
+// The same list for a body that streams rather than one already in a buffer.
+// Probed on the streaming entry point, because a runtime can have one API and
+// not the other and the fetch cannot discover that halfway through a tar.
+const PUSH_STREAM_ENCODING = [
+  ...(typeof zstdCapable.createZstdCompress === 'function' ? ['zstd'] : []),
+  'gzip',
+];
+
+/** Codecs the caller said it can read, best-first order preserved by the caller. */
+function pushOfferedCodecs(req: express.Request): string[] {
+  return String(req.headers[ABOX_ACCEPT_COMPRESSION_HEADER] ?? '')
+    .toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+}
+
 /**
  * Wrap a request body in the decompressor its codec calls for.
  *
@@ -4635,8 +4650,7 @@ function pushDecodeBody(req: express.Request): NodeJS.ReadableStream {
  * away over a compressor.
  */
 function pushSendJSON(req: express.Request, res: express.Response, body: unknown): void {
-  const offered = String(req.headers[ABOX_ACCEPT_COMPRESSION_HEADER] ?? '')
-    .toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+  const offered = pushOfferedCodecs(req);
   const codec = PUSH_REPLY_ENCODING.find(c => offered.includes(c));
   if (!codec) { res.json(body); return; }
   // Not pretty-printed, unlike res.json under `json spaces`: this copy is read
@@ -4651,6 +4665,43 @@ function pushSendJSON(req: express.Request, res: express.Response, body: unknown
   };
   if (codec === 'zstd' && zstdCapable.zstdCompress) zstdCapable.zstdCompress(raw, done);
   else zlib.gzip(raw, done);
+}
+
+/**
+ * Wrap a streaming response in the encoder its caller offered, and return what
+ * to write the body into — the response itself when nothing was offered.
+ *
+ * The abort discipline is the whole reason this is a function. A fetch that
+ * fails mid-stream destroys the response so the tar truncates and the sentinel
+ * never arrives, which is how the client knows to throw its staging away. The
+ * encoder must NOT be flushed or closed on that path: a closed frame is a
+ * well-formed stream that merely happens to be short, and it would move the
+ * only evidence of a failed download from "this stream is broken" to "this
+ * stream is fine and one entry is missing". So there is no close here to
+ * forget — the success path ends the encoder by ending the tar into it, and
+ * every other path leaves it mid-frame on purpose. The migration tar keeps the
+ * same rule.
+ *
+ * The encoder's own error is swallowed: on the abort path it is a write to a
+ * destroyed socket, which is the outcome we asked for and not news. Left
+ * unhandled it would take the process down instead.
+ */
+function pushStreamCompressor(req: express.Request, res: express.Response): NodeJS.WritableStream {
+  const offered = pushOfferedCodecs(req);
+  const codec = PUSH_STREAM_ENCODING.find(c => offered.includes(c));
+  let enc: NodeJS.ReadWriteStream | null = null;
+  if (codec === 'zstd' && zstdCapable.createZstdCompress) enc = zstdCapable.createZstdCompress();
+  // Fastest rather than smallest: the point is to stay ahead of the link, and a
+  // box is mostly source with pockets of already-compressed binaries and .git
+  // packs that no level would help anyway.
+  else if (codec === 'gzip') enc = zlib.createGzip({ level: zlib.constants.Z_BEST_SPEED });
+  // Header last, and only once an encoder really exists: a body labelled with a
+  // codec it was not written in is worse than an uncompressed one.
+  if (!enc) return res;
+  res.setHeader(ABOX_COMPRESSION_HEADER, codec as string);
+  enc.on('error', () => {});
+  enc.pipe(res);
+  return enc;
 }
 // A plan outlives its own diff by long enough to upload everything it named.
 // The 5-minute floor covers a small push; past that the allowance scales with
@@ -6584,7 +6635,10 @@ router.post('/api/pull/plan2', async (req: express.Request, res: express.Respons
       preserved:       built.preserved.slice(0, PUSH_PRESERVED_SAMPLE),
       preserved_count: built.preserved.length,
       expires_at:      Math.floor(built.expiresAt / 1000),
-      accept_encoding: PUSH_ACCEPT_ENCODING,
+      // No codec advertisement here. It used to carry the apply-body list,
+      // which a pull never sends — and the one body it does receive, the fetch
+      // tar, negotiates from the accept header on that GET, so there is nothing
+      // for a plan to promise ahead of time.
     });
   } catch (err) {
     fail(400, `pull plan failed: ${errorMessage(err)}`);
@@ -6613,8 +6667,12 @@ router.get('/api/pull/fetch', async (req: express.Request, res: express.Response
   res.setHeader('X-Abox-Pull-Sentinel', plan.sentinel);
   res.setHeader('X-Abox-Pull-Total', String(plan.fetch.length));
 
+  // The largest body either direction of the sync wire carries, and the last
+  // one to be sent plain: a first pull of a whole box is its entire tree, and
+  // push's apply tar — the same bytes going the other way — has compressed
+  // since it was written.
   const pack = tarPack();
-  pack.pipe(res);
+  pack.pipe(pushStreamCompressor(req, res));
   try {
     for (let i = from; i < plan.fetch.length; i++) {
       const e = plan.fetch[i];

@@ -2,6 +2,7 @@ package wsh_test
 
 import (
 	"archive/tar"
+	"compress/gzip"
 	"io"
 	"net/http"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // pull is push's diff read the other way round, off the same walk: what push
@@ -35,14 +38,34 @@ func pullPlan(t *testing.T, s *server, rel, target string, entries []map[string]
 }
 
 // pullFetch downloads a plan and returns the tar entries by name, plus the
-// sentinel header.
+// sentinel header. Offers gzip, which is what a current client does, so every
+// test that reads a fetch reads it through the compressed path.
 func pullFetch(t *testing.T, s *server, planID string, from int) (map[string]string, string) {
+	t.Helper()
+	out, sentinel, _ := pullFetchAs(t, s, planID, from, "gzip")
+	return out, sentinel
+}
+
+// pullFetchAs downloads a plan offering the given codecs ("" offers none) and
+// also reports which one the box says it used, so a test can tell a compressed
+// answer from a plain one rather than only that the bytes came out right.
+func pullFetchAs(t *testing.T, s *server, planID string, from int, accept string) (map[string]string, string, string) {
 	t.Helper()
 	url := s.url("/api/pull/fetch?plan_id=" + planID)
 	if from > 0 {
 		url += "&from=" + itoa(from)
 	}
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if accept != "" {
+		req.Header.Set(aboxAcceptCompression, accept)
+	}
+	// No transparent decoding: the box labels what it compressed, and a test
+	// that let net/http unwrap it could not tell the two apart.
+	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("GET fetch: %v", err)
 	}
@@ -50,8 +73,32 @@ func pullFetch(t *testing.T, s *server, planID string, from int) (map[string]str
 	if resp.StatusCode != 200 {
 		t.Fatalf("fetch: status %d", resp.StatusCode)
 	}
+	if got := resp.Header.Get("Content-Encoding"); got != "" {
+		t.Errorf("fetch Content-Encoding = %q, want it absent", got)
+	}
+	codec := resp.Header.Get(aboxCompression)
+	var src io.Reader = resp.Body
+	switch codec {
+	case "":
+	case "gzip":
+		gz, gerr := gzip.NewReader(resp.Body)
+		if gerr != nil {
+			t.Fatalf("fetch did not gunzip: %v", gerr)
+		}
+		defer gz.Close()
+		src = gz
+	case "zstd":
+		zr, zerr := zstd.NewReader(resp.Body)
+		if zerr != nil {
+			t.Fatalf("fetch did not open as zstd: %v", zerr)
+		}
+		defer zr.Close()
+		src = zr
+	default:
+		t.Fatalf("box used an unknown codec %q", codec)
+	}
 	out := map[string]string{}
-	tr := tar.NewReader(resp.Body)
+	tr := tar.NewReader(src)
 	for {
 		hdr, terr := tr.Next()
 		if terr == io.EOF {
@@ -63,7 +110,7 @@ func pullFetch(t *testing.T, s *server, planID string, from int) (map[string]str
 		body, _ := io.ReadAll(tr)
 		out[hdr.Name] = string(body)
 	}
-	return out, resp.Header.Get("X-Abox-Pull-Sentinel")
+	return out, resp.Header.Get("X-Abox-Pull-Sentinel"), codec
 }
 
 func itoa(n int) string {
@@ -357,5 +404,93 @@ func TestSyncCheckReportsTargetType(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("target_type for %s = %q, want %q", tc.rel, got, tc.want)
 		}
+	}
+}
+
+// The fetch tar is the largest body the sync wire carries in either direction,
+// and the last one that went plain. It compresses under the same private header
+// as everything else, chosen from what the caller offered.
+func TestPullFetchCompressesWhenOffered(t *testing.T) {
+	for _, codec := range []string{"gzip", "zstd"} {
+		t.Run(codec, func(t *testing.T) {
+			srv, home := setupPush(t)
+			rel := "workspace/comp"
+			dir := filepath.Join(home, rel)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// Compressible on purpose: a tar of unique bytes proves the codec
+			// ran, but not that it was worth running.
+			body := strings.Repeat("alpha beta gamma ", 500)
+			if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			plan := pullPlan(t, srv, rel, dir, nil)
+			planID, _ := plan["plan_id"].(string)
+
+			got, sentinel, used := pullFetchAs(t, srv, planID, 0, codec)
+			if used == "" && codec == "zstd" {
+				t.Skip("this runtime has no zstd encoder; the box correctly offered nothing")
+			}
+			if used != codec {
+				t.Fatalf("box used %q, want %q", used, codec)
+			}
+			if got["a.txt"] != body {
+				t.Errorf("file did not survive the codec: %d bytes, want %d", len(got["a.txt"]), len(body))
+			}
+			// The sentinel rides inside the compressed stream and still has to
+			// match the header, which is what proves the download completed.
+			if got[".abox-pull-sentinel"] != sentinel {
+				t.Errorf("sentinel entry %q != header %q", got[".abox-pull-sentinel"], sentinel)
+			}
+		})
+	}
+}
+
+// A caller that offers nothing gets a plain tar. Every box before this one did,
+// and a client that cannot decode must never be handed something it has to.
+func TestPullFetchPlainWhenNotOffered(t *testing.T) {
+	srv, home := setupPush(t)
+	rel := "workspace/plain"
+	dir := filepath.Join(home, rel)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("alpha"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan := pullPlan(t, srv, rel, dir, nil)
+	planID, _ := plan["plan_id"].(string)
+
+	got, _, used := pullFetchAs(t, srv, planID, 0, "")
+	if used != "" {
+		t.Errorf("box compressed with %q when nothing was offered", used)
+	}
+	if got["a.txt"] != "alpha" {
+		t.Errorf("plain fetch carried %q", got["a.txt"])
+	}
+}
+
+// A codec the box cannot produce is not a reason to fail the download — it is a
+// reason to send the tar as every box did before.
+func TestPullFetchIgnoresUnknownCodec(t *testing.T) {
+	srv, home := setupPush(t)
+	rel := "workspace/unknown"
+	dir := filepath.Join(home, rel)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("alpha"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan := pullPlan(t, srv, rel, dir, nil)
+	planID, _ := plan["plan_id"].(string)
+
+	got, _, used := pullFetchAs(t, srv, planID, 0, "br")
+	if used != "" {
+		t.Errorf("box answered %q to an offer of br alone", used)
+	}
+	if got["a.txt"] != "alpha" {
+		t.Errorf("fetch carried %q", got["a.txt"])
 	}
 }
